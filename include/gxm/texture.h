@@ -5,16 +5,61 @@
 
 #include <psp2/gxm.h>
 
+#include "gxm/util.h"
+
 /*
- * Decode a GXM texture (linear or Morton-swizzled) into tightly packed RGBA8.
- * `dest` must hold width * height * 4 bytes.
+ * Description of one mip level inside a GXM texture.
  *
- * Returns 0 on success and -1 for formats that are not decoded yet.
+ * `width`/`height` are the logical dimensions of the level. `layout_width` is
+ * the number of texels stored per row (linear and tiled layouts pad rows), and
+ * `offset` is the byte offset from the start of the texture data (including the
+ * cube face, if any).
+ */
+typedef struct {
+    uint32_t width;
+    uint32_t height;
+    uint32_t layout_width;
+    uint32_t layout_height;
+    uint32_t offset;
+    uint32_t size;
+} GxmTextureLevel;
+
+/* Bits per texel for a GXM base format (0 when the format is unknown). */
+uint32_t gxm_texture_base_bits(SceGxmTextureFormat format);
+
+/* Bytes per texel, rounded up (P4 returns 1). */
+uint32_t gxm_texture_format_bytes(SceGxmTextureFormat format);
+
+/*
+ * Number of mip levels actually stored. The 0xF "no mip chain" encoding maps to
+ * one level, matching Vita3K's true_mip_count().
+ */
+uint32_t gxm_texture_true_mip_count(const SceGxmTextureInner *texture);
+
+/*
+ * Computes the layout of `level` for the given cube `face` (0 for 2D
+ * textures). Returns 0 on success, -1 for an out-of-range face/level.
+ */
+int gxm_texture_get_level(const SceGxmTextureInner *texture, uint32_t face, uint32_t level,
+                          GxmTextureLevel *out);
+
+/*
+ * Decodes one mip level (and cube face) into tightly packed RGBA8. `dest` must
+ * hold level.width * level.height * 4 bytes. Paletted formats read the palette
+ * from texture->palette_addr. Returns 0 on success, -1 for unsupported formats.
+ */
+int gxm_texture_decode_level_rgba8(uint8_t *dest, const SceGxmTextureInner *texture, uint32_t face,
+                                   uint32_t level);
+
+/* Same as above, but with an explicit base data pointer. */
+int gxm_texture_decode_level_at(uint8_t *dest, const SceGxmTextureInner *texture, const void *data,
+                                uint32_t face, uint32_t level);
+
+/*
+ * Compatibility entry point: decode a single linear/swizzled level from an
+ * explicit pointer. `dest` must hold width * height * 4 bytes.
  */
 int gxm_texture_decode_rgba8(uint8_t *dest, const void *src, uint32_t width, uint32_t height,
                              SceGxmTextureFormat format, SceGxmTextureType type);
-
-/* Bytes per pixel for a GXM base format (0 if unknown). */
-uint32_t gxm_texture_format_bytes(SceGxmTextureFormat format);
 
 #endif

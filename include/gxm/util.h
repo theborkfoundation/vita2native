@@ -191,12 +191,12 @@ static inline uint32_t gxm_parameter_type_size(SceGxmParameterType type)
 
 static inline void *gxm_texture_get_data(const SceGxmTextureInner *texture)
 {
-    return (void *)(texture->data_addr << 2);
+    return (void *)(uintptr_t)((uint32_t)texture->data_addr << 2);
 }
 
 static inline uint32_t gxm_texture_get_type(const SceGxmTextureInner *texture)
 {
-    return texture->type << 29;
+    return (uint32_t)texture->type << 29;
 }
 
 static inline size_t gxm_texture_get_width(const SceGxmTextureInner *texture)
@@ -217,8 +217,9 @@ static inline size_t gxm_texture_get_height(const SceGxmTextureInner *texture)
 
 static inline SceGxmTextureFormat gxm_texture_get_format(const SceGxmTextureInner *texture)
 {
-    return (SceGxmTextureFormat)(texture->base_format << 24 | texture->format0 << 31 |
-                                 texture->swizzle_format << 12);
+    return (SceGxmTextureFormat)(((uint32_t)texture->base_format << 24) |
+                                 ((uint32_t)texture->format0 << 31) |
+                                 ((uint32_t)texture->swizzle_format << 12));
 }
 
 static inline SceGxmTextureBaseFormat gxm_texture_get_base_format(SceGxmTextureFormat src)
@@ -228,8 +229,8 @@ static inline SceGxmTextureBaseFormat gxm_texture_get_base_format(SceGxmTextureF
 
 static inline size_t gxm_texture_get_stride_in_bytes(const SceGxmTextureInner *texture)
 {
-    return ((texture->mip_filter | (texture->min_filter << 1) | (texture->mip_count << 3) |
-             (texture->lod_bias << 7)) +
+    return (((uint32_t)texture->mip_filter | ((uint32_t)texture->min_filter << 1) |
+             ((uint32_t)texture->mip_count << 3) | ((uint32_t)texture->lod_bias << 7)) +
             1) *
            4;
 }
