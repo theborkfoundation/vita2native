@@ -53,6 +53,7 @@ add_executable(vita2native
     source/host/host_jit.c
     source/host/host_thread.c
     external/Vita3K/external/miniz/miniz.c
+    source/gxm_texture.c
     source/load.c
     source/log.c
     source/main.c
@@ -182,6 +183,14 @@ if(BUILD_TESTING)
     add_test(NAME shader_smoke_texture
         COMMAND shader_smoke
             ${CMAKE_SOURCE_DIR}/external/Vita3K/tools/native-tool/src/shaders/texture_f.gxp)
+
+    add_executable(texture_smoke
+        tests/texture_smoke.c
+        source/gxm_texture.c
+    )
+    target_include_directories(texture_smoke PRIVATE include external/vita-headers/include)
+    target_compile_definitions(texture_smoke PRIVATE _GNU_SOURCE=1)
+    add_test(NAME texture_smoke COMMAND texture_smoke)
 endif()
 
 install(TARGETS vita2native RUNTIME DESTINATION bin)

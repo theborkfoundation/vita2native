@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "gfx.h"
+#include "gxm/texture.h"
 #include "gxm/util.h"
 #include "host_gfx_gl.h"
 #include "log.h"
@@ -377,8 +378,22 @@ static void gxm_upload_fragment_textures(SceGxmContext *context)
          * paletted formats need the Vita tiling decoder; until that lands they
          * are uploaded as if they were linear.
          */
-        g_gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)width, (GLsizei)height, 0, GL_RGBA,
-                           GL_UNSIGNED_BYTE, data);
+        {
+            uint8_t *rgba = malloc((size_t)width * height * 4);
+            if (rgba) {
+                if (gxm_texture_decode_rgba8(rgba, data, width, height,
+                                             (SceGxmTextureFormat)fmt,
+                                             (SceGxmTextureType)gxm_texture_get_type(texture)) == 0) {
+                    g_gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)width,
+                                       (GLsizei)height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+                } else {
+                    /* Unknown format: upload the bytes as-is for now. */
+                    g_gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)width,
+                                       (GLsizei)height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+                }
+                free(rgba);
+            }
+        }
         g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
                               texture->min_filter == SCE_GXM_TEXTURE_FILTER_LINEAR ? GL_LINEAR
                                                                                     : GL_NEAREST);
