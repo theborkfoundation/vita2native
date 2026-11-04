@@ -58,11 +58,13 @@ add_executable(vita2native
     source/main.c
     source/module.c
     source/netlog.c
+    source/spirv_cross_glsl_es.cpp
     source/util.c
+    source/vita3k_shader_recompiler_iface_c.cpp
     source/vpk.c
     ${VITA2NATIVE_CTRL_SOURCE}
     ${VITA2NATIVE_DISPLAY_SOURCE}
-    source/modules/SceGxm_linux.c
+    source/modules/SceGxm.c
     source/modules/SceKernelThreadMgr.c
     source/modules/SceLibKernel.c
     source/modules/SceSysmem.c
@@ -71,6 +73,7 @@ add_executable(vita2native
 
 target_include_directories(vita2native PRIVATE
     include
+    source/host
     external/khronos/include
     external/vita-headers/include
     ${SDL2_INCLUDE_DIRS}
@@ -112,6 +115,11 @@ if(SDL2_LIBRARY_DIRS)
 endif()
 
 target_link_libraries(vita2native PRIVATE
+    shader
+    glslang
+    spirv-cross-glsl
+    spirv-cross-core
+    fmt-header-only
     miniz
     mlib
     ${SDL2_LIBRARIES}

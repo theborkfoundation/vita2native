@@ -3,62 +3,17 @@
  *
  * EGL and GLESv2 are loaded with dlopen() so vita2native links and runs on
  * systems without graphics libraries (the null backend takes over). When the
- * libraries are present, we create an offscreen GLES 3.x context. A windowed
- * surface will be added on top of the same context once the GXM path needs
- * presentation.
+ * libraries are present, an offscreen GLES 3.x context is created at the Vita
+ * resolution. SceGxm renders into this context and reads frames back into
+ * guest memory.
  */
-#define EGL_NO_PLATFORM_SPECIFIC_TYPES 1
-
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-#include <GLES3/gl3.h>
-
+#include "host_gfx_gl.h"
 #include "host_gfx_internal.h"
-
-typedef struct {
-    void *egl_lib;
-    void *gles_lib;
-
-    EGLDisplay display;
-    EGLContext context;
-    EGLSurface surface;
-    int width;
-    int height;
-
-    PFNEGLGETDISPLAYPROC eglGetDisplay;
-    PFNEGLGETPLATFORMDISPLAYPROC eglGetPlatformDisplay;
-    PFNEGLGETPLATFORMDISPLAYEXTPROC eglGetPlatformDisplayEXT;
-    PFNEGLGETPROCADDRESSPROC eglGetProcAddress;
-    PFNEGLINITIALIZEPROC eglInitialize;
-    PFNEGLTERMINATEPROC eglTerminate;
-    PFNEGLGETERRORPROC eglGetError;
-    PFNEGLBINDAPIPROC eglBindAPI;
-    PFNEGLCHOOSECONFIGPROC eglChooseConfig;
-    PFNEGLCREATECONTEXTPROC eglCreateContext;
-    PFNEGLDESTROYCONTEXTPROC eglDestroyContext;
-    PFNEGLCREATEPBUFFERSURFACEPROC eglCreatePbufferSurface;
-    PFNEGLDESTROYSURFACEPROC eglDestroySurface;
-    PFNEGLMAKECURRENTPROC eglMakeCurrent;
-    PFNEGLRELEASETHREADPROC eglReleaseThread;
-
-    PFNGLGETSTRINGPROC glGetString;
-    PFNGLGETINTEGERVPROC glGetIntegerv;
-    PFNGLGETERRORPROC glGetError;
-    PFNGLCLEARCOLORPROC glClearColor;
-    PFNGLCLEARPROC glClear;
-    PFNGLREADPIXELSPROC glReadPixels;
-    PFNGLFINISHPROC glFinish;
-    PFNGLVIEWPORTPROC glViewport;
-    PFNGLSCISSORPROC glScissor;
-    PFNGLENABLEPROC glEnable;
-    PFNGLDISABLEPROC glDisable;
-    PFNGLPIXELSTOREIPROC glPixelStorei;
-} HostGles;
 
 static void *open_first(const char *const *names)
 {
@@ -80,7 +35,7 @@ static void *open_first(const char *const *names)
         }                                                                                          \
     } while (0)
 
-#define LOAD_GL(g, name)                                                                           \
+#define LOAD_GL(g, type, name)                                                                     \
     do {                                                                                           \
         *(void **)(&(g)->name) = dlsym((g)->gles_lib, #name);                                      \
         if (!(g)->name) {                                                                          \
@@ -95,6 +50,11 @@ static void gles_destroy_impl(HostGles *g)
         return;
 
     if (g->display != EGL_NO_DISPLAY) {
+        if (g->glDeleteFramebuffers)
+            g->glDeleteFramebuffers(1, &g->framebuffer);
+        if (g->glDeleteTextures)
+            g->glDeleteTextures(1, &g->color_texture);
+
         g->eglMakeCurrent(g->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         if (g->surface != EGL_NO_SURFACE)
             g->eglDestroySurface(g->display, g->surface);
@@ -246,18 +206,9 @@ HostGpuDevice host_gfx_gl_create(const HostGpuConfig *config)
     if (!g->gles_lib)
         goto fail;
 
-    LOAD_GL(g, glGetString);
-    LOAD_GL(g, glGetIntegerv);
-    LOAD_GL(g, glGetError);
-    LOAD_GL(g, glClearColor);
-    LOAD_GL(g, glClear);
-    LOAD_GL(g, glReadPixels);
-    LOAD_GL(g, glFinish);
-    LOAD_GL(g, glViewport);
-    LOAD_GL(g, glScissor);
-    LOAD_GL(g, glEnable);
-    LOAD_GL(g, glDisable);
-    LOAD_GL(g, glPixelStorei);
+#define HOST_GL_LOAD(type, name) LOAD_GL(g, type, name);
+    HOST_GL_FUNCTIONS(HOST_GL_LOAD)
+#undef HOST_GL_LOAD
 
     version = (const char *)g->glGetString(GL_VERSION);
     renderer = (const char *)g->glGetString(GL_RENDERER);
@@ -270,9 +221,25 @@ HostGpuDevice host_gfx_gl_create(const HostGpuConfig *config)
             goto fail;
         }
 
+        /* Offscreen color target used by the GXM backend. */
+        g->glGenTextures(1, &g->color_texture);
+        g->glBindTexture(GL_TEXTURE_2D, g->color_texture);
+        g->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, g->width, g->height, 0, GL_RGBA,
+                        GL_UNSIGNED_BYTE, NULL);
+        g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        g->glBindTexture(GL_TEXTURE_2D, 0);
+
+        g->glGenFramebuffers(1, &g->framebuffer);
+        g->glBindFramebuffer(GL_FRAMEBUFFER, g->framebuffer);
+        g->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                                  g->color_texture, 0);
+        if (g->glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            fprintf(stderr, "vita2native: incomplete GLES framebuffer\n");
+            goto fail;
+        }
+
         g->glViewport(0, 0, g->width, g->height);
-        g->glDisable(GL_SCISSOR_TEST);
-        g->glPixelStorei(GL_PACK_ALIGNMENT, 4);
 
         device = calloc(1, sizeof(*device));
         if (!device)
@@ -291,16 +258,40 @@ fail:
     return NULL;
 }
 
+HostGles *host_gpu_get_gles(HostGpuDevice device)
+{
+    if (!device || device->backend != HOST_GPU_BACKEND_GLES)
+        return NULL;
+
+    return device->impl;
+}
+
 void host_gfx_gl_destroy(HostGpuDevice device)
 {
     gles_destroy_impl(device->impl);
     free(device);
 }
 
+void host_gfx_gl_begin_frame(HostGpuDevice device)
+{
+    HostGles *gl = device->impl;
+
+    gl->glBindFramebuffer(GL_FRAMEBUFFER, gl->framebuffer);
+    gl->glViewport(0, 0, gl->width, gl->height);
+}
+
+void host_gfx_gl_end_frame(HostGpuDevice device)
+{
+    HostGles *gl = device->impl;
+
+    gl->glFinish();
+}
+
 void host_gfx_gl_clear(HostGpuDevice device, float r, float g, float b, float a)
 {
     HostGles *gl = device->impl;
 
+    gl->glBindFramebuffer(GL_FRAMEBUFFER, gl->framebuffer);
     gl->glClearColor(r, g, b, a);
     gl->glClear(GL_COLOR_BUFFER_BIT);
     gl->glFinish();
@@ -320,6 +311,8 @@ int host_gfx_gl_read_pixels(HostGpuDevice device, int x, int y, int width, int h
     needed = (size_t)width * (size_t)height * 4;
     if (size < needed)
         return -1;
+
+    gl->glBindFramebuffer(GL_FRAMEBUFFER, gl->framebuffer);
 
     while (gl->glGetError() != GL_NO_ERROR) {
         /* Drain stale errors so the readback result is meaningful. */

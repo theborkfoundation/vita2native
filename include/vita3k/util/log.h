@@ -1,6 +1,10 @@
 #ifndef UTIL_LOG_H
 #define UTIL_LOG_H
 
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
 #include <fmt/core.h>
 #include <fmt/format.h>
 #include <gxm/types.h>

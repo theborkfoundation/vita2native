@@ -51,6 +51,24 @@ const char *host_gpu_description(HostGpuDevice device)
     return device ? device->description : "unavailable";
 }
 
+void host_gpu_begin_frame(HostGpuDevice device)
+{
+    if (!device)
+        return;
+
+    if (device->backend == HOST_GPU_BACKEND_GLES)
+        host_gfx_gl_begin_frame(device);
+}
+
+void host_gpu_end_frame(HostGpuDevice device)
+{
+    if (!device)
+        return;
+
+    if (device->backend == HOST_GPU_BACKEND_GLES)
+        host_gfx_gl_end_frame(device);
+}
+
 void host_gpu_clear(HostGpuDevice device, float r, float g, float b, float a)
 {
     if (!device)

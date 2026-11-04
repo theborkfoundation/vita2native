@@ -33,6 +33,11 @@ HostGpuBackend host_gpu_backend(HostGpuDevice device);
 /* Human-readable backend/renderer/version, e.g. "GLES 3.2 (Mesa...)". */
 const char *host_gpu_description(HostGpuDevice device);
 
+/* Bind the offscreen color target and make it current for drawing. */
+void host_gpu_begin_frame(HostGpuDevice device);
+/* Finish the frame. Presentation is added together with the GXM backend. */
+void host_gpu_end_frame(HostGpuDevice device);
+
 void host_gpu_clear(HostGpuDevice device, float r, float g, float b, float a);
 
 /* Read `width * height` RGBA8 pixels starting at (x, y). Returns 0 on success. */

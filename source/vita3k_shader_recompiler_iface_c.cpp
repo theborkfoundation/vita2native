@@ -1,10 +1,20 @@
 #include <cstring>
 #include <shader/spirv_recompiler.h>
+#include <shader/usse_program_analyzer.h>
 #include <shader/usse_translator_types.h>
 
 #include "vita3k_shader_recompiler_iface_c.h"
 
 extern "C" {
+
+int vita3k_gxm_get_attribute_location(const SceGxmProgram *program, uint16_t reg_index)
+{
+    shader::usse::AttributeInformationMap locations;
+    shader::usse::get_attribute_informations(*program, locations);
+    const auto it = locations.find(reg_index);
+    return it == locations.end() ? -1 : static_cast<int>(it->second.location);
+}
+
 
 static shader::GeneratedShader
 convert_gxp_internal(const SceGxmProgram *program, const char *shader_name,
