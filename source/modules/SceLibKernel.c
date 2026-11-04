@@ -116,9 +116,7 @@ EXPORT(SceLibKernel, 0xDA6EC8EF, int, sceKernelCreateLwMutex, SceKernelLwMutexWo
 EXPORT(SceLibKernel, 0x244E76D2, int, sceKernelDeleteLwMutex, SceKernelLwMutexWork *pWork)
 {
     mutexUnlock((void *)pWork);
-#if defined(VITA2NATIVE_LINUX)
     mutexDestroy((void *)pWork);
-#endif
     return 0;
 }
 
@@ -171,16 +169,9 @@ EXPORT(SceLibKernel, 0x6C60AC61, SceUID, sceIoOpen, const char *file, int flags,
     char resolved[PATH_MAX];
     FILE *fp;
 
-#if defined(VITA2NATIVE_LINUX)
     if (host_fs_resolve_path(file, resolved, sizeof(resolved)) < 0)
         return SCE_ERROR_ERRNO_ENODEV;
     host_file = resolved;
-#else
-    const char *c = strchr(file, ':');
-    if (c)
-        file = c + 1;
-    host_file = file;
-#endif
 
     if (*host_file == '\0')
         return SCE_ERROR_ERRNO_ENODEV;
@@ -278,16 +269,9 @@ EXPORT(SceLibKernel, 0xA9283DD0, SceUID, sceIoDopen, const char *dirname)
     char resolved[PATH_MAX];
     DIR *dir;
 
-#if defined(VITA2NATIVE_LINUX)
     if (host_fs_resolve_path(dirname, resolved, sizeof(resolved)) < 0)
         return SCE_ERROR_ERRNO_ENODEV;
     host_dirname = resolved;
-#else
-    const char *c = strchr(dirname, ':');
-    if (c)
-        dirname = c + 1;
-    host_dirname = dirname;
-#endif
 
     dir = opendir(host_dirname);
     if (!dir)
@@ -380,17 +364,9 @@ static void stat_to_sce_iostat(const struct stat *sb, SceIoStat *st)
  */
 static const char *host_path_from_vita(const char *vita_path, char *buffer, size_t size)
 {
-#if defined(VITA2NATIVE_LINUX)
     if (host_fs_resolve_path(vita_path, buffer, size) < 0)
         return NULL;
     return buffer;
-#else
-    const char *colon;
-    (void)buffer;
-    (void)size;
-    colon = strchr(vita_path, ':');
-    return colon ? colon + 1 : vita_path;
-#endif
 }
 
 EXPORT(SceLibKernel, 0x9C8B6624, int, sceIoDread, SceUID fd, SceIoDirent *dirent)

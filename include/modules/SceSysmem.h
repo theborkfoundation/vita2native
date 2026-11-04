@@ -17,8 +17,4 @@ int SceSysmem_init(HostGpuDevice device);
 SceUID SceSysmem_get_next_uid(void);
 VitaMemBlockInfo *SceSysmem_get_vita_memblock_info_for_addr(const void *addr);
 
-#if !defined(VITA2NATIVE_LINUX)
-DkMemBlock SceSysmem_get_dk_memblock_for_addr(const void *addr);
-#endif
-
 #endif

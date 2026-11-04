@@ -255,8 +255,8 @@ void condvarWait(CondVar *condvar, Mutex *mutex)
         return;
 
     /*
-     * The libnx call sites in this project invoke condvarWait() without
-     * holding the mutex. Keep that contract on the host: lock, wait, unlock.
+     * Modules call condvarWait() without holding the mutex. Keep that contract
+     * on the host: lock, wait, unlock.
      */
     pthread_mutex_lock(&m->mutex);
     pthread_cond_wait(&cond->cond, &m->mutex);
@@ -725,7 +725,7 @@ void *threadTlsGet(int slot)
     return pthread_getspecific(g_tls_keys[slot - 1]);
 }
 
-void svcSleepThread(int64_t nanoseconds)
+void host_sleep_ns(int64_t nanoseconds)
 {
     struct timespec request;
     struct timespec remaining;
@@ -749,7 +749,7 @@ uint64_t host_monotonic_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
-void svcOutputDebugString(const char *str, size_t size)
+void host_debug_string(const char *str, size_t size)
 {
     if (!str || size == 0)
         return;

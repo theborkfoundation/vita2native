@@ -20,8 +20,8 @@
 #define SCE_KERNEL_THREAD_STACK_SIZE_DEFAULT_USER_MAIN (256 * 1024)
 #define SCE_KERNEL_TLS_SIZE                            0x800
 
-#define HOS_HIGHEST_PRIORITY 28
-#define HOS_LOWEST_PRIORITY  59
+#define HOST_HIGHEST_PRIORITY 28
+#define HOST_LOWEST_PRIORITY  59
 
 static s32 g_vita_thread_info_tls_slot_id;
 static SceUID g_main_thread_uid;
@@ -30,7 +30,7 @@ DICT_DEF2(vita_thread_info_dict, SceUID, M_DEFAULT_OPLIST, VitaThreadInfo *, M_P
 static vita_thread_info_dict_t g_vita_thread_infos;
 static RwLock g_vita_thread_infos_lock;
 
-static inline int vita_priority_to_hos_priority(int priority)
+static inline int vita_priority_to_host_priority(int priority)
 {
     if ((priority & SCE_KERNEL_DEFAULT_PRIORITY) == SCE_KERNEL_DEFAULT_PRIORITY)
         priority = SCE_KERNEL_DEFAULT_PRIORITY_GAME_APP + (priority & ~SCE_KERNEL_DEFAULT_PRIORITY);
@@ -39,9 +39,9 @@ static inline int vita_priority_to_hos_priority(int priority)
         (priority > SCE_KERNEL_LOWEST_PRIORITY_USER))
         return SCE_KERNEL_ERROR_ILLEGAL_PRIORITY;
 
-    return HOS_HIGHEST_PRIORITY +
+    return HOST_HIGHEST_PRIORITY +
            ((priority - SCE_KERNEL_HIGHEST_PRIORITY_USER) *
-            (HOS_LOWEST_PRIORITY - HOS_HIGHEST_PRIORITY)) /
+            (HOST_LOWEST_PRIORITY - HOST_HIGHEST_PRIORITY)) /
                (SCE_KERNEL_LOWEST_PRIORITY_USER - SCE_KERNEL_HIGHEST_PRIORITY_USER);
 }
 
@@ -83,7 +83,7 @@ static SceUID create_thread(const char *name, SceKernelThreadEntry entry, int in
 {
     VitaThreadInfo *ti;
     Result res;
-    int priority = vita_priority_to_hos_priority(initPriority);
+    int priority = vita_priority_to_host_priority(initPriority);
 
     if (priority < 0)
         return priority;
@@ -260,7 +260,7 @@ int SceKernelThreadMgr_main_entry(SceKernelThreadEntry entry, int args, void *ar
 
 EXPORT(SceThreadmgr, 0x4B675D05, int, sceKernelDelayThread, SceUInt delay)
 {
-    svcSleepThread((s64)delay * 1000);
+    host_sleep_ns((s64)delay * 1000);
     return 0;
 }
 

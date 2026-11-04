@@ -31,7 +31,7 @@ EXPORT(SceDisplayUser, 0x42AE6BBC, int, sceDisplayGetFrameBuf, SceDisplayFrameBu
 
 EXPORT(SceDisplay, 0x5795E898, int, sceDisplayWaitVblankStart, void)
 {
-    svcSleepThread(16666667ull);
+    host_sleep_ns(16666667ull);
     return 0;
 }
 

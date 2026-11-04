@@ -14,7 +14,7 @@ extern "C" {
 #endif
 
 typedef enum {
-    LOG_DEVICE_SVC    = BIT(0),
+    LOG_DEVICE_STDERR = BIT(0),
     LOG_DEVICE_NETLOG = BIT(1),
     LOG_DEVICE_FILE   = BIT(2),
 } log_device_t;

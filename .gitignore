@@ -51,13 +51,10 @@ Module.symvers
 Mkfile.old
 dkms.conf
 
-# Switch
+# Build outputs
 build/
 build_debug/
 build_release/
-*.npdm
-*.nso
-*.nsp
 
 # Other
 *.txt

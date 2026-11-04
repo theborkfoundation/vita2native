@@ -10,11 +10,7 @@
 static Mutex g_log_mutex;
 static uint32_t g_device_mask;
 
-#if defined(VITA2NATIVE_LINUX)
-const char log_file_path[] = VITA2HOS_ROOT_PATH "/log.txt";
-#else
-const char log_file_path[] = "sdmc:/vita2hos/log.txt";
-#endif
+const char log_file_path[] = VITA2NATIVE_ROOT_PATH "/log.txt";
 
 void file_log(const char *str)
 {
@@ -42,9 +38,9 @@ void log_print(const char *str)
 
     mutexLock(&g_log_mutex);
 
-    if (g_device_mask & LOG_DEVICE_SVC) {
-        svcOutputDebugString(str, len);
-        svcOutputDebugString("\n", 1);
+    if (g_device_mask & LOG_DEVICE_STDERR) {
+        host_debug_string(str, len);
+        host_debug_string("\n", 1);
     }
 
     if (g_device_mask & LOG_DEVICE_NETLOG) {

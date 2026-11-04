@@ -5,9 +5,6 @@
 #include <stdlib.h>
 
 #include "modules/SceSysmem.h"
-#if !defined(VITA2NATIVE_LINUX)
-#include "deko_utils.h"
-#endif
 #include "gfx.h"
 #include "host.h"
 #include "log.h"
@@ -15,7 +12,6 @@
 #include "util.h"
 
 static _Atomic SceUID g_last_uid = 1;
-static HostGpuDevice g_dk_device;
 
 DICT_DEF2(vita_memblock_info_dict, SceUID, M_DEFAULT_OPLIST, VitaMemBlockInfo *, M_POD_OPLIST)
 static vita_memblock_info_dict_t g_vita_memblock_infos;
@@ -38,9 +34,6 @@ EXPORT(SceSysmem, 0xB9D5EBDE, SceUID, sceKernelAllocMemBlock, const char *name,
     VitaMemBlockInfo *block;
     uint32_t alignment;
     void *base;
-#if !defined(VITA2NATIVE_LINUX)
-    uint32_t memblock_flags;
-#endif
 
     LOG("sceKernelAllocMemBlock: name: %s, size: 0x%x", name, size);
 
@@ -53,12 +46,8 @@ EXPORT(SceSysmem, 0xB9D5EBDE, SceUID, sceKernelAllocMemBlock, const char *name,
     else
         alignment = 4 * 1024;
 
-#if defined(VITA2NATIVE_LINUX)
     if (posix_memalign(&base, alignment, ALIGN(size, alignment)) != 0)
         base = NULL;
-#else
-    base = aligned_alloc(alignment, ALIGN(size, alignment));
-#endif
     if (!base) {
         free(block);
         return SCE_KERNEL_ERROR_NO_MEMORY;
@@ -69,7 +58,6 @@ EXPORT(SceSysmem, 0xB9D5EBDE, SceUID, sceKernelAllocMemBlock, const char *name,
     block->base = base;
     block->size = size;
 
-#if defined(VITA2NATIVE_LINUX)
     (void)type;
     block->gpu_memblock = host_gpu_memblock_create(block->base, block->size);
     if (!block->gpu_memblock) {
@@ -77,29 +65,6 @@ EXPORT(SceSysmem, 0xB9D5EBDE, SceUID, sceKernelAllocMemBlock, const char *name,
         free(block);
         return SCE_KERNEL_ERROR_NO_MEMORY;
     }
-#else
-    switch (type) {
-    case SCE_KERNEL_MEMBLOCK_TYPE_USER_RW:
-        memblock_flags = DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuCached;
-        break;
-    case SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE:
-    case SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW:
-    case SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW:
-    case SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW:
-    default:
-        memblock_flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
-        break;
-    }
-
-    /* We also map all the allocated memory blocks to the GPU */
-    block->gpu_memblock = dk_map_memblock(g_dk_device, block->base, block->size,
-                                          memblock_flags | DkMemBlockFlags_Image);
-    if (!block->gpu_memblock) {
-        free(block->base);
-        free(block);
-        return SCE_KERNEL_ERROR_NO_MEMORY;
-    }
-#endif
 
     rwlockWriteLock(&g_vita_memblock_infos_lock);
     vita_memblock_info_dict_set_at(g_vita_memblock_infos, block->uid, block);
@@ -115,11 +80,7 @@ EXPORT(SceSysmem, 0xA91E15EE, int, sceKernelFreeMemBlock, SceUID uid)
     if (!block)
         return SCE_KERNEL_ERROR_INVALID_UID;
 
-#if defined(VITA2NATIVE_LINUX)
     host_gpu_memblock_destroy(block->gpu_memblock);
-#else
-    dkMemBlockDestroy(block->gpu_memblock);
-#endif
     free(block->base);
     rwlockWriteLock(&g_vita_memblock_infos_lock);
     vita_memblock_info_dict_erase(g_vita_memblock_infos, uid);
@@ -145,10 +106,9 @@ EXPORT(SceSysmem, 0xB8EF5818, int, sceKernelGetMemBlockBase, SceUID uid, void **
 
 DECLARE_LIBRARY(SceSysmem, 0x37fe725a);
 
-int SceSysmem_init(HostGpuDevice dk_device)
+int SceSysmem_init(HostGpuDevice gpu_device)
 {
-    g_dk_device = dk_device;
-    (void)g_dk_device;
+    (void)gpu_device;
     vita_memblock_info_dict_init(g_vita_memblock_infos);
     rwlockInit(&g_vita_memblock_infos_lock);
 
@@ -179,13 +139,3 @@ VitaMemBlockInfo *SceSysmem_get_vita_memblock_info_for_addr(const void *addr)
 
     return block;
 }
-
-#if !defined(VITA2NATIVE_LINUX)
-DkMemBlock SceSysmem_get_dk_memblock_for_addr(const void *addr)
-{
-    VitaMemBlockInfo *info = SceSysmem_get_vita_memblock_info_for_addr(addr);
-    if (!info)
-        return NULL;
-    return info->gpu_memblock;
-}
-#endif

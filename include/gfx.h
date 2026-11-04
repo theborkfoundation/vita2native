@@ -5,8 +5,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#if defined(VITA2NATIVE_LINUX)
-
 typedef struct HostGpuDevice *HostGpuDevice;
 typedef struct HostGpuMemBlock *HostGpuMemBlock;
 
@@ -32,7 +30,7 @@ HostGpuDevice host_gpu_create(const HostGpuConfig *config);
 void host_gpu_destroy(HostGpuDevice device);
 
 HostGpuBackend host_gpu_backend(HostGpuDevice device);
-/* Human-readable backend/renderer/version, e.g. "GLES 3.2 (Mesa Intel...)". */
+/* Human-readable backend/renderer/version, e.g. "GLES 3.2 (Mesa...)". */
 const char *host_gpu_description(HostGpuDevice device);
 
 void host_gpu_clear(HostGpuDevice device, float r, float g, float b, float a);
@@ -45,14 +43,5 @@ void host_gpu_finish(HostGpuDevice device);
 
 HostGpuMemBlock host_gpu_memblock_create(void *cpu_addr, size_t size);
 void host_gpu_memblock_destroy(HostGpuMemBlock block);
-
-#else
-
-#include <deko3d.h>
-
-typedef DkDevice HostGpuDevice;
-typedef DkMemBlock HostGpuMemBlock;
-
-#endif
 
 #endif

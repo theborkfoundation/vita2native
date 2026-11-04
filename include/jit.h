@@ -6,8 +6,6 @@
 
 #include "host.h"
 
-#if defined(VITA2NATIVE_LINUX)
-
 typedef struct Jit {
     void *rw;
     void *rx;
@@ -23,11 +21,5 @@ void *jitGetRxAddr(Jit *jit);
 Result jitTransitionToWritable(Jit *jit);
 Result jitTransitionToExecutable(Jit *jit);
 Result jitClose(Jit *jit);
-
-#else
-
-#include <switch.h>
-
-#endif
 
 #endif

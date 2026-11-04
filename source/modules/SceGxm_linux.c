@@ -2,9 +2,10 @@
 #include "modules/SceGxm.h"
 
 /*
- * The GLES backend is the next milestone. Until it lands, CPU-rendered
- * PlayStation Vita homebrew can run; any program that imports SceGxm will get
- * the normal unresolved-import diagnostics from the loader.
+ * GXM command translation is the next graphics milestone. The GLES 3.x device
+ * itself already exists (see source/host/host_gfx_gl.c); until the SceGxm entry
+ * points are translated, CPU-rendered homebrew can run and 3D programs get the
+ * normal unresolved-import diagnostics from the loader.
  */
 
 int SceGxm_init(HostGpuDevice device)

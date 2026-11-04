@@ -1,7 +1,7 @@
 #ifndef VITA2NATIVE_HOST_H
 #define VITA2NATIVE_HOST_H
 
-#if defined(VITA2NATIVE_LINUX) && !defined(_GNU_SOURCE)
+#if !defined(_GNU_SOURCE)
 #define _GNU_SOURCE
 #endif
 
@@ -12,8 +12,6 @@
 #ifndef NORETURN
 #define NORETURN __attribute__((noreturn))
 #endif
-
-#if defined(VITA2NATIVE_LINUX)
 
 #include <pthread.h>
 #include <sched.h>
@@ -92,7 +90,7 @@ void threadTlsFree(int slot);
 void threadTlsSet(int slot, void *value);
 void *threadTlsGet(int slot);
 
-void svcSleepThread(int64_t nanoseconds);
+void host_sleep_ns(int64_t nanoseconds);
 
 /* Mutexes. */
 void mutexInit(Mutex *mutex);
@@ -133,12 +131,6 @@ Result waitSingle(Waiter waiter, uint64_t timeout_ns);
 
 uint64_t host_monotonic_ns(void);
 
-void svcOutputDebugString(const char *str, size_t size);
-
-#else /* Horizon OS */
-
-#include <switch.h>
-
-#endif
+void host_debug_string(const char *str, size_t size);
 
 #endif

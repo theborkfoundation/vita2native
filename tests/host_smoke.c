@@ -72,7 +72,7 @@ int main(void)
     assert(strcmp(path, "build/fs_root/app/assets/x") == 0);
     assert(host_fs_resolve_path("ux0:/../escape", path, sizeof(path)) != 0);
 
-    svcSleepThread(1000000);
+    host_sleep_ns(1000000);
 
     puts("host_smoke: ok");
     return 0;
