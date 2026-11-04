@@ -1,19 +1,24 @@
 #ifndef SCE_SYSMEM_H
 #define SCE_SYSMEM_H
 
-#include <deko3d.h>
+#include <psp2/types.h>
+
+#include "gfx.h"
 
 typedef struct VitaMemBlockInfo {
     uint32_t index;
     SceUID uid;
     void *base;
     uint32_t size;
-    DkMemBlock dk_memblock;
+    HostGpuMemBlock gpu_memblock;
 } VitaMemBlockInfo;
 
-int SceSysmem_init(DkDevice dk_device);
+int SceSysmem_init(HostGpuDevice device);
 SceUID SceSysmem_get_next_uid(void);
 VitaMemBlockInfo *SceSysmem_get_vita_memblock_info_for_addr(const void *addr);
+
+#if !defined(VITA2NATIVE_LINUX)
 DkMemBlock SceSysmem_get_dk_memblock_for_addr(const void *addr);
+#endif
 
 #endif

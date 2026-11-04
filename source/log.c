@@ -1,7 +1,8 @@
 #include <stdarg.h>
 #include <stdbool.h>
-#include <switch.h>
 
+#include "config.h"
+#include "host.h"
 #include "log.h"
 #include "netlog.h"
 #include "util.h"
@@ -9,7 +10,11 @@
 static Mutex g_log_mutex;
 static uint32_t g_device_mask;
 
+#if defined(VITA2NATIVE_LINUX)
+const char log_file_path[] = VITA2HOS_ROOT_PATH "/log.txt";
+#else
 const char log_file_path[] = "sdmc:/vita2hos/log.txt";
+#endif
 
 void file_log(const char *str)
 {

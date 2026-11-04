@@ -2,6 +2,8 @@
 #define NETLOG_H
 
 #include <stdint.h>
+#include <stddef.h>
+#include <sys/types.h>
 
 /* Port 28771 (nc -ulk 28771) */
 #define MULTICAST_ADDR "224.0.0.1"

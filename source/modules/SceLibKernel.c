@@ -1,15 +1,26 @@
 #include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 #include <m-dict.h>
 #include <psp2/kernel/error.h>
 #include <psp2common/types.h>
 #include <stdarg.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
-#include <switch.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "fs.h"
+#include "host.h"
 #undef st_ctime
 #undef st_atime
 #undef st_mtime
+#if defined(__APPLE__)
+#define st_atim st_atimespec
+#define st_mtim st_mtimespec
+#define st_ctim st_ctimespec
+#endif
 #include <psp2/io/dirent.h>
 
 #include "log.h"
@@ -105,6 +116,9 @@ EXPORT(SceLibKernel, 0xDA6EC8EF, int, sceKernelCreateLwMutex, SceKernelLwMutexWo
 EXPORT(SceLibKernel, 0x244E76D2, int, sceKernelDeleteLwMutex, SceKernelLwMutexWork *pWork)
 {
     mutexUnlock((void *)pWork);
+#if defined(VITA2NATIVE_LINUX)
+    mutexDestroy((void *)pWork);
+#endif
     return 0;
 }
 
@@ -152,17 +166,30 @@ static const char *vita_io_open_flags_to_fopen_flags(int flags)
 EXPORT(SceLibKernel, 0x6C60AC61, SceUID, sceIoOpen, const char *file, int flags, SceMode mode)
 {
     VitaOpenedFile *vfile;
-    const char *c;
+    const char *open_flags;
+    const char *host_file;
+    char resolved[PATH_MAX];
     FILE *fp;
 
-    c = strchr(file, ':');
+#if defined(VITA2NATIVE_LINUX)
+    if (host_fs_resolve_path(file, resolved, sizeof(resolved)) < 0)
+        return SCE_ERROR_ERRNO_ENODEV;
+    host_file = resolved;
+#else
+    const char *c = strchr(file, ':');
     if (c)
         file = c + 1;
+    host_file = file;
+#endif
 
-    if (*file == '\0')
+    if (*host_file == '\0')
         return SCE_ERROR_ERRNO_ENODEV;
 
-    fp = fopen(file, vita_io_open_flags_to_fopen_flags(flags));
+    open_flags = vita_io_open_flags_to_fopen_flags(flags);
+    if (!open_flags)
+        return SCE_ERROR_ERRNO_ENODEV;
+
+    fp = fopen(host_file, open_flags);
     if (!fp)
         return SCE_ERROR_ERRNO_ENODEV;
 
@@ -175,7 +202,7 @@ EXPORT(SceLibKernel, 0x6C60AC61, SceUID, sceIoOpen, const char *file, int flags,
     memset(vfile, 0, sizeof(*vfile));
     vfile->uid = SceSysmem_get_next_uid();
     vfile->fp = fp;
-    vfile->file = strdup(file);
+    vfile->file = strdup(host_file);
 
     rwlockWriteLock(&g_vita_opened_files_lock);
     vita_opened_files_dict_set_at(g_vita_opened_files, vfile->uid, vfile);
@@ -229,7 +256,10 @@ EXPORT(SceIofilemgr, 0x49252B9B, long, sceIoLseek32, SceUID fd, long offset, int
     if (!vfile)
         return SCE_ERROR_ERRNO_EBADF;
 
-    return fseek(vfile->fp, offset, whence);
+    if (fseek(vfile->fp, offset, whence) != 0)
+        return -1;
+
+    return ftell(vfile->fp);
 }
 
 EXPORT(SceIofilemgr, 0x16512F59, int, sceIoSyncByFd, SceUID fd, int flag)
@@ -244,14 +274,22 @@ EXPORT(SceIofilemgr, 0x16512F59, int, sceIoSyncByFd, SceUID fd, int flag)
 EXPORT(SceLibKernel, 0xA9283DD0, SceUID, sceIoDopen, const char *dirname)
 {
     VitaOpenedDir *vdir;
-    const char *c;
+    const char *host_dirname;
+    char resolved[PATH_MAX];
     DIR *dir;
 
-    c = strchr(dirname, ':');
+#if defined(VITA2NATIVE_LINUX)
+    if (host_fs_resolve_path(dirname, resolved, sizeof(resolved)) < 0)
+        return SCE_ERROR_ERRNO_ENODEV;
+    host_dirname = resolved;
+#else
+    const char *c = strchr(dirname, ':');
     if (c)
         dirname = c + 1;
+    host_dirname = dirname;
+#endif
 
-    dir = opendir(dirname);
+    dir = opendir(host_dirname);
     if (!dir)
         return SCE_ERROR_ERRNO_ENODEV;
 
@@ -264,7 +302,7 @@ EXPORT(SceLibKernel, 0xA9283DD0, SceUID, sceIoDopen, const char *dirname)
     memset(vdir, 0, sizeof(*vdir));
     vdir->uid = SceSysmem_get_next_uid();
     vdir->dir = dir;
-    vdir->path = strdup(dirname);
+    vdir->path = strdup(host_dirname);
 
     rwlockWriteLock(&g_vita_opened_dirs_lock);
     vita_opened_dirs_dict_set_at(g_vita_opened_dirs, vdir->uid, vdir);
@@ -296,8 +334,8 @@ EXPORT(SceIofilemgr, 0x422A221A, int, sceIoDclose, SceUID fd)
 
 static inline void tm_to_sce_datetime(SceDateTime *dt, const struct tm *tm)
 {
-    dt->year = tm->tm_year;
-    dt->month = tm->tm_mon;
+    dt->year = tm->tm_year + 1900;
+    dt->month = tm->tm_mon + 1;
     dt->day = tm->tm_mday;
     dt->hour = tm->tm_hour;
     dt->minute = tm->tm_min;
@@ -305,13 +343,61 @@ static inline void tm_to_sce_datetime(SceDateTime *dt, const struct tm *tm)
     dt->microsecond = 0;
 }
 
+/* Vita errno values are the host values with the SCE error bit set. */
+static inline uint32_t sce_error_from_errno(int err)
+{
+    return 0x80010000u | (uint32_t)err;
+}
+
+static void stat_to_sce_iostat(const struct stat *sb, SceIoStat *st)
+{
+    struct tm tm;
+
+    memset(st, 0, sizeof(*st));
+
+    if (S_ISDIR(sb->st_mode)) {
+        st->st_mode = SCE_S_IFDIR | SCE_S_IRWXU | SCE_S_IRWXG | SCE_S_IRWXS;
+        st->st_attr = SCE_SO_IFDIR;
+    } else {
+        st->st_mode = SCE_S_IFREG | SCE_S_IRUSR | SCE_S_IWUSR | SCE_S_IRGRP | SCE_S_IWGRP |
+                      SCE_S_IRSYS | SCE_S_IWSYS;
+        st->st_attr = SCE_SO_IFREG;
+    }
+
+    st->st_size = sb->st_size;
+
+    gmtime_r(&sb->st_ctim.tv_sec, &tm);
+    tm_to_sce_datetime(&st->st_ctime, &tm);
+    gmtime_r(&sb->st_atim.tv_sec, &tm);
+    tm_to_sce_datetime(&st->st_atime, &tm);
+    gmtime_r(&sb->st_mtim.tv_sec, &tm);
+    tm_to_sce_datetime(&st->st_mtime, &tm);
+}
+
+/*
+ * Map a Vita path to a host path. Returns NULL when the device is unknown or
+ * the path would escape the configured root.
+ */
+static const char *host_path_from_vita(const char *vita_path, char *buffer, size_t size)
+{
+#if defined(VITA2NATIVE_LINUX)
+    if (host_fs_resolve_path(vita_path, buffer, size) < 0)
+        return NULL;
+    return buffer;
+#else
+    const char *colon;
+    (void)buffer;
+    (void)size;
+    colon = strchr(vita_path, ':');
+    return colon ? colon + 1 : vita_path;
+#endif
+}
+
 EXPORT(SceLibKernel, 0x9C8B6624, int, sceIoDread, SceUID fd, SceIoDirent *dirent)
 {
     VitaOpenedDir *vdir = get_opened_dir_for_fd(fd);
     struct dirent *de;
     struct stat statbuf;
-    SceMode st_mode;
-    unsigned int st_attr;
     const char *path;
     char full_path[PATH_MAX];
 
@@ -330,27 +416,158 @@ EXPORT(SceLibKernel, 0x9C8B6624, int, sceIoDread, SceUID fd, SceIoDirent *dirent
     }
 
     if (stat(path, &statbuf) != 0)
-        return SCE_ERROR_ERRNO_EBADF;
+        return sce_error_from_errno(errno);
 
-    if ((statbuf.st_mode & S_IFMT) == S_IFDIR) {
-        st_mode = SCE_S_IFDIR | SCE_S_IRWXU | SCE_S_IRWXG | SCE_S_IRWXS;
-        st_attr = SCE_SO_IFDIR;
-    } else {
-        st_mode = SCE_S_IFREG | SCE_S_IRUSR | SCE_S_IWUSR | SCE_S_IRGRP | SCE_S_IWGRP |
-                  SCE_S_IRSYS | SCE_S_IWSYS;
-        st_attr = SCE_SO_IFREG;
-    }
-
-    dirent->d_stat.st_mode = st_mode;
-    dirent->d_stat.st_attr = st_attr;
-    dirent->d_stat.st_size = statbuf.st_size;
-    tm_to_sce_datetime(&dirent->d_stat.st_ctime, gmtime(&statbuf.st_ctim.tv_sec));
-    tm_to_sce_datetime(&dirent->d_stat.st_atime, gmtime(&statbuf.st_atim.tv_sec));
-    tm_to_sce_datetime(&dirent->d_stat.st_mtime, gmtime(&statbuf.st_mtim.tv_sec));
+    stat_to_sce_iostat(&statbuf, &dirent->d_stat);
     strncpy(dirent->d_name, de->d_name, sizeof(dirent->d_name));
     dirent->d_private = NULL;
 
     return 1;
+}
+
+EXPORT(SceLibKernel, 0xBCA5B623, int, sceIoGetstat, const char *file, SceIoStat *st)
+{
+    char resolved[PATH_MAX];
+    const char *host_path;
+    struct stat sb;
+
+    if (!file || !st)
+        return sce_error_from_errno(EINVAL);
+
+    host_path = host_path_from_vita(file, resolved, sizeof(resolved));
+    if (!host_path)
+        return SCE_ERROR_ERRNO_ENODEV;
+
+    if (stat(host_path, &sb) != 0)
+        return sce_error_from_errno(errno);
+
+    stat_to_sce_iostat(&sb, st);
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0x57F8CD25, int, sceIoGetstatByFd, SceUID fd, SceIoStat *st)
+{
+    VitaOpenedFile *vfile = get_opened_file_for_fd(fd);
+    struct stat sb;
+
+    if (!st)
+        return sce_error_from_errno(EINVAL);
+
+    if (!vfile)
+        return SCE_ERROR_ERRNO_EBADF;
+
+    if (fstat(fileno(vfile->fp), &sb) != 0)
+        return sce_error_from_errno(errno);
+
+    stat_to_sce_iostat(&sb, st);
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0x9670D39F, int, sceIoMkdir, const char *dir, SceMode mode)
+{
+    char resolved[PATH_MAX];
+    const char *host_path;
+
+    if (!dir)
+        return sce_error_from_errno(EINVAL);
+
+    host_path = host_path_from_vita(dir, resolved, sizeof(resolved));
+    if (!host_path)
+        return SCE_ERROR_ERRNO_ENODEV;
+
+    if (mkdir(host_path, mode & 07777) != 0)
+        return sce_error_from_errno(errno);
+
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0xE9F91EC8, int, sceIoRmdir, const char *dir)
+{
+    char resolved[PATH_MAX];
+    const char *host_path;
+
+    if (!dir)
+        return sce_error_from_errno(EINVAL);
+
+    host_path = host_path_from_vita(dir, resolved, sizeof(resolved));
+    if (!host_path)
+        return SCE_ERROR_ERRNO_ENODEV;
+
+    if (rmdir(host_path) != 0)
+        return sce_error_from_errno(errno);
+
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0xE20ED0F3, int, sceIoRemove, const char *file)
+{
+    char resolved[PATH_MAX];
+    const char *host_path;
+
+    if (!file)
+        return sce_error_from_errno(EINVAL);
+
+    host_path = host_path_from_vita(file, resolved, sizeof(resolved));
+    if (!host_path)
+        return SCE_ERROR_ERRNO_ENODEV;
+
+    if (unlink(host_path) != 0)
+        return sce_error_from_errno(errno);
+
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0xF737E369, int, sceIoRename, const char *old_path, const char *new_path)
+{
+    char old_resolved[PATH_MAX];
+    char new_resolved[PATH_MAX];
+    const char *host_old;
+    const char *host_new;
+
+    if (!old_path || !new_path)
+        return sce_error_from_errno(EINVAL);
+
+    host_old = host_path_from_vita(old_path, old_resolved, sizeof(old_resolved));
+    host_new = host_path_from_vita(new_path, new_resolved, sizeof(new_resolved));
+    if (!host_old || !host_new)
+        return SCE_ERROR_ERRNO_ENODEV;
+
+    if (rename(host_old, host_new) != 0)
+        return sce_error_from_errno(errno);
+
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0x29482F7F, int, sceIoChstat, const char *file, SceIoStat *st, int bits)
+{
+    char resolved[PATH_MAX];
+    const char *host_path;
+
+    if (!file || !st)
+        return sce_error_from_errno(EINVAL);
+
+    host_path = host_path_from_vita(file, resolved, sizeof(resolved));
+    if (!host_path)
+        return SCE_ERROR_ERRNO_ENODEV;
+
+    /* Only the permission bits are portable; timestamps are ignored. */
+    if ((bits & SCE_CST_MODE) && chmod(host_path, st->st_mode & 07777) != 0)
+        return sce_error_from_errno(errno);
+
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0x99BA173E, SceOff, sceIoLseek, SceUID fd, SceOff offset, int whence)
+{
+    VitaOpenedFile *vfile = get_opened_file_for_fd(fd);
+
+    if (!vfile)
+        return SCE_ERROR_ERRNO_EBADF;
+
+    if (fseeko(vfile->fp, (off_t)offset, whence) != 0)
+        return -1;
+
+    return (SceOff)ftello(vfile->fp);
 }
 
 EXPORT_FUNC(SceLibKernel, 0x632980D7, memset)
@@ -369,6 +586,11 @@ DECLARE_LIBRARY(SceIofilemgr, 0xf2ff276e);
 int SceLibKernel_init(void)
 {
     ueventCreate(&g_process_exit_event, false);
+
+    vita_opened_files_dict_init(g_vita_opened_files);
+    vita_opened_dirs_dict_init(g_vita_opened_dirs);
+    rwlockInit(&g_vita_opened_files_lock);
+    rwlockInit(&g_vita_opened_dirs_lock);
 
     return 0;
 }

@@ -1,3 +1,21 @@
+# Linux/ARM32 first milestone: only the loader, host layer, and CPU-only
+# modules are built. The GLES backend and Vita3K shader libraries come next.
+if(VITA2NATIVE_LINUX)
+    # Keep miniz as an interface here so CMake never invokes the host archiver
+    # on cross-compiled ELF objects. The source is compiled directly into the
+    # vita2native target.
+    add_library(miniz INTERFACE)
+    target_include_directories(miniz INTERFACE
+        ${CMAKE_CURRENT_SOURCE_DIR}/Vita3K/external
+        ${CMAKE_CURRENT_SOURCE_DIR}/Vita3K/external/miniz
+    )
+
+    add_library(mlib INTERFACE)
+    target_include_directories(mlib INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/mlib)
+
+    return()
+endif()
+
 # Use Vita3K's glslang (installed glslang doesn't contain SpvBuilder.h, etc)
 set(ENABLE_HLSL OFF CACHE BOOL "" FORCE)
 set(ENABLE_GLSLANG_BINARIES OFF CACHE BOOL "" FORCE)

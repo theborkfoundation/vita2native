@@ -1,0 +1,58 @@
+#ifndef VITA2NATIVE_GFX_H
+#define VITA2NATIVE_GFX_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#if defined(VITA2NATIVE_LINUX)
+
+typedef struct HostGpuDevice *HostGpuDevice;
+typedef struct HostGpuMemBlock *HostGpuMemBlock;
+
+typedef enum {
+    HOST_GPU_BACKEND_NULL,
+    HOST_GPU_BACKEND_GLES,
+} HostGpuBackend;
+
+typedef struct {
+    int width;
+    int height;
+    bool headless;
+} HostGpuConfig;
+
+/*
+ * Creates the GPU device. The GLES 3.x backend is loaded at runtime (EGL +
+ * GLESv2), so the executable links without graphics libraries. If GLES is not
+ * usable, a null backend is returned instead; check host_gpu_backend().
+ *
+ * Returns NULL only when memory allocation fails.
+ */
+HostGpuDevice host_gpu_create(const HostGpuConfig *config);
+void host_gpu_destroy(HostGpuDevice device);
+
+HostGpuBackend host_gpu_backend(HostGpuDevice device);
+/* Human-readable backend/renderer/version, e.g. "GLES 3.2 (Mesa Intel...)". */
+const char *host_gpu_description(HostGpuDevice device);
+
+void host_gpu_clear(HostGpuDevice device, float r, float g, float b, float a);
+
+/* Read `width * height` RGBA8 pixels starting at (x, y). Returns 0 on success. */
+int host_gpu_read_pixels(HostGpuDevice device, int x, int y, int width, int height, void *rgba,
+                         size_t size);
+
+void host_gpu_finish(HostGpuDevice device);
+
+HostGpuMemBlock host_gpu_memblock_create(void *cpu_addr, size_t size);
+void host_gpu_memblock_destroy(HostGpuMemBlock block);
+
+#else
+
+#include <deko3d.h>
+
+typedef DkDevice HostGpuDevice;
+typedef DkMemBlock HostGpuMemBlock;
+
+#endif
+
+#endif

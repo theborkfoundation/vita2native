@@ -1,8 +1,6 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <stdio.h>
-#include <switch.h>
-#include <sys/iosupport.h>
 #include <sys/socket.h>
 #include <unistd.h>
 

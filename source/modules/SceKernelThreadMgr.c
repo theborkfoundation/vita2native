@@ -2,8 +2,8 @@
 #include <psp2/kernel/error.h>
 #include <psp2/kernel/threadmgr.h>
 #include <stdlib.h>
-#include <switch.h>
 
+#include "host.h"
 #include "log.h"
 #include "module.h"
 #include "util.h"
@@ -24,6 +24,7 @@
 #define HOS_LOWEST_PRIORITY  59
 
 static s32 g_vita_thread_info_tls_slot_id;
+static SceUID g_main_thread_uid;
 
 DICT_DEF2(vita_thread_info_dict, SceUID, M_DEFAULT_OPLIST, VitaThreadInfo *, M_POD_OPLIST)
 static vita_thread_info_dict_t g_vita_thread_infos;
@@ -65,6 +66,14 @@ static void NORETURN thread_entry_wrapper(void *arg)
     ret = ti->entry(ti->arglen, ti->argp);
 
     LOG("Thread 0x%x returned with: 0x%x", ti->uid, ret);
+
+    /*
+     * Returning from the Vita main thread is a normal way for simple
+     * homebrew to finish. Treat it like sceKernelExitProcess() so the host
+     * main loop does not wait forever.
+     */
+    if (g_main_thread_uid != 0 && ti->uid == g_main_thread_uid)
+        ueventSignal(SceLibKernel_get_process_exit_uevent());
 
     threadExit();
 }
@@ -224,6 +233,8 @@ int SceKernelThreadMgr_main_entry(SceKernelThreadEntry entry, int args, void *ar
     if (thid < 0)
         return thid;
 
+    g_main_thread_uid = thid;
+
     ret = start_thread(thid, args, argp);
     if (ret < 0) {
         sceKernelDeleteThread(thid);
@@ -240,6 +251,8 @@ int SceKernelThreadMgr_main_entry(SceKernelThreadEntry entry, int args, void *ar
 
     // TODO: Also wait for all threads to finish?
     sceKernelWaitThreadEnd(thid, NULL, NULL);
+    if (thid == g_main_thread_uid)
+        g_main_thread_uid = 0;
     sceKernelDeleteThread(thid);
 
     return 0;
@@ -271,6 +284,9 @@ DECLARE_LIBRARY(SceThreadmgrCoredumpTime, 0x5E8D0E22);
 int SceKernelThreadMgr_init(void)
 {
     g_vita_thread_info_tls_slot_id = threadTlsAlloc(NULL);
+    if (g_vita_thread_info_tls_slot_id < 0)
+        return -1;
+
     vita_thread_info_dict_init(g_vita_thread_infos);
     rwlockInit(&g_vita_thread_infos_lock);
 

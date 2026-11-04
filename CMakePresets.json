@@ -29,6 +29,44 @@
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "CMAKE_COLOR_DIAGNOSTICS": "ON"
             }
+        },
+        {
+            "name": "Linux-Debug",
+            "hidden": false,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/Linux-Debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "VITA2NATIVE_LINUX": "ON",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "CMAKE_COLOR_DIAGNOSTICS": "ON"
+            }
+        },
+        {
+            "name": "Linux-Release",
+            "hidden": false,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/Linux-Release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "VITA2NATIVE_LINUX": "ON",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "CMAKE_COLOR_DIAGNOSTICS": "ON"
+            }
+        },
+        {
+            "name": "Linux-Cross-Headless",
+            "hidden": false,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/Linux-Cross-Headless",
+            "toolchainFile": "${sourceDir}/cmake/toolchains/arm-linux-gnueabihf.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "VITA2NATIVE_LINUX": "ON",
+                "VITA2NATIVE_HEADLESS": "ON",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "CMAKE_COLOR_DIAGNOSTICS": "ON"
+            }
         }
     ],
     "buildPresets": [
@@ -41,6 +79,21 @@
             "name": "Release",
             "hidden": false,
             "configurePreset": "Release"
+        },
+        {
+            "name": "Linux-Debug",
+            "hidden": false,
+            "configurePreset": "Linux-Debug"
+        },
+        {
+            "name": "Linux-Release",
+            "hidden": false,
+            "configurePreset": "Linux-Release"
+        },
+        {
+            "name": "Linux-Cross-Headless",
+            "hidden": false,
+            "configurePreset": "Linux-Cross-Headless"
         }
     ]
 }

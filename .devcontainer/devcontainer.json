@@ -1,7 +1,0 @@
-{
-	"image": "ghcr.io/vita2hos/devcontainer/vita2hos:latest",
-	"remoteUser": "vita2hos",
-	"remoteEnv": {
-		"SWITCHIP": "${localEnv:SWITCHIP}"
-	}
-}

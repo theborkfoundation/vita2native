@@ -2,9 +2,10 @@
 #include <psp2/kernel/error.h>
 #include <stdlib.h>
 #include <string.h>
-#include <switch.h>
 
 #include "arm-encode.h"
+#include "host.h"
+#include "jit.h"
 #include "load.h"
 #include "log.h"
 #include "module.h"
@@ -368,6 +369,7 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
     uint32_t code_offset = 0, data_offset = 0;
     uintptr_t data_addr, code_rw_addr, code_rx_addr;
     uintptr_t addr_rw, addr_rx;
+    Elf32_Word align;
     uint32_t length;
     sce_module_info_raw *mod_info;
     const char *imp_name;
@@ -417,18 +419,18 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
         if (segments[i].p_type == PT_LOAD) {
             LOG("Found loadable segment (%u)", i);
             LOG("  p_filesz: 0x%" PRIx32, segments[i].p_filesz);
-            LOG("  p_memsz:  0x%" PRIx32, segments[i].p_align);
+            LOG("  p_memsz:  0x%" PRIx32, segments[i].p_memsz);
             LOG("  p_align:  0x%" PRIx32, segments[i].p_align);
 
+            align = segments[i].p_align ? segments[i].p_align : 4;
+
             if ((segments[i].p_flags & PF_X) == PF_X) {
-                length = ALIGN(code_rx_addr, segments[i].p_align) - code_rx_addr;
-                addr_rx = code_rx_addr + code_offset;
-                addr_rw = code_rw_addr + code_offset;
-                code_offset += segments[i].p_memsz;
+                addr_rx = ALIGN(code_rx_addr + code_offset, align);
+                addr_rw = code_rw_addr + (addr_rx - code_rx_addr);
+                code_offset = (uint32_t)(addr_rx - code_rx_addr) + segments[i].p_memsz;
             } else {
-                length = ALIGN(data_addr, segments[i].p_align) - data_addr;
-                addr_rw = addr_rx = data_addr + data_offset;
-                data_offset += segments[i].p_memsz;
+                addr_rw = addr_rx = ALIGN(data_addr + data_offset, align);
+                data_offset = (uint32_t)(addr_rw - data_addr) + segments[i].p_memsz;
             }
 
             segments[i].rx_addr = addr_rx;
@@ -550,7 +552,7 @@ static int relocate(const void *reloc, uint32_t size, segment_info_t *segs)
     uint8_t r_symseg;
     uint8_t r_datseg;
     int32_t offset;
-    uint32_t symval, loc_rw, loc_rx;
+    uintptr_t symval, loc_rw, loc_rx;
     uint32_t upper, lower, sign, j1, j2;
     uint32_t value = 0;
 
@@ -573,9 +575,9 @@ static int relocate(const void *reloc, uint32_t size, segment_info_t *segs)
         // get values
         r_symseg = SCE_REL_SYMSEG(*entry);
         r_datseg = SCE_REL_DATSEG(*entry);
-        symval = r_symseg == 15 ? 0 : (uint32_t)segs[r_symseg].rx_addr;
-        loc_rw = (uint32_t)segs[r_datseg].rw_addr + r_offset;
-        loc_rx = (uint32_t)segs[r_datseg].rx_addr + r_offset;
+        symval = r_symseg == 15 ? 0 : (uintptr_t)segs[r_symseg].rx_addr;
+        loc_rw = (uintptr_t)segs[r_datseg].rw_addr + r_offset;
+        loc_rx = (uintptr_t)segs[r_datseg].rx_addr + r_offset;
 
         // perform relocation
         // taken from linux/arch/arm/kernel/module.c of Linux Kernel 4.0
@@ -618,7 +620,7 @@ static int relocate(const void *reloc, uint32_t size, segment_info_t *segs)
             offset = r_addend + symval - loc_rx;
 
             if (offset <= (int32_t)0xff000000 || offset >= (int32_t)0x01000000) {
-                LOG("reloc 0x%" PRIx32 " out of range: 0x%08" PRIx32, pos, symval);
+                LOG("reloc 0x%" PRIx32 " out of range: 0x%08" PRIx32, pos, (uint32_t)symval);
                 break;
             }
 
@@ -635,7 +637,7 @@ static int relocate(const void *reloc, uint32_t size, segment_info_t *segs)
         case R_ARM_JUMP24: {
             offset = r_addend + symval - loc_rx;
             if (offset <= (int32_t)0xfe000000 || offset >= (int32_t)0x02000000) {
-                LOG("reloc 0x%" PRIx32 " out of range: 0x%08" PRIx32, pos, symval);
+                LOG("reloc 0x%" PRIx32 " out of range: 0x%08" PRIx32, pos, (uint32_t)symval);
                 break;
             }
 
@@ -686,6 +688,7 @@ static int relocate(const void *reloc, uint32_t size, segment_info_t *segs)
         } break;
         default: {
             LOG("Unknown relocation code %u at 0x%" PRIx32, r_code, pos);
+            __attribute__((fallthrough));
         }
         case R_ARM_NONE:
             continue;

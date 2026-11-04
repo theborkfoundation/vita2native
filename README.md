@@ -7,6 +7,73 @@ A PlayStation Vita to Horizon OS (Nintendo Switch OS) translation layer (**_not_
 **vita2hos** is a translation layer that enables native execution of PlayStation Vita executables (ARMv7), to run natively on the Nintendo Switch's ARMv8 CPU in AArch32 (32-bit) mode.\
 It achieves this by redirecting the [module](https://wiki.henkaku.xyz/vita/Modules) imports of the PlayStation Vita executable to corresponding routines that utilize native Nintendo Switch Horizon OS services, effectively replicating the behavior of the original PlayStation Vita OS modules.
 
+## Linux ARM32 port (this fork)
+
+This fork targets a typical **32-bit ARM Linux** system instead of Horizon OS.
+The first milestone is a CPU-only runtime (no GXM/3D backend yet).
+
+Requirements:
+
+- 32-bit ARMv7-A userland with NEON and hard-float (`armhf`), e.g. Raspberry
+  Pi 4/5 with a 32-bit OS.
+- CMake, Ninja, pkg-config, and SDL2 development files (SDL2 is not needed in
+  headless mode), for example on Debian/Raspberry Pi OS:
+  `sudo apt install cmake ninja-build pkg-config libsdl2-dev`.
+- A Vita executable built with the default hard-float VitaSDK toolchain.
+
+Build natively on the ARM32 host:
+
+```sh
+cmake --preset Linux-Debug
+cmake --build --preset Linux-Debug
+```
+
+Or configure manually:
+
+```sh
+cmake -S . -B build/Linux-Debug -G Ninja \
+  -DVITA2NATIVE_LINUX=ON -DCMAKE_BUILD_TYPE=Debug
+cmake --build build/Linux-Debug
+```
+
+For QEMU or a machine without SDL2, build the headless variant:
+
+```sh
+cmake -S . -B build/Linux-Headless -G Ninja \
+  -DVITA2NATIVE_LINUX=ON -DVITA2NATIVE_HEADLESS=ON
+cmake --build build/Linux-Headless
+```
+
+Run with the default layout (`vita2native/executable` relative to the current
+working directory), or pass a path explicitly:
+
+```sh
+./build/Linux-Debug/vita2native ./vita2native/executable
+```
+
+A VPK can be passed directly as well. `eboot.bin` is loaded from memory and the
+remaining entries are extracted to `vita2native/app0/` (skipped when the archive
+size and mtime are unchanged), so `app0:` reads work:
+
+```sh
+./build/Linux-Debug/vita2native ./MyHomebrew.vpk
+```
+
+Vita device paths are remapped below `vita2native/`:
+
+| Vita path | Linux path |
+| --- | --- |
+| `ux0:/...` | `vita2native/ux0/...` |
+| `app0:/...` | directory containing the executable, or `vita2native/app0/` for a VPK |
+| `savedata0:/...` | `vita2native/savedata/...` |
+| `os0:`, `vs0:` | `vita2native/system/...` |
+
+Current limitations: GXM command translation is not implemented yet (3D homebrew
+will hit unresolved `SceGxm` imports), no audio, and encrypted SELF files are
+still unsupported. A GLES 3.x GPU device is created at startup when EGL and
+GLESv2 are available (both are loaded at runtime; otherwise a null backend is
+used).
+
 ## Usage
 
 ### On a Real Nintendo Switch Console

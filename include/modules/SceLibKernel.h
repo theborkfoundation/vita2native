@@ -1,7 +1,7 @@
 #ifndef SCE_LIBKERNEL_H
 #define SCE_LIBKERNEL_H
 
-#include <switch.h>
+#include "host.h"
 
 #define SCE_ERROR_ERRNO_ENODEV 0x80010013
 #define SCE_ERROR_ERRNO_EMFILE 0x80010018

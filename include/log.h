@@ -4,7 +4,8 @@
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
-#include <switch.h>
+
+#include "host.h"
 
 #include "util.h"
 
