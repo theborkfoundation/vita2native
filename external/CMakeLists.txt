@@ -57,6 +57,31 @@ target_link_libraries(util INTERFACE vita3k_shim fmt-header-only)
 target_include_directories(util INTERFACE Vita3K/vita3k/util/include)
 
 add_subdirectory(Vita3K/vita3k/gxm EXCLUDE_FROM_ALL)
+
+# Apply local patches to the Vita3K submodule. Idempotent: if the patch is
+# already applied, the reverse check succeeds and nothing happens.
+set(VITA3K_PATCH_DIR ${PROJECT_SOURCE_DIR}/patches)
+foreach(patch vita3k-arm32-alignment.patch)
+    if(EXISTS ${VITA3K_PATCH_DIR}/${patch})
+        execute_process(
+            COMMAND git apply --reverse --check ${VITA3K_PATCH_DIR}/${patch}
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/Vita3K
+            RESULT_VARIABLE VITA3K_PATCH_APPLIED
+            OUTPUT_QUIET ERROR_QUIET)
+        if(NOT VITA3K_PATCH_APPLIED EQUAL 0)
+            execute_process(
+                COMMAND git apply ${VITA3K_PATCH_DIR}/${patch}
+                WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/Vita3K
+                RESULT_VARIABLE VITA3K_PATCH_RESULT
+                ERROR_VARIABLE VITA3K_PATCH_ERROR)
+            if(NOT VITA3K_PATCH_RESULT EQUAL 0)
+                message(FATAL_ERROR "Failed to apply ${patch}: ${VITA3K_PATCH_ERROR}")
+            endif()
+            message(STATUS "Applied Vita3K patch: ${patch}")
+        endif()
+    endif()
+endforeach()
+
 add_subdirectory(Vita3K/vita3k/shader EXCLUDE_FROM_ALL)
 
 # The shim headers must win over Vita3K's own util headers (log/fs/string utils).

@@ -1,0 +1,45 @@
+diff --git a/vita3k/shader/src/usse_translator_entry.cpp b/vita3k/shader/src/usse_translator_entry.cpp
+index 4696ed89..1fd933b1 100644
+--- a/vita3k/shader/src/usse_translator_entry.cpp
++++ b/vita3k/shader/src/usse_translator_entry.cpp
+@@ -1071,11 +1071,36 @@ spv::Function *USSERecompiler::compile_program_function() {
+ 
+ void convert_gxp_usse_to_spirv(spv::Builder &b, const SceGxmProgram &program, const FeatureState &features, const SpirvShaderParameters &parameters, utils::SpirvUtilFunctions &utils,
+     spv::Function *begin_hook_func, spv::Function *end_hook_func, const NonDependentTextureQueryCallInfos &queries, const spv::Id render_info_id, spv::Function *spv_func_main, std::vector<spv::Id> &interfaces) {
+-    const uint64_t *primary_program = program.primary_program_start();
+     const uint64_t primary_program_instr_count = program.primary_program_instr_count;
+-
+-    const uint64_t *secondary_program_start = program.secondary_program_start();
+-    const uint64_t *secondary_program_end = program.secondary_program_end();
++    const uint64_t secondary_program_instr_count =
++        program.secondary_program_end() - program.secondary_program_start();
++
++    /*
++     * The GXP instruction stream is only 4-byte aligned, while these are
++     * 64-bit words. ARM32 faults on unaligned 64-bit loads, so work on an
++     * aligned copy (memcpy also avoids the unaligned read while copying).
++     */
++    /* GXP offsets are relative to the offset field itself, not the struct. */
++    const auto *primary_bytes =
++        reinterpret_cast<const std::uint8_t *>(&program.primary_program_offset) +
++        program.primary_program_offset;
++    const auto *secondary_bytes =
++        reinterpret_cast<const std::uint8_t *>(&program.secondary_program_offset) +
++        program.secondary_program_offset;
++
++    std::vector<std::uint64_t> primary_code(primary_program_instr_count);
++    if (primary_program_instr_count)
++        std::memcpy(primary_code.data(), primary_bytes,
++                    primary_program_instr_count * sizeof(std::uint64_t));
++
++    std::vector<std::uint64_t> secondary_code(secondary_program_instr_count);
++    if (secondary_program_instr_count)
++        std::memcpy(secondary_code.data(), secondary_bytes,
++                    secondary_program_instr_count * sizeof(std::uint64_t));
++
++    const uint64_t *primary_program = primary_code.data();
++    const uint64_t *secondary_program_start = secondary_code.data();
++    const uint64_t *secondary_program_end = secondary_code.data() + secondary_code.size();
+ 
+     std::array<std::pair<const std::uint64_t *, std::uint64_t>, (size_t)ShaderPhase::Max> shader_code;
+ 
