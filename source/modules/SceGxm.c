@@ -1942,17 +1942,21 @@ EXPORT(SceGxm, 0x082200E1, SceBool, sceGxmDepthStencilSurfaceIsEnabled,
     return surface && !gxm_ds_surface_is_disabled(surface);
 }
 
-EXPORT(SceGxm, 0x269B56BE, float, sceGxmDepthStencilSurfaceGetBackgroundDepth,
-       const SceGxmDepthStencilSurface *surface)
+static float gxm_ds_get_background_depth_softfp(const SceGxmDepthStencilSurface *surface)
+    GUEST_SOFTFP_ABI;
+static float gxm_ds_get_background_depth_softfp(const SceGxmDepthStencilSurface *surface)
 {
     return surface->backgroundDepth;
 }
+EXPORT_FUNC(SceGxm, 0x269B56BE, gxm_ds_get_background_depth_softfp);
 
-EXPORT(SceGxm, 0x32F280F0, void, sceGxmDepthStencilSurfaceSetBackgroundDepth,
-       SceGxmDepthStencilSurface *surface, float depth)
+static void gxm_ds_set_background_depth_softfp(SceGxmDepthStencilSurface *surface, float depth)
+    GUEST_SOFTFP_ABI;
+static void gxm_ds_set_background_depth_softfp(SceGxmDepthStencilSurface *surface, float depth)
 {
     surface->backgroundDepth = depth;
 }
+EXPORT_FUNC(SceGxm, 0x32F280F0, gxm_ds_set_background_depth_softfp);
 
 EXPORT(SceGxm, 0xAAFC062B, unsigned char, sceGxmDepthStencilSurfaceGetBackgroundStencil,
        const SceGxmDepthStencilSurface *surface)
@@ -2081,17 +2085,22 @@ EXPORT(SceGxm, 0x1A68C8D2, void, sceGxmSetBackStencilFunc, SceGxmContext *contex
     context->back_stencil_write_mask = writeMask;
 }
 
-EXPORT(SceGxm, 0x3EB3380B, void, sceGxmSetViewport, SceGxmContext *context, float xOffset,
-       float xScale, float yOffset, float yScale, float zOffset, float zScale)
+static void gxm_set_viewport_softfp(SceGxmContext *context, float x_offset, float x_scale,
+                                    float y_offset, float y_scale, float z_offset,
+                                    float z_scale) GUEST_SOFTFP_ABI;
+static void gxm_set_viewport_softfp(SceGxmContext *context, float x_offset, float x_scale,
+                                    float y_offset, float y_scale, float z_offset,
+                                    float z_scale)
 {
-    context->viewport_x_offset = xOffset;
-    context->viewport_x_scale = xScale;
-    context->viewport_y_offset = yOffset;
-    context->viewport_y_scale = yScale;
-    context->viewport_z_offset = zOffset;
-    context->viewport_z_scale = zScale;
+    context->viewport_x_offset = x_offset;
+    context->viewport_x_scale = x_scale;
+    context->viewport_y_offset = y_offset;
+    context->viewport_y_scale = y_scale;
+    context->viewport_z_offset = z_offset;
+    context->viewport_z_scale = z_scale;
     context->viewport_enable = SCE_GXM_VIEWPORT_ENABLED;
 }
+EXPORT_FUNC(SceGxm, 0x3EB3380B, gxm_set_viewport_softfp);
 
 EXPORT(SceGxm, 0x814F61EB, void, sceGxmSetViewportEnable, SceGxmContext *context,
        SceGxmViewportMode enable)
@@ -2178,10 +2187,12 @@ EXPORT(SceGxm, 0x17B3BF86, void, sceGxmSetBackDepthBias, SceGxmContext *context,
     context->back_depth_bias_units = units;
 }
 
-EXPORT(SceGxm, 0xD096336E, void, sceGxmSetWClampValue, SceGxmContext *context, float clampValue)
+static void gxm_set_w_clamp_value_softfp(SceGxmContext *context, float value) GUEST_SOFTFP_ABI;
+static void gxm_set_w_clamp_value_softfp(SceGxmContext *context, float value)
 {
-    context->w_clamp_value = clampValue;
+    context->w_clamp_value = value;
 }
+EXPORT_FUNC(SceGxm, 0xD096336E, gxm_set_w_clamp_value_softfp);
 
 EXPORT(SceGxm, 0x1BF8B853, void, sceGxmSetWClampEnable, SceGxmContext *context,
        SceGxmWClampMode enable)

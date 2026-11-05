@@ -3223,6 +3223,152 @@ def build_thread_event_elf():
     return assemble_elf(rx, rw, rela, TH_MODINFO)
 
 
+# --- SceMotion fixture -----------------------------------------------------
+
+MO_STUB_BASE = 0x200
+MO_LIB_NAME = 0x270
+MO_MODINFO = 0x280
+MO_IMPORT = 0x2E0
+MO_NIDS = 0x310
+MO_ENTRIES = 0x330
+MO_RX_SIZE = 0x360
+
+MO_LIB = b"SceMotion\0"
+MO_LIB_NID = 0xDC571B3F
+MO_FUNCS = [
+    0x28034AC9,  # sceMotionStartSampling
+    0xBDB32767,  # sceMotionGetState
+    0x4F28BFE0,  # sceMotionGetBasicOrientation
+    0xC1652201,  # sceMotionGetTiltCorrection
+    0xDACB2A41,  # sceMotionSetAngleThreshold
+    0x499B6C87,  # sceMotionGetAngleThreshold
+    0x047F060A,  # sceMotionGetDeviceLocation
+    0x47D679EA,  # sceMotionGetSensorState
+]
+
+MO_RW_STATE = 0x000
+MO_RW_SENSOR = 0x100
+MO_RW_VECTOR = 0x140
+MO_RW_SIZE = 0x160
+
+
+def build_motion_elf():
+    """Guest ELF for the stationary SceMotion model."""
+    code = []
+    rx_relocs = []
+
+    def emit(word):
+        code.append(word & 0xFFFFFFFF)
+
+    def movw_movt_rw(rd, offset):
+        base = len(code) * 4
+        emit(arm_movw(rd, 0))
+        emit(arm_movt(rd, 0))
+        rx_relocs.append(encode_rela(0, 1, base, offset, R_ARM_MOVW_ABS_NC))
+        rx_relocs.append(encode_rela(0, 1, base + 4, offset, R_ARM_MOVT_ABS))
+
+    def call(index):
+        emit(arm_bl(len(code) * 4, MO_STUB_BASE + index * 12))
+
+    def check(bit):
+        emit(0xE3500000)
+        emit(0x13844000 | arm_encode_imm(bit))
+
+    def check_negative(bit):
+        emit(0xE3500000)
+        emit(0xA3844000 | arm_encode_imm(bit))
+
+    def check_word(offset, value, bit):
+        movw_movt_rw(1, offset)
+        emit(0xE5910000)
+        emit(arm_movw(2, value & 0xFFFF))
+        emit(arm_movt(2, (value >> 16) & 0xFFFF))
+        emit(0xE1500002)
+        emit(0x13844000 | arm_encode_imm(bit))
+
+    emit(0xE92D4010)
+    emit(arm_mov_imm(4, 0))
+
+    call(0)
+    check(1)
+
+    movw_movt_rw(0, MO_RW_STATE)
+    call(1)
+    check(2)
+    check_word(MO_RW_STATE + 196, 0x3F800000, 4)  # basicOrientation.z
+
+    movw_movt_rw(0, MO_RW_VECTOR)
+    call(2)
+    check(8)
+    check_word(MO_RW_VECTOR + 8, 0x3F800000, 16)
+
+    call(3)
+    emit(0xE3500001)
+    emit(0x13844000 | arm_encode_imm(32))
+
+    emit(arm_movw(0, 0x0000))
+    emit(arm_movt(0, 0x4248))  # 50.0f
+    call(4)
+    check_negative(64)
+
+    call(5)
+    emit(arm_movw(1, 0x0000))
+    emit(arm_movt(1, 0x41F0))  # 30.0f = 0x41F00000
+    emit(0xE1500001)
+    emit(0x13844000 | arm_encode_imm(128))
+
+    movw_movt_rw(0, MO_RW_VECTOR)
+    call(6)
+    check(256)
+    check_word(MO_RW_VECTOR, 0xC2000000, 512)  # accelerometer.x = -32.0f
+
+    movw_movt_rw(0, MO_RW_SENSOR)
+    emit(arm_mov_imm(1, 1))
+    call(7)
+    check(1024)
+    check_word(MO_RW_SENSOR + 8, 0x3F800000, 2048)
+
+    emit(0xE1A00004)
+    emit(0xE3500000)
+    emit(0x03A0002A)
+    emit(0xE8BD8010)
+
+    assert len(code) * 4 <= MO_STUB_BASE, f"motion fixture code overlaps stubs ({len(code) * 4:#x})"
+
+    rx = bytearray(MO_RX_SIZE)
+    rx[:len(code) * 4] = b"".join(struct.pack("<I", w) for w in code)
+    rx[MO_LIB_NAME:MO_LIB_NAME + len(MO_LIB)] = MO_LIB
+
+    info = bytearray(MODULE_INFO_SIZE)
+    struct.pack_into("<HH", info, 0x00, 0x0000, 0x0101)
+    info[0x04:0x04 + len(MODULE_NAME)] = MODULE_NAME
+    struct.pack_into("<I", info, 0x2C, MO_IMPORT)
+    struct.pack_into("<I", info, 0x30, MO_IMPORT + IMPORT_SIZE)
+    struct.pack_into("<I", info, 0x34, 0x12345678)
+    struct.pack_into("<I", info, 0x44, 0x00000000)
+    struct.pack_into("<I", info, 0x48, 0xFFFFFFFF)
+    struct.pack_into("<I", info, 0x5C, 0x03570011)
+    rx[MO_MODINFO:MO_MODINFO + MODULE_INFO_SIZE] = info
+
+    imp = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp, 0, IMPORT_SIZE, 1, 0, len(MO_FUNCS), 0, 0)
+    struct.pack_into("<I", imp, IMP_LIBRARY_NID, MO_LIB_NID)
+    rx[MO_IMPORT:MO_IMPORT + IMPORT_SIZE] = imp
+
+    for i, nid in enumerate(MO_FUNCS):
+        struct.pack_into("<I", rx, MO_NIDS + i * 4, nid)
+
+    rx_relocs.append(encode_rela(0, 0, MO_IMPORT + IMP_LIBRARY_NAME, MO_LIB_NAME))
+    rx_relocs.append(encode_rela(0, 0, MO_IMPORT + IMP_FUNC_NID_TABLE, MO_NIDS))
+    rx_relocs.append(encode_rela(0, 0, MO_IMPORT + IMP_FUNC_ENTRY_TABLE, MO_ENTRIES))
+    for i in range(len(MO_FUNCS)):
+        rx_relocs.append(encode_rela(0, 0, MO_ENTRIES + i * 4, MO_STUB_BASE + i * 12))
+
+    rw = bytearray(MO_RW_SIZE)
+    rela = bytearray(b"".join(rx_relocs))
+    return assemble_elf(rx, rw, rela, MO_MODINFO)
+
+
 # --- SceAppUtil fixture ----------------------------------------------------
 
 APPUTIL_STUB_BASE = 0x140
@@ -3915,6 +4061,10 @@ def main():
     thread_event_path = os.path.join(out_dir, "guest_thread_event.elf")
     with open(thread_event_path, "wb") as f:
         f.write(build_thread_event_elf())
+
+    motion_path = os.path.join(out_dir, "guest_motion.elf")
+    with open(motion_path, "wb") as f:
+        f.write(build_motion_elf())
     print(f"wrote {event_path}")
 
     if os.path.exists(os.path.join(shader_dir, "texture_v.gxp")) and os.path.exists(

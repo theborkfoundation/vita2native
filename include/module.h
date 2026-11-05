@@ -3,6 +3,17 @@
 
 #include <stdint.h>
 
+/*
+ * The guest targets the Vita's base AAPCS (softfp) ABI, while the ARM Linux
+ * host uses the hard-float ABI. Export functions that pass or return floats
+ * must opt back into the base PCS; integer-only functions are unaffected.
+ */
+#if defined(__arm__)
+#define GUEST_SOFTFP_ABI __attribute__((pcs("aapcs")))
+#else
+#define GUEST_SOFTFP_ABI
+#endif
+
 typedef struct {
     const char *name;
     uint32_t nid;

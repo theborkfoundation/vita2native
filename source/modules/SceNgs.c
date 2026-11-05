@@ -939,8 +939,8 @@ EXPORT(SceNgs, 0xAB6BEF8F, int32_t, sceNgsVoiceLockParams, SceNgsHVoice voice_ha
     NGS_LEAVE(0);
 }
 
-EXPORT(SceNgs, 0xA3C807BC, int32_t, sceNgsVoicePatchSetVolume, SceNgsHPatch patch_handle,
-       int32_t output_channel, int32_t input_channel, float volume)
+static int32_t ngs_voice_patch_set_volume_impl(SceNgsHPatch patch_handle, int32_t output_channel,
+                                               int32_t input_channel, float volume)
 {
     NgsObject *patch;
 
@@ -956,6 +956,23 @@ EXPORT(SceNgs, 0xA3C807BC, int32_t, sceNgsVoicePatchSetVolume, SceNgsHPatch patc
     patch->matrix[output_channel][input_channel] = volume;
     NGS_LEAVE(0);
 }
+
+/* Host-side tests call this directly with the host's hard-float ABI. */
+int32_t sceNgsVoicePatchSetVolume(SceNgsHPatch patch_handle, int32_t output_channel,
+                                  int32_t input_channel, float volume)
+{
+    return ngs_voice_patch_set_volume_impl(patch_handle, output_channel, input_channel, volume);
+}
+
+static int32_t ngs_voice_patch_set_volume_softfp(SceNgsHPatch patch_handle, int32_t output_channel,
+                                                 int32_t input_channel,
+                                                 float volume) GUEST_SOFTFP_ABI;
+static int32_t ngs_voice_patch_set_volume_softfp(SceNgsHPatch patch_handle, int32_t output_channel,
+                                                 int32_t input_channel, float volume)
+{
+    return ngs_voice_patch_set_volume_impl(patch_handle, output_channel, input_channel, volume);
+}
+EXPORT_FUNC(SceNgs, 0xA3C807BC, ngs_voice_patch_set_volume_softfp);
 
 EXPORT(SceNgs, 0xBD6F57F0, int32_t, sceNgsVoicePatchSetVolumes, SceNgsHPatch patch_handle,
        int32_t output_channel, const float *volumes, int32_t volume_count)

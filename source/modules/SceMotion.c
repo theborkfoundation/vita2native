@@ -98,11 +98,13 @@ EXPORT(SceMotion, 0x4F28BFE0, int, sceMotionGetBasicOrientation, SceFVector3 *or
     return 0;
 }
 
-EXPORT(SceMotion, 0x20F00078, int, sceMotionRotateYaw, float radians)
+static int motion_rotate_yaw_softfp(float radians) GUEST_SOFTFP_ABI;
+static int motion_rotate_yaw_softfp(float radians)
 {
     (void)radians;
     return 0;
 }
+EXPORT_FUNC(SceMotion, 0x20F00078, motion_rotate_yaw_softfp);
 
 EXPORT(SceMotion, 0xC1652201, int, sceMotionGetTiltCorrection, void)
 {
@@ -137,12 +139,15 @@ EXPORT(SceMotion, 0xA4A7E6E2, int, sceMotionSetGyroBiasCorrection, int value)
     return 0;
 }
 
-EXPORT(SceMotion, 0x499B6C87, float, sceMotionGetAngleThreshold, void)
+static float motion_get_angle_threshold_softfp(void) GUEST_SOFTFP_ABI;
+static float motion_get_angle_threshold_softfp(void)
 {
     return g_angle_threshold;
 }
+EXPORT_FUNC(SceMotion, 0x499B6C87, motion_get_angle_threshold_softfp);
 
-EXPORT(SceMotion, 0xDACB2A41, int, sceMotionSetAngleThreshold, float angle)
+static int motion_set_angle_threshold_softfp(float angle) GUEST_SOFTFP_ABI;
+static int motion_set_angle_threshold_softfp(float angle)
 {
     if (angle < 0.0f || angle > 45.0f)
         return SCE_MOTION_ERROR_OUT_OF_BOUNDS;
@@ -150,6 +155,7 @@ EXPORT(SceMotion, 0xDACB2A41, int, sceMotionSetAngleThreshold, float angle)
     g_angle_threshold = angle;
     return 0;
 }
+EXPORT_FUNC(SceMotion, 0xDACB2A41, motion_set_angle_threshold_softfp);
 
 EXPORT(SceMotion, 0x0FD2CDA2, int, sceMotionReset, void)
 {
