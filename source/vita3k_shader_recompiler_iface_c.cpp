@@ -1,4 +1,6 @@
 #include <cstring>
+#include <map>
+#include <shader/gxp_parser.h>
 #include <shader/spirv_recompiler.h>
 #include <shader/usse_program_analyzer.h>
 #include <shader/usse_translator_types.h>
@@ -13,6 +15,46 @@ int vita3k_gxm_get_attribute_location(const SceGxmProgram *program, uint16_t reg
     shader::usse::get_attribute_informations(*program, locations);
     const auto it = locations.find(reg_index);
     return it == locations.end() ? -1 : static_cast<int>(it->second.location);
+}
+
+uint32_t vita3k_gxm_get_uniform_buffer_layout(const SceGxmProgram *program,
+                                              Vita3kUniformBufferLayout *out, uint32_t max)
+{
+    const auto input = shader::get_program_input(*program);
+    std::map<uint32_t, uint32_t> member_sizes;
+    uint32_t offset = 0;
+    uint32_t count = 0;
+
+    for (const auto &buffer : input.uniform_buffers) {
+        if (buffer.index >= SCE_GXM_REAL_MAX_UNIFORM_BUFFER)
+            continue;
+
+        const uint32_t host_index =
+            buffer.index < SCE_GXM_MAX_UNIFORM_BUFFERS
+                ? buffer.index + SCE_GXM_UNIFORM_BUFFER_OFFSET
+                : SCE_GXM_DEFAULT_UNIFORM_BUFFER_CONTAINER_INDEX;
+        const uint32_t floats = buffer.size;
+
+        member_sizes[host_index] = ((floats + 3) / 4) * 16;
+    }
+
+    for (const auto &[host_index, member_size] : member_sizes) {
+        if (count < max) {
+            out[count].host_index = host_index;
+            out[count].guest_index =
+                host_index == SCE_GXM_DEFAULT_UNIFORM_BUFFER_CONTAINER_INDEX
+                    ? SCE_GXM_MAX_UNIFORM_BUFFERS
+                    : host_index - SCE_GXM_UNIFORM_BUFFER_OFFSET;
+            out[count].offset = offset;
+            out[count].member_size = member_size;
+            out[count].guest_size = member_size;
+        }
+
+        offset += member_size;
+        count++;
+    }
+
+    return offset;
 }
 
 

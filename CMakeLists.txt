@@ -191,6 +191,38 @@ if(BUILD_TESTING)
     target_include_directories(texture_smoke PRIVATE include external/vita-headers/include)
     target_compile_definitions(texture_smoke PRIVATE _GNU_SOURCE=1)
     add_test(NAME texture_smoke COMMAND texture_smoke)
+
+    add_executable(gxm_draw_smoke
+        tests/gxm_draw_smoke.c
+        source/host/host_gfx.c
+        source/host/host_gfx_gl.c
+        source/host/host_gfx_null.c
+        source/host/host_thread.c
+        source/gxm_texture.c
+        source/modules/SceGxm.c
+        source/spirv_cross_glsl_es.cpp
+        source/vita3k_shader_recompiler_iface_c.cpp
+    )
+    target_include_directories(gxm_draw_smoke PRIVATE
+        include
+        source/host
+        external/khronos/include
+        external/vita-headers/include
+    )
+    target_compile_definitions(gxm_draw_smoke PRIVATE _GNU_SOURCE=1)
+    target_link_libraries(gxm_draw_smoke PRIVATE
+        shader
+        glslang
+        spirv-cross-glsl
+        spirv-cross-core
+        fmt-header-only
+        m
+        pthread
+        ${CMAKE_DL_LIBS}
+    )
+    add_test(NAME gxm_draw_smoke
+        COMMAND gxm_draw_smoke
+            ${CMAKE_SOURCE_DIR}/external/Vita3K/tools/native-tool/src/shaders)
 endif()
 
 install(TARGETS vita2native RUNTIME DESTINATION bin)

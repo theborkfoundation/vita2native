@@ -34,6 +34,7 @@
     X(PFNGLTEXIMAGE2DPROC, glTexImage2D)                                                           \
     X(PFNGLTEXSUBIMAGE2DPROC, glTexSubImage2D)                                                     \
     X(PFNGLTEXPARAMETERIPROC, glTexParameteri)                                                     \
+    X(PFNGLTEXPARAMETERFPROC, glTexParameterf)                                                     \
     X(PFNGLACTIVETEXTUREPROC, glActiveTexture)                                                     \
     X(PFNGLGENERATEMIPMAPPROC, glGenerateMipmap)                                                   \
     X(PFNGLGENFRAMEBUFFERSPROC, glGenFramebuffers)                                                 \
@@ -69,14 +70,19 @@
     X(PFNGLDELETESHADERPROC, glDeleteShader)                                                       \
     X(PFNGLDELETEPROGRAMPROC, glDeleteProgram)                                                     \
     X(PFNGLGETUNIFORMLOCATIONPROC, glGetUniformLocation)                                           \
+    X(PFNGLGETUNIFORMBLOCKINDEXPROC, glGetUniformBlockIndex)                                       \
+    X(PFNGLUNIFORMBLOCKBINDINGPROC, glUniformBlockBinding)                                         \
     X(PFNGLUNIFORM1IPROC, glUniform1i)                                                             \
     X(PFNGLUNIFORM1FPROC, glUniform1f)                                                             \
     X(PFNGLUNIFORM4FVPROC, glUniform4fv)                                                           \
     X(PFNGLUNIFORMMATRIX4FVPROC, glUniformMatrix4fv)                                               \
     X(PFNGLDRAWELEMENTSPROC, glDrawElements)                                                       \
+    X(PFNGLDRAWELEMENTSINSTANCEDPROC, glDrawElementsInstanced)                                                       \
     X(PFNGLDRAWARRAYSPROC, glDrawArrays)                                                           \
     X(PFNGLDEPTHFUNCPROC, glDepthFunc)                                                             \
     X(PFNGLDEPTHMASKPROC, glDepthMask)                                                             \
+    X(PFNGLPOLYGONOFFSETPROC, glPolygonOffset)                                                     \
+    X(PFNGLLINEWIDTHPROC, glLineWidth)                                                             \
     X(PFNGLBLENDFUNCSEPARATEPROC, glBlendFuncSeparate)                                             \
     X(PFNGLBLENDEQUATIONSEPARATEPROC, glBlendEquationSeparate)                                     \
     X(PFNGLCOLORMASKPROC, glColorMask)                                                             \

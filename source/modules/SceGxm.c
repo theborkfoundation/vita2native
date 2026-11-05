@@ -11,6 +11,7 @@
  * At sceGxmEndScene the color target is read back into the guest's
  * SceGxmColorSurface, which is what sceDisplaySetFrameBuf presents.
  */
+#include <math.h>
 #include <psp2/gxm.h>
 #include <psp2/kernel/error.h>
 #include <stdlib.h>
@@ -19,11 +20,12 @@
 #include "gfx.h"
 #include "gxm/texture.h"
 #include "gxm/util.h"
+#include "host.h"
 #include "host_gfx_gl.h"
 #include "log.h"
 #include "module.h"
-#include "modules/SceSysmem.h"
 #include "spirv_cross_glsl_es.h"
+#include "util.h"
 #include "vita3k_shader_recompiler_iface_c.h"
 
 extern int vita3k_gxm_get_attribute_location(const SceGxmProgram *program, uint16_t reg_index);
@@ -32,7 +34,12 @@ extern int vita3k_gxm_get_attribute_location(const SceGxmProgram *program, uint1
 #define GL_SHADER_STORAGE_BUFFER 0x90D2
 #endif
 
+#ifndef GL_TEXTURE_LOD_BIAS
+#define GL_TEXTURE_LOD_BIAS 0x8501
+#endif
+
 #define GXM_MAX_LINKED_PROGRAMS 128
+#define GXM_MAX_UNIFORM_BUFFER_LAYOUT 16
 #define GXM_UNIFORM_ARENA_SIZE  (64 * 1024)
 #define GXM_NOTIFICATIONS       512
 
@@ -61,10 +68,15 @@ typedef struct {
 
 typedef struct {
     GLuint tex;
+    GLenum target;
     const void *data;
+    const void *palette;
     uint32_t width;
     uint32_t height;
     uint32_t format;
+    uint32_t mip_count;
+    uint32_t hash;
+    bool valid;
 } GxmTextureCache;
 
 typedef struct SceGxmContext {
@@ -81,16 +93,44 @@ typedef struct SceGxmContext {
 
     GxmStream streams[SCE_GXM_MAX_VERTEX_STREAMS];
     SceGxmTextureInner fragment_textures[SCE_GXM_MAX_TEXTURE_UNITS];
+    SceGxmTextureInner vertex_textures[SCE_GXM_MAX_TEXTURE_UNITS];
 
     void *vertex_uniforms;
     void *fragment_uniforms;
     uint32_t vertex_uniform_size;
     uint32_t fragment_uniform_size;
+    const void *vertex_uniform_buffers[SCE_GXM_MAX_UNIFORM_BUFFERS];
+    const void *fragment_uniform_buffers[SCE_GXM_MAX_UNIFORM_BUFFERS];
 
     uint8_t *vertex_uniform_arena;
     uint8_t *fragment_uniform_arena;
     uint32_t vertex_uniform_head;
     uint32_t fragment_uniform_head;
+
+    uint8_t *vertex_ssbo_data;
+    uint8_t *fragment_ssbo_data;
+    uint32_t vertex_ssbo_size;
+    uint32_t fragment_ssbo_size;
+
+    float viewport_x_offset, viewport_x_scale;
+    float viewport_y_offset, viewport_y_scale;
+    float viewport_z_offset, viewport_z_scale;
+    SceGxmViewportMode viewport_enable;
+    SceGxmRegionClipMode region_clip_mode;
+    unsigned int region_clip_xmin, region_clip_ymin;
+    unsigned int region_clip_xmax, region_clip_ymax;
+    SceGxmCullMode cull_mode;
+    SceGxmPolygonMode front_polygon_mode;
+    SceGxmPolygonMode back_polygon_mode;
+    unsigned int front_point_line_width;
+    unsigned int back_point_line_width;
+    int front_depth_bias_factor, front_depth_bias_units;
+    int back_depth_bias_factor, back_depth_bias_units;
+    float w_clamp_value;
+    SceGxmWClampMode w_clamp_enable;
+    SceGxmTwoSidedMode two_sided;
+    SceGxmFragmentProgramMode front_fragment_program_enable;
+    SceGxmFragmentProgramMode back_fragment_program_enable;
 
     SceGxmDepthFunc depth_func;
     SceGxmDepthWriteMode depth_write;
@@ -106,7 +146,11 @@ typedef struct SceGxmContext {
     GLuint ubo[2];
     GLuint vbo;
     GLuint ibo;
-    GxmTextureCache textures[SCE_GXM_MAX_TEXTURE_UNITS];
+    GLuint wire_ibo;
+    GxmTextureCache textures[2][SCE_GXM_MAX_TEXTURE_UNITS];
+
+    const SceGxmPrecomputedVertexState *precomputed_vertex;
+    const SceGxmPrecomputedFragmentState *precomputed_fragment;
 } SceGxmContext;
 
 typedef struct SceGxmSyncObject {
@@ -115,6 +159,10 @@ typedef struct SceGxmSyncObject {
 
 typedef struct SceGxmRegisteredProgram {
     const SceGxmProgram *programHeader;
+    Vita3kUniformBufferLayout uniform_buffers[GXM_MAX_UNIFORM_BUFFER_LAYOUT];
+    uint32_t uniform_buffer_count;
+    uint32_t uniform_buffer_size; /* total SSBO container size */
+    int refcount;
 } SceGxmRegisteredProgram;
 
 typedef struct SceGxmShaderPatcher {
@@ -130,6 +178,7 @@ typedef struct SceGxmVertexProgram {
     SceGxmVertexStream *streams;
     unsigned int streamCount;
     GLuint shader;
+    int refcount;
 } SceGxmVertexProgram;
 
 typedef struct SceGxmFragmentProgram {
@@ -138,6 +187,8 @@ typedef struct SceGxmFragmentProgram {
     SceGxmMultisampleMode multisampleMode;
     SceGxmBlendInfo blendInfo;
     GLuint shader;
+    bool mask_update;
+    int refcount;
 } SceGxmFragmentProgram;
 
 typedef struct SceGxmRenderTarget {
@@ -324,9 +375,9 @@ static GLuint gxm_get_linked_program(const SceGxmVertexProgram *vs, const SceGxm
         return 0;
 
     GLuint program = g_gl->glCreateProgram();
-    if (vs)
+    if (vs && vs->shader)
         g_gl->glAttachShader(program, vs->shader);
-    if (fs)
+    if (fs && fs->shader)
         g_gl->glAttachShader(program, fs->shader);
     g_gl->glLinkProgram(program);
     g_gl->glGetProgramiv(program, GL_LINK_STATUS, &ok);
@@ -345,89 +396,396 @@ static GLuint gxm_get_linked_program(const SceGxmVertexProgram *vs, const SceGxm
     return program;
 }
 
-static void gxm_upload_fragment_textures(SceGxmContext *context)
+static uint32_t gxm_hash_bytes(uint32_t hash, const void *data, size_t size)
 {
-    for (unsigned int i = 0; i < SCE_GXM_MAX_TEXTURE_UNITS; i++) {
-        SceGxmTextureInner *texture = &context->fragment_textures[i];
-        GxmTextureCache *cache = &context->textures[i];
-        const void *data;
-        uint32_t width, height, fmt;
+    const uint8_t *bytes = data;
 
-        if (!texture->data_addr) {
-            g_gl->glActiveTexture(GL_TEXTURE0 + i);
-            g_gl->glBindTexture(GL_TEXTURE_2D, 0);
-            continue;
-        }
+    for (size_t i = 0; i < size; i++) {
+        hash ^= bytes[i];
+        hash *= 16777619u;
+    }
 
-        data = gxm_texture_get_data(texture);
-        width = (uint32_t)gxm_texture_get_width(texture);
-        height = (uint32_t)gxm_texture_get_height(texture);
-        fmt = gxm_texture_get_format(texture);
-        if (!data || !width || !height)
-            continue;
+    return hash;
+}
 
-        if (!cache->tex) {
-            g_gl->glGenTextures(1, &cache->tex);
-        }
+static uint32_t gxm_texture_hash(const SceGxmTextureInner *texture, const void *data)
+{
+    SceGxmTextureFormat format = gxm_texture_get_format(texture);
+    SceGxmTextureType type = (SceGxmTextureType)gxm_texture_get_type(texture);
+    uint32_t base = (uint32_t)(format & SCE_GXM_TEXTURE_BASE_FORMAT_MASK);
+    uint32_t hash = 2166136261u;
+    uint32_t faces = (type == SCE_GXM_TEXTURE_CUBE || type == SCE_GXM_TEXTURE_CUBE_ARBITRARY) ? 6
+                                                                                            : 1;
 
-        g_gl->glActiveTexture(GL_TEXTURE0 + i);
-        g_gl->glBindTexture(GL_TEXTURE_2D, cache->tex);
+    hash = gxm_hash_bytes(hash, &format, sizeof(format));
+    hash = gxm_hash_bytes(hash, &type, sizeof(type));
 
-        /*
-         * Only 32-bit linear formats are decoded for now. Swizzled layouts and
-         * paletted formats need the Vita tiling decoder; until that lands they
-         * are uploaded as if they were linear.
-         */
-        {
-            uint8_t *rgba = malloc((size_t)width * height * 4);
-            if (rgba) {
-                if (gxm_texture_decode_rgba8(rgba, data, width, height,
-                                             (SceGxmTextureFormat)fmt,
-                                             (SceGxmTextureType)gxm_texture_get_type(texture)) == 0) {
-                    g_gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)width,
-                                       (GLsizei)height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
-                } else {
-                    /* Unknown format: upload the bytes as-is for now. */
-                    g_gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)width,
-                                       (GLsizei)height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
-                }
-                free(rgba);
-            }
-        }
-        g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
-                              texture->min_filter == SCE_GXM_TEXTURE_FILTER_LINEAR ? GL_LINEAR
-                                                                                    : GL_NEAREST);
-        g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
-                              texture->mag_filter == SCE_GXM_TEXTURE_FILTER_LINEAR ? GL_LINEAR
-                                                                                    : GL_NEAREST);
-        g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
-                              texture->uaddr_mode == SCE_GXM_TEXTURE_ADDR_CLAMP ? GL_CLAMP_TO_EDGE
-                                                                                : GL_REPEAT);
-        g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
-                              texture->vaddr_mode == SCE_GXM_TEXTURE_ADDR_CLAMP ? GL_CLAMP_TO_EDGE
-                                                                                : GL_REPEAT);
+    for (uint32_t face = 0; face < faces; face++) {
+        GxmTextureLevel level;
 
-        cache->data = data;
-        cache->width = width;
-        cache->height = height;
-        cache->format = fmt;
+        if (gxm_texture_get_level(texture, face, 0, &level) != 0)
+            return 0;
+        hash = gxm_hash_bytes(hash, (const uint8_t *)data + level.offset, level.size);
+    }
+
+    if (base == SCE_GXM_TEXTURE_BASE_FORMAT_P4 || base == SCE_GXM_TEXTURE_BASE_FORMAT_P8) {
+        const uint32_t *palette = (const uint32_t *)(uintptr_t)(texture->palette_addr << 6);
+        uint32_t entries = base == SCE_GXM_TEXTURE_BASE_FORMAT_P4 ? 16 : 256;
+
+        if (!palette)
+            return 0;
+        hash = gxm_hash_bytes(hash, palette, entries * sizeof(uint32_t));
+    }
+
+    return hash;
+}
+
+static GLenum gxm_wrap_mode(unsigned int mode)
+{
+    switch (mode) {
+    case SCE_GXM_TEXTURE_ADDR_REPEAT:
+    case SCE_GXM_TEXTURE_ADDR_REPEAT_IGNORE_BORDER:
+        return GL_REPEAT;
+    case SCE_GXM_TEXTURE_ADDR_MIRROR:
+        return GL_MIRRORED_REPEAT;
+    default:
+        return GL_CLAMP_TO_EDGE;
     }
 }
 
-static void gxm_flush_state(SceGxmContext *context, GLuint program)
+static GLenum gxm_min_filter(const SceGxmTextureInner *texture, uint32_t mip_count)
+{
+    bool mipmapped = mip_count > 1;
+
+    switch (texture->min_filter) {
+    case SCE_GXM_TEXTURE_FILTER_LINEAR:
+        return GL_LINEAR;
+    case SCE_GXM_TEXTURE_FILTER_MIPMAP_LINEAR:
+        if (!mipmapped)
+            return GL_LINEAR;
+        return texture->mip_filter ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR_MIPMAP_NEAREST;
+    case SCE_GXM_TEXTURE_FILTER_MIPMAP_POINT:
+        return mipmapped ? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST;
+    case SCE_GXM_TEXTURE_FILTER_POINT:
+    default:
+        return GL_NEAREST;
+    }
+}
+
+static void gxm_texture_params(const SceGxmTextureInner *texture, GLenum target, uint32_t mip_count)
+{
+    g_gl->glTexParameteri(target, GL_TEXTURE_MIN_FILTER, (GLint)gxm_min_filter(texture, mip_count));
+    g_gl->glTexParameteri(target, GL_TEXTURE_MAG_FILTER,
+                          texture->mag_filter == SCE_GXM_TEXTURE_FILTER_LINEAR ? GL_LINEAR
+                                                                                : GL_NEAREST);
+    g_gl->glTexParameteri(target, GL_TEXTURE_WRAP_S, (GLint)gxm_wrap_mode(texture->uaddr_mode));
+    g_gl->glTexParameteri(target, GL_TEXTURE_WRAP_T, (GLint)gxm_wrap_mode(texture->vaddr_mode));
+    if (target == GL_TEXTURE_CUBE_MAP)
+        g_gl->glTexParameteri(target, GL_TEXTURE_WRAP_R, (GLint)gxm_wrap_mode(texture->vaddr_mode));
+
+    g_gl->glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, mip_count > 0 ? (GLint)mip_count - 1 : 0);
+    g_gl->glTexParameterf(target, GL_TEXTURE_MIN_LOD,
+                          (float)(texture->lod_min0 | (texture->lod_min1 << 2)));
+}
+
+static bool gxm_upload_texture(GxmTextureCache *cache, const SceGxmTextureInner *texture,
+                               unsigned int unit)
+{
+    SceGxmTextureType type = (SceGxmTextureType)gxm_texture_get_type(texture);
+    bool cube = type == SCE_GXM_TEXTURE_CUBE || type == SCE_GXM_TEXTURE_CUBE_ARBITRARY;
+    GLenum target = cube ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
+    const void *data = gxm_texture_get_data(texture);
+    uint32_t width = (uint32_t)gxm_texture_get_width(texture);
+    uint32_t height = (uint32_t)gxm_texture_get_height(texture);
+    uint32_t mip_count = gxm_texture_true_mip_count(texture);
+    uint32_t hash;
+    uint8_t *rgba;
+
+    g_gl->glActiveTexture(GL_TEXTURE0 + unit);
+
+    if (!data || !width || !height || width > 4096 || height > 4096) {
+        g_gl->glBindTexture(GL_TEXTURE_2D, 0);
+        g_gl->glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+        cache->valid = false;
+        return false;
+    }
+
+    hash = gxm_texture_hash(texture, data);
+
+    if (cache->tex && cache->target != target) {
+        g_gl->glDeleteTextures(1, &cache->tex);
+        cache->tex = 0;
+        cache->valid = false;
+    }
+
+    if (!cache->tex) {
+        g_gl->glGenTextures(1, &cache->tex);
+        cache->target = target;
+        cache->valid = false;
+    }
+
+    g_gl->glBindTexture(target, cache->tex);
+
+    if (cache->valid && cache->hash == hash && cache->data == data &&
+        cache->format == (uint32_t)gxm_texture_get_format(texture) &&
+        cache->mip_count == mip_count && cache->target == target) {
+        gxm_texture_params(texture, target, mip_count);
+        return true;
+    }
+
+    rgba = malloc((size_t)width * height * 4);
+    if (!rgba)
+        return false;
+
+    for (uint32_t face = 0; face < (cube ? 6u : 1u); face++) {
+        for (uint32_t level = 0; level < mip_count; level++) {
+            GxmTextureLevel info;
+            GLenum upload_target = target;
+
+            if (gxm_texture_get_level(texture, face, level, &info) != 0)
+                continue;
+            if (gxm_texture_decode_level_at(rgba, texture, data, face, level) != 0) {
+                static uint32_t warned_formats[8];
+                uint32_t format = (uint32_t)gxm_texture_get_format(texture);
+                bool warned = false;
+
+                for (uint32_t i = 0; i < ARRAY_SIZE(warned_formats); i++) {
+                    if (warned_formats[i] == format)
+                        warned = true;
+                }
+                if (!warned) {
+                    for (uint32_t i = 0; i < ARRAY_SIZE(warned_formats); i++) {
+                        if (!warned_formats[i]) {
+                            warned_formats[i] = format;
+                            break;
+                        }
+                    }
+                    LOG("SceGxm: unsupported texture format 0x%08x, sampling black", format);
+                }
+                free(rgba);
+                g_gl->glBindTexture(target, 0);
+                cache->valid = false;
+                return false;
+            }
+
+            if (cube)
+                upload_target = GL_TEXTURE_CUBE_MAP_POSITIVE_X + face;
+
+            g_gl->glTexImage2D(upload_target, (GLint)level, GL_RGBA8, (GLsizei)info.width,
+                               (GLsizei)info.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        }
+    }
+
+    free(rgba);
+
+    gxm_texture_params(texture, target, mip_count);
+
+    cache->data = data;
+    cache->palette = (const void *)(uintptr_t)(texture->palette_addr << 6);
+    cache->width = width;
+    cache->height = height;
+    cache->format = (uint32_t)gxm_texture_get_format(texture);
+    cache->mip_count = mip_count;
+    cache->hash = hash;
+    cache->valid = true;
+
+    return true;
+}
+
+static void gxm_upload_textures(SceGxmContext *context)
+{
+    for (unsigned int i = 0; i < SCE_GXM_MAX_TEXTURE_UNITS; i++) {
+        gxm_upload_texture(&context->textures[0][i], &context->fragment_textures[i], i);
+        gxm_upload_texture(&context->textures[1][i], &context->vertex_textures[i],
+                           SCE_GXM_MAX_TEXTURE_UNITS + i);
+    }
+}
+
+static void gxm_upload_uniforms(SceGxmContext *context, const SceGxmRegisteredProgram *program,
+                                bool vertex)
+{
+    const void *default_buffer = vertex ? context->vertex_uniforms : context->fragment_uniforms;
+    const void *const *buffers =
+        vertex ? context->vertex_uniform_buffers : context->fragment_uniform_buffers;
+    uint8_t **data = vertex ? &context->vertex_ssbo_data : &context->fragment_ssbo_data;
+    uint32_t *capacity = vertex ? &context->vertex_ssbo_size : &context->fragment_ssbo_size;
+    uint32_t total = program ? program->uniform_buffer_size : 0;
+
+    if (!program || !total)
+        return;
+
+    if (*capacity != total) {
+        free(*data);
+        *data = malloc(total);
+        *capacity = *data ? total : 0;
+    }
+    if (!*data)
+        return;
+
+    memset(*data, 0, total);
+
+    for (uint32_t i = 0; i < program->uniform_buffer_count; i++) {
+        const Vita3kUniformBufferLayout *layout = &program->uniform_buffers[i];
+        const void *source = NULL;
+        size_t size;
+
+        if (layout->guest_index == 14)
+            source = default_buffer;
+        else if (layout->guest_index < SCE_GXM_MAX_UNIFORM_BUFFERS)
+            source = buffers[layout->guest_index];
+
+        if (!source)
+            continue;
+
+        size = layout->guest_size < layout->member_size ? layout->guest_size
+                                                        : layout->member_size;
+        memcpy(*data + layout->offset, source, size);
+    }
+
+    g_gl->glBindBuffer(GL_SHADER_STORAGE_BUFFER, context->ssbo[vertex ? 0 : 1]);
+    g_gl->glBufferData(GL_SHADER_STORAGE_BUFFER, total, *data, GL_STREAM_DRAW);
+    g_gl->glBindBufferBase(GL_SHADER_STORAGE_BUFFER, vertex ? 0 : 1,
+                           context->ssbo[vertex ? 0 : 1]);
+}
+
+static void gxm_apply_viewport(SceGxmContext *context)
+{
+    uint32_t width = context->render_target ? context->render_target->params.width : 960;
+    uint32_t height = context->render_target ? context->render_target->params.height : 544;
+
+    if (context->viewport_enable == SCE_GXM_VIEWPORT_ENABLED) {
+        float ymin = context->viewport_y_offset + context->viewport_y_scale;
+        float ymax = context->viewport_y_offset - context->viewport_y_scale - 1.0f;
+        int x = (int)(context->viewport_x_offset - fabsf(context->viewport_x_scale));
+        int y = (int)(ymin < ymax ? ymin : ymax);
+        int w = (int)fabsf(2.0f * context->viewport_x_scale);
+        int h = (int)fabsf(2.0f * context->viewport_y_scale);
+
+        if (w < 1)
+            w = 1;
+        if (h < 1)
+            h = 1;
+        g_gl->glViewport(x, y, w, h);
+    } else {
+        g_gl->glViewport(0, 0, (GLsizei)width, (GLsizei)height);
+    }
+}
+
+static void gxm_apply_region_clip(SceGxmContext *context)
+{
+    uint32_t height = context->render_target ? context->render_target->params.height : 544;
+    int x, y, w, h;
+
+    switch (context->region_clip_mode) {
+    case SCE_GXM_REGION_CLIP_ALL:
+        g_gl->glEnable(GL_SCISSOR_TEST);
+        g_gl->glScissor(0, 0, 0, 0);
+        return;
+    case SCE_GXM_REGION_CLIP_OUTSIDE:
+        break;
+    case SCE_GXM_REGION_CLIP_INSIDE:
+        /* GLES cannot invert a scissor rectangle; approximate as disabled. */
+    case SCE_GXM_REGION_CLIP_NONE:
+    default:
+        g_gl->glDisable(GL_SCISSOR_TEST);
+        return;
+    }
+
+    x = (int)context->region_clip_xmin;
+    y = (int)(height - context->region_clip_ymax - 1);
+    w = (int)(context->region_clip_xmax - context->region_clip_xmin + 1);
+    h = (int)(context->region_clip_ymax - context->region_clip_ymin + 1);
+
+    if (w < 0)
+        w = 0;
+    if (h < 0)
+        h = 0;
+
+    g_gl->glEnable(GL_SCISSOR_TEST);
+    g_gl->glScissor(x, y, w, h);
+}
+
+static void gxm_apply_cull(SceGxmContext *context)
+{
+    switch (context->cull_mode) {
+    case SCE_GXM_CULL_CW:
+        g_gl->glEnable(GL_CULL_FACE);
+        g_gl->glCullFace(GL_BACK);
+        break;
+    case SCE_GXM_CULL_CCW:
+        g_gl->glEnable(GL_CULL_FACE);
+        g_gl->glCullFace(GL_FRONT);
+        break;
+    case SCE_GXM_CULL_NONE:
+    default:
+        g_gl->glDisable(GL_CULL_FACE);
+        break;
+    }
+}
+
+static void gxm_gl_check(const char *where)
+{
+    GLenum error = g_gl->glGetError();
+
+    if (error != GL_NO_ERROR)
+        LOG("SceGxm: GL error 0x%x at %s", error, where);
+}
+
+static void gxm_flush_state(SceGxmContext *context, GLuint program, uint32_t max_index)
 {
     const SceGxmVertexProgram *vp = context->vertex_program;
     const SceGxmFragmentProgram *fp = context->fragment_program;
+    uint32_t surface_width = context->color_surface && context->color_surface->width
+                                 ? context->color_surface->width
+                                 : 960;
+    uint32_t surface_height = context->color_surface && context->color_surface->height
+                                  ? context->color_surface->height
+                                  : 544;
+    bool both_side_disabled;
 
     g_gl->glUseProgram(program);
 
-    /* Render-info uniform buffers (same layout the deko3d backend used). */
+    /* Render-info uniform buffers. */
     {
         struct GXMRenderVertUniformBlock vert = {
-            {1.0f, 1.0f, 1.0f, 1.0f}, 1.0f, 960.0f, 544.0f, 0.0f, 1.0f,
+            {1.0f, 1.0f, 1.0f, 1.0f},
+            context->viewport_enable == SCE_GXM_VIEWPORT_ENABLED ? 1.0f : 0.0f,
+            (float)surface_width,
+            (float)surface_height,
+            context->viewport_enable == SCE_GXM_VIEWPORT_ENABLED ? context->viewport_z_offset
+                                                                 : 0.0f,
+            context->viewport_enable == SCE_GXM_VIEWPORT_ENABLED ? context->viewport_z_scale
+                                                                 : 1.0f,
         };
-        struct GXMRenderFragUniformBlock frag = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-        GLint loc;
+        both_side_disabled =
+            context->front_fragment_program_enable == SCE_GXM_FRAGMENT_PROGRAM_DISABLED &&
+            (context->back_fragment_program_enable == SCE_GXM_FRAGMENT_PROGRAM_DISABLED ||
+             context->two_sided == SCE_GXM_TWO_SIDED_DISABLED);
+        struct GXMRenderFragUniformBlock frag = {
+            both_side_disabled
+                ? 0.0f
+                : (context->front_fragment_program_enable == SCE_GXM_FRAGMENT_PROGRAM_DISABLED
+                       ? 1.0f
+                       : 0.0f),
+            both_side_disabled
+                ? 0.0f
+                : (context->two_sided == SCE_GXM_TWO_SIDED_DISABLED
+                       ? (context->front_fragment_program_enable ==
+                                  SCE_GXM_FRAGMENT_PROGRAM_DISABLED
+                              ? 1.0f
+                              : 0.0f)
+                       : (context->back_fragment_program_enable ==
+                                  SCE_GXM_FRAGMENT_PROGRAM_DISABLED
+                              ? 1.0f
+                              : 0.0f)),
+            0.0f,
+            0.0f,
+            1.0f,
+        };
+        GLuint block;
+
+        if (both_side_disabled)
+            g_gl->glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
 
         g_gl->glBindBuffer(GL_UNIFORM_BUFFER, context->ubo[0]);
         g_gl->glBufferData(GL_UNIFORM_BUFFER, sizeof(vert), &vert, GL_STREAM_DRAW);
@@ -437,27 +795,36 @@ static void gxm_flush_state(SceGxmContext *context, GLuint program)
         g_gl->glBufferData(GL_UNIFORM_BUFFER, sizeof(frag), &frag, GL_STREAM_DRAW);
         g_gl->glBindBufferBase(GL_UNIFORM_BUFFER, 3, context->ubo[1]);
 
-        loc = g_gl->glGetUniformLocation(program, "renderVertInfo");
-        if (loc >= 0)
-            g_gl->glUniform1i(loc, 2);
-        loc = g_gl->glGetUniformLocation(program, "renderFragInfo");
-        if (loc >= 0)
-            g_gl->glUniform1i(loc, 3);
+        block = g_gl->glGetUniformBlockIndex(program, "renderVertInfo");
+        if (block != GL_INVALID_INDEX)
+            g_gl->glUniformBlockBinding(program, block, 2);
+        block = g_gl->glGetUniformBlockIndex(program, "renderFragInfo");
+        if (block != GL_INVALID_INDEX)
+            g_gl->glUniformBlockBinding(program, block, 3);
     }
 
-    /* Default uniforms as storage buffers. */
-    if (vp && context->vertex_uniforms) {
-        g_gl->glBindBuffer(GL_SHADER_STORAGE_BUFFER, context->ssbo[0]);
-        g_gl->glBufferData(GL_SHADER_STORAGE_BUFFER, context->vertex_uniform_size,
-                           context->vertex_uniforms, GL_STREAM_DRAW);
-        g_gl->glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, context->ssbo[0]);
+    /* Default uniforms and named uniform buffers share one SSBO per stage. */
+    if (vp)
+        gxm_upload_uniforms(context, vp->programId, true);
+    if (fp)
+        gxm_upload_uniforms(context, fp->programId, false);
+
+    gxm_apply_viewport(context);
+    gxm_apply_region_clip(context);
+    gxm_apply_cull(context);
+
+    if (context->front_depth_bias_factor || context->front_depth_bias_units) {
+        g_gl->glEnable(GL_POLYGON_OFFSET_FILL);
+        g_gl->glPolygonOffset((GLfloat)context->front_depth_bias_factor,
+                              (GLfloat)context->front_depth_bias_units);
+    } else {
+        g_gl->glDisable(GL_POLYGON_OFFSET_FILL);
     }
-    if (fp && context->fragment_uniforms) {
-        g_gl->glBindBuffer(GL_SHADER_STORAGE_BUFFER, context->ssbo[1]);
-        g_gl->glBufferData(GL_SHADER_STORAGE_BUFFER, context->fragment_uniform_size,
-                           context->fragment_uniforms, GL_STREAM_DRAW);
-        g_gl->glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, context->ssbo[1]);
-    }
+
+    if (context->front_point_line_width > 1)
+        g_gl->glLineWidth((GLfloat)context->front_point_line_width);
+    else
+        g_gl->glLineWidth(1.0f);
 
     /* Depth and stencil. */
     if (context->ds_surface) {
@@ -498,13 +865,16 @@ static void gxm_flush_state(SceGxmContext *context, GLuint program)
         } else {
             g_gl->glDisable(GL_BLEND);
         }
-        g_gl->glColorMask((b->colorMask & SCE_GXM_COLOR_MASK_R) ? GL_TRUE : GL_FALSE,
-                          (b->colorMask & SCE_GXM_COLOR_MASK_G) ? GL_TRUE : GL_FALSE,
-                          (b->colorMask & SCE_GXM_COLOR_MASK_B) ? GL_TRUE : GL_FALSE,
-                          (b->colorMask & SCE_GXM_COLOR_MASK_A) ? GL_TRUE : GL_FALSE);
+        if (both_side_disabled)
+            g_gl->glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        else
+            g_gl->glColorMask((b->colorMask & SCE_GXM_COLOR_MASK_R) ? GL_TRUE : GL_FALSE,
+                              (b->colorMask & SCE_GXM_COLOR_MASK_G) ? GL_TRUE : GL_FALSE,
+                              (b->colorMask & SCE_GXM_COLOR_MASK_B) ? GL_TRUE : GL_FALSE,
+                              (b->colorMask & SCE_GXM_COLOR_MASK_A) ? GL_TRUE : GL_FALSE);
     }
 
-    gxm_upload_fragment_textures(context);
+    gxm_upload_textures(context);
 
     /* Vertex attributes: stream data is copied into a GL buffer every draw. */
     if (vp) {
@@ -519,14 +889,15 @@ static void gxm_flush_state(SceGxmContext *context, GLuint program)
                 continue;
 
             location = vita3k_gxm_get_attribute_location(vp->programId->programHeader, a->regIndex);
+            s = &vp->streams[a->streamIndex];
+            stream = &context->streams[a->streamIndex];
             if (location < 0)
                 continue;
 
-            s = &vp->streams[a->streamIndex];
-            stream = &context->streams[a->streamIndex];
-            if (!stream->data)
+            if (!stream->data || !s->stride)
                 continue;
 
+            stream->size = (max_index + 1) * s->stride;
             if (!stream->vbo)
                 g_gl->glGenBuffers(1, &stream->vbo);
             g_gl->glBindBuffer(GL_ARRAY_BUFFER, stream->vbo);
@@ -608,7 +979,12 @@ EXPORT(SceGxm, 0x889AE88C, int, sceGxmSyncObjectDestroy, SceGxmSyncObject *syncO
 
 EXPORT(SceGxm, 0x9F448E79, int, sceGxmNotificationWait, const SceGxmNotification *notification)
 {
-    (void)notification;
+    if (!notification || !notification->address)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+
+    while (*notification->address != notification->value)
+        host_sleep_ns(1000000);
+
     return 0;
 }
 
@@ -643,6 +1019,31 @@ EXPORT(SceGxm, 0xE84CE5B4, int, sceGxmCreateContext, const SceGxmContextParams *
     ctx->back_stencil_compare_mask = 0xFF;
     ctx->back_stencil_write_mask = 0xFF;
 
+    /* Defaults matching a 960x544 full-surface viewport. Applications normally
+     * call sceGxmSetDefaultRegionClipAndViewport right after BeginScene. */
+    ctx->viewport_enable = SCE_GXM_VIEWPORT_ENABLED;
+    ctx->viewport_x_offset = 480.0f;
+    ctx->viewport_x_scale = 480.0f;
+    ctx->viewport_y_offset = 272.0f;
+    ctx->viewport_y_scale = -272.0f;
+    ctx->viewport_z_offset = 0.5f;
+    ctx->viewport_z_scale = 0.5f;
+    ctx->region_clip_mode = SCE_GXM_REGION_CLIP_NONE;
+    ctx->region_clip_xmin = 0;
+    ctx->region_clip_ymin = 0;
+    ctx->region_clip_xmax = 959;
+    ctx->region_clip_ymax = 543;
+    ctx->cull_mode = SCE_GXM_CULL_NONE;
+    ctx->front_polygon_mode = SCE_GXM_POLYGON_MODE_TRIANGLE_FILL;
+    ctx->back_polygon_mode = SCE_GXM_POLYGON_MODE_TRIANGLE_FILL;
+    ctx->front_point_line_width = 1;
+    ctx->back_point_line_width = 1;
+    ctx->w_clamp_value = 1.0f;
+    ctx->w_clamp_enable = SCE_GXM_WCLAMP_MODE_DISABLED;
+    ctx->two_sided = SCE_GXM_TWO_SIDED_DISABLED;
+    ctx->front_fragment_program_enable = SCE_GXM_FRAGMENT_PROGRAM_ENABLED;
+    ctx->back_fragment_program_enable = SCE_GXM_FRAGMENT_PROGRAM_ENABLED;
+
     *context = ctx;
     return 0;
 
@@ -658,9 +1059,12 @@ EXPORT(SceGxm, 0xEDDC5FB2, int, sceGxmDestroyContext, SceGxmContext *context)
         return SCE_GXM_ERROR_INVALID_POINTER;
 
     if (g_gl) {
-        for (unsigned int i = 0; i < SCE_GXM_MAX_TEXTURE_UNITS; i++)
-            if (context->textures[i].tex)
-                g_gl->glDeleteTextures(1, &context->textures[i].tex);
+        for (unsigned int i = 0; i < SCE_GXM_MAX_TEXTURE_UNITS; i++) {
+            if (context->textures[0][i].tex)
+                g_gl->glDeleteTextures(1, &context->textures[0][i].tex);
+            if (context->textures[1][i].tex)
+                g_gl->glDeleteTextures(1, &context->textures[1][i].tex);
+        }
         for (unsigned int i = 0; i < SCE_GXM_MAX_VERTEX_STREAMS; i++)
             if (context->streams[i].vbo)
                 g_gl->glDeleteBuffers(1, &context->streams[i].vbo);
@@ -668,8 +1072,14 @@ EXPORT(SceGxm, 0xEDDC5FB2, int, sceGxmDestroyContext, SceGxmContext *context)
             g_gl->glDeleteBuffers(2, context->ssbo);
         if (context->ubo[0] || context->ubo[1])
             g_gl->glDeleteBuffers(2, context->ubo);
+        if (context->ibo)
+            g_gl->glDeleteBuffers(1, &context->ibo);
+        if (context->wire_ibo)
+            g_gl->glDeleteBuffers(1, &context->wire_ibo);
     }
 
+    free(context->vertex_ssbo_data);
+    free(context->fragment_ssbo_data);
     free(context->vertex_uniform_arena);
     free(context->fragment_uniform_arena);
     return 0;
@@ -696,6 +1106,8 @@ EXPORT(SceGxm, 0x05032658, int, sceGxmShaderPatcherCreate, const SceGxmShaderPat
 
 EXPORT(SceGxm, 0xEAA5B100, int, sceGxmShaderPatcherDestroy, SceGxmShaderPatcher *shaderPatcher)
 {
+    for (uint32_t i = 0; i < shaderPatcher->registered_count; i++)
+        free(shaderPatcher->registered_programs[i]);
     free(shaderPatcher->registered_programs);
     free(shaderPatcher);
     return 0;
@@ -711,6 +1123,13 @@ EXPORT(SceGxm, 0x2B528462, int, sceGxmShaderPatcherRegisterProgram,
         return SCE_KERNEL_ERROR_NO_MEMORY;
 
     registered->programHeader = programHeader;
+    registered->refcount = 1;
+    registered->uniform_buffer_size =
+        vita3k_gxm_get_uniform_buffer_layout(programHeader, registered->uniform_buffers,
+                                             ARRAY_SIZE(registered->uniform_buffers));
+    while (registered->uniform_buffer_count < ARRAY_SIZE(registered->uniform_buffers) &&
+           registered->uniform_buffers[registered->uniform_buffer_count].member_size != 0)
+        registered->uniform_buffer_count++;
     shaderPatcher->registered_programs =
         realloc(shaderPatcher->registered_programs,
                 (shaderPatcher->registered_count + 1) * sizeof(SceGxmShaderPatcherId));
@@ -722,8 +1141,16 @@ EXPORT(SceGxm, 0x2B528462, int, sceGxmShaderPatcherRegisterProgram,
 EXPORT(SceGxm, 0xF103AF8A, int, sceGxmShaderPatcherUnregisterProgram,
        SceGxmShaderPatcher *shaderPatcher, SceGxmShaderPatcherId programId)
 {
-    (void)shaderPatcher;
-    free(programId);
+    for (uint32_t i = 0; i < shaderPatcher->registered_count; i++) {
+        if (shaderPatcher->registered_programs[i] == programId) {
+            free(programId);
+            for (uint32_t j = i; j + 1 < shaderPatcher->registered_count; j++)
+                shaderPatcher->registered_programs[j] = shaderPatcher->registered_programs[j + 1];
+            shaderPatcher->registered_count--;
+            return 0;
+        }
+    }
+
     return 0;
 }
 
@@ -739,6 +1166,7 @@ EXPORT(SceGxm, 0xB7BBA6D5, int, sceGxmShaderPatcherCreateVertexProgram,
         return SCE_KERNEL_ERROR_NO_MEMORY;
 
     vp->programId = programId;
+    vp->refcount = 1;
     vp->attributeCount = attributeCount;
     vp->attributes = calloc(attributeCount, sizeof(*attributes));
     memcpy(vp->attributes, attributes, attributeCount * sizeof(*attributes));
@@ -764,6 +1192,10 @@ EXPORT(SceGxm, 0xAC1FF2DA, int, sceGxmShaderPatcherReleaseVertexProgram,
        SceGxmShaderPatcher *shaderPatcher, SceGxmVertexProgram *vertexProgram)
 {
     (void)shaderPatcher;
+    if (!vertexProgram)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    if (--vertexProgram->refcount > 0)
+        return 0;
     if (g_gl && vertexProgram->shader)
         g_gl->glDeleteShader(vertexProgram->shader);
     free(vertexProgram->attributes);
@@ -787,6 +1219,7 @@ EXPORT(SceGxm, 0x4ED2E49D, int, sceGxmShaderPatcherCreateFragmentProgram,
         return SCE_KERNEL_ERROR_NO_MEMORY;
 
     fp->programId = programId;
+    fp->refcount = 1;
     fp->outputFormat = outputFormat;
     fp->multisampleMode = multisampleMode;
     if (blendInfo) {
@@ -815,6 +1248,10 @@ EXPORT(SceGxm, 0xBE2743D1, int, sceGxmShaderPatcherReleaseFragmentProgram,
        SceGxmShaderPatcher *shaderPatcher, SceGxmFragmentProgram *fragmentProgram)
 {
     (void)shaderPatcher;
+    if (!fragmentProgram)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    if (--fragmentProgram->refcount > 0)
+        return 0;
     if (g_gl && fragmentProgram->shader)
         g_gl->glDeleteShader(fragmentProgram->shader);
     free(fragmentProgram);
@@ -911,6 +1348,138 @@ EXPORT(SceGxm, 0xED0F6E25, int, sceGxmColorSurfaceInit, SceGxmColorSurface *surf
     inner->colorFormat = colorFormat;
     inner->surfaceType = surfaceType;
     inner->outputRegisterSize = outputRegisterSize;
+    inner->clipXMin = 0;
+    inner->clipYMin = 0;
+    inner->clipXMax = (uint16_t)(width ? width - 1 : 0);
+    inner->clipYMax = (uint16_t)(height ? height - 1 : 0);
+    return 0;
+}
+
+EXPORT(SceGxm, 0x613639FA, int, sceGxmColorSurfaceInitDisabled, SceGxmColorSurface *surface)
+{
+    SceGxmColorSurfaceInner *inner = (SceGxmColorSurfaceInner *)surface;
+
+    if (!surface)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    memset(inner, 0, sizeof(*inner));
+    inner->disabled = 1;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x0E0EBB57, SceBool, sceGxmColorSurfaceIsEnabled,
+       const SceGxmColorSurface *surface)
+{
+    return surface && !((const SceGxmColorSurfaceInner *)surface)->disabled;
+}
+
+EXPORT(SceGxm, 0x07DFEE4B, void, sceGxmColorSurfaceGetClip, const SceGxmColorSurface *surface,
+       unsigned int *xMin, unsigned int *yMin, unsigned int *xMax, unsigned int *yMax)
+{
+    const SceGxmColorSurfaceInner *inner = (const SceGxmColorSurfaceInner *)surface;
+
+    if (!inner)
+        return;
+    if (xMin)
+        *xMin = inner->clipXMin;
+    if (yMin)
+        *yMin = inner->clipYMin;
+    if (xMax)
+        *xMax = inner->clipXMax;
+    if (yMax)
+        *yMax = inner->clipYMax;
+}
+
+EXPORT(SceGxm, 0x86456F7B, void, sceGxmColorSurfaceSetClip, SceGxmColorSurface *surface,
+       unsigned int xMin, unsigned int yMin, unsigned int xMax, unsigned int yMax)
+{
+    SceGxmColorSurfaceInner *inner = (SceGxmColorSurfaceInner *)surface;
+
+    if (!inner)
+        return;
+    inner->clipXMin = (uint16_t)xMin;
+    inner->clipYMin = (uint16_t)yMin;
+    inner->clipXMax = (uint16_t)xMax;
+    inner->clipYMax = (uint16_t)yMax;
+}
+
+EXPORT(SceGxm, 0x6E3FA74D, SceGxmColorSurfaceScaleMode, sceGxmColorSurfaceGetScaleMode,
+       const SceGxmColorSurface *surface)
+{
+    return ((const SceGxmColorSurfaceInner *)surface)->downscale
+               ? SCE_GXM_COLOR_SURFACE_SCALE_MSAA_DOWNSCALE
+               : SCE_GXM_COLOR_SURFACE_SCALE_NONE;
+}
+
+EXPORT(SceGxm, 0x6B96EDF7, void, sceGxmColorSurfaceSetScaleMode, SceGxmColorSurface *surface,
+       SceGxmColorSurfaceScaleMode scaleMode)
+{
+    ((SceGxmColorSurfaceInner *)surface)->downscale =
+        scaleMode == SCE_GXM_COLOR_SURFACE_SCALE_MSAA_DOWNSCALE;
+}
+
+EXPORT(SceGxm, 0x2DB6026C, void *, sceGxmColorSurfaceGetData, const SceGxmColorSurface *surface)
+{
+    return ((const SceGxmColorSurfaceInner *)surface)->data;
+}
+
+EXPORT(SceGxm, 0x537CA400, int, sceGxmColorSurfaceSetData, SceGxmColorSurface *surface, void *data)
+{
+    ((SceGxmColorSurfaceInner *)surface)->data = data;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xF3C1C6C6, SceGxmColorFormat, sceGxmColorSurfaceGetFormat,
+       const SceGxmColorSurface *surface)
+{
+    return ((const SceGxmColorSurfaceInner *)surface)->colorFormat;
+}
+
+EXPORT(SceGxm, 0x5F9A3A16, int, sceGxmColorSurfaceSetFormat, SceGxmColorSurface *surface,
+       SceGxmColorFormat format)
+{
+    ((SceGxmColorSurfaceInner *)surface)->colorFormat = format;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x52FDE962, SceGxmColorSurfaceType, sceGxmColorSurfaceGetType,
+       const SceGxmColorSurface *surface)
+{
+    return ((const SceGxmColorSurfaceInner *)surface)->surfaceType;
+}
+
+EXPORT(SceGxm, 0xF33D9980, unsigned int, sceGxmColorSurfaceGetStrideInPixels,
+       const SceGxmColorSurface *surface)
+{
+    return ((const SceGxmColorSurfaceInner *)surface)->strideInPixels;
+}
+
+EXPORT(SceGxm, 0xEE0B4DF0, SceGxmColorSurfaceGammaMode, sceGxmColorSurfaceGetGammaMode,
+       const SceGxmColorSurface *surface)
+{
+    return (SceGxmColorSurfaceGammaMode)(
+        ((const SceGxmColorSurfaceInner *)surface)->gamma_mode << 12);
+}
+
+EXPORT(SceGxm, 0xF5C89643, int, sceGxmColorSurfaceSetGammaMode, SceGxmColorSurface *surface,
+       SceGxmColorSurfaceGammaMode gammaMode)
+{
+    ((SceGxmColorSurfaceInner *)surface)->gamma_mode = (gammaMode >> 12) & 3;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x200A96E1, SceGxmColorSurfaceDitherMode, sceGxmColorSurfaceGetDitherMode,
+       const SceGxmColorSurface *surface)
+{
+    return ((const SceGxmColorSurfaceInner *)surface)->dither_mode
+               ? SCE_GXM_COLOR_SURFACE_DITHER_ENABLED
+               : SCE_GXM_COLOR_SURFACE_DITHER_DISABLED;
+}
+
+EXPORT(SceGxm, 0x45027BAB, int, sceGxmColorSurfaceSetDitherMode, SceGxmColorSurface *surface,
+       SceGxmColorSurfaceDitherMode ditherMode)
+{
+    ((SceGxmColorSurfaceInner *)surface)->dither_mode =
+        ditherMode == SCE_GXM_COLOR_SURFACE_DITHER_ENABLED ? 1 : 0;
     return 0;
 }
 
@@ -934,6 +1503,100 @@ EXPORT(SceGxm, 0xCA9D41D1, int, sceGxmDepthStencilSurfaceInit, SceGxmDepthStenci
     surface->backgroundDepth = 1.0f;
     surface->backgroundControl = SCE_GXM_DEPTH_STENCIL_BG_CTRL_MASK_BIT;
     return 0;
+}
+
+EXPORT(SceGxm, 0xA41DB0D6, int, sceGxmDepthStencilSurfaceInitDisabled,
+       SceGxmDepthStencilSurface *surface)
+{
+    if (!surface)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    memset(surface, 0, sizeof(*surface));
+    surface->zlsControl = SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_DISABLE_BIT;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x082200E1, SceBool, sceGxmDepthStencilSurfaceIsEnabled,
+       const SceGxmDepthStencilSurface *surface)
+{
+    return surface && !(surface->zlsControl & SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_DISABLE_BIT);
+}
+
+EXPORT(SceGxm, 0x269B56BE, float, sceGxmDepthStencilSurfaceGetBackgroundDepth,
+       const SceGxmDepthStencilSurface *surface)
+{
+    return surface->backgroundDepth;
+}
+
+EXPORT(SceGxm, 0x32F280F0, void, sceGxmDepthStencilSurfaceSetBackgroundDepth,
+       SceGxmDepthStencilSurface *surface, float depth)
+{
+    surface->backgroundDepth = depth;
+}
+
+EXPORT(SceGxm, 0xAAFC062B, unsigned char, sceGxmDepthStencilSurfaceGetBackgroundStencil,
+       const SceGxmDepthStencilSurface *surface)
+{
+    return (unsigned char)(surface->backgroundControl & 0xff);
+}
+
+EXPORT(SceGxm, 0xF5D3F3E8, void, sceGxmDepthStencilSurfaceSetBackgroundStencil,
+       SceGxmDepthStencilSurface *surface, unsigned char stencil)
+{
+    surface->backgroundControl =
+        (surface->backgroundControl & ~0xffu) | (unsigned int)stencil;
+}
+
+EXPORT(SceGxm, 0x85D4DEFE, SceBool, sceGxmDepthStencilSurfaceGetBackgroundMask,
+       const SceGxmDepthStencilSurface *surface)
+{
+    return (surface->backgroundControl & SCE_GXM_DEPTH_STENCIL_BG_CTRL_MASK_BIT) ? 1 : 0;
+}
+
+EXPORT(SceGxm, 0xF28A688A, void, sceGxmDepthStencilSurfaceSetBackgroundMask,
+       SceGxmDepthStencilSurface *surface, SceBool mask)
+{
+    if (mask)
+        surface->backgroundControl |= SCE_GXM_DEPTH_STENCIL_BG_CTRL_MASK_BIT;
+    else
+        surface->backgroundControl &= ~SCE_GXM_DEPTH_STENCIL_BG_CTRL_MASK_BIT;
+}
+
+EXPORT(SceGxm, 0x0C44ACD7, void, sceGxmDepthStencilSurfaceSetForceLoadMode,
+       SceGxmDepthStencilSurface *surface, SceGxmDepthStencilForceLoadMode forceLoad)
+{
+    surface->zlsControl = (surface->zlsControl & ~0x2u) |
+                          ((unsigned int)forceLoad & 0x2u);
+}
+
+EXPORT(SceGxm, 0x2F5CC20C, SceGxmDepthStencilForceLoadMode,
+       sceGxmDepthStencilSurfaceGetForceLoadMode, const SceGxmDepthStencilSurface *surface)
+{
+    return (SceGxmDepthStencilForceLoadMode)(surface->zlsControl & 0x2u);
+}
+
+EXPORT(SceGxm, 0x12AAA7AF, void, sceGxmDepthStencilSurfaceSetForceStoreMode,
+       SceGxmDepthStencilSurface *surface, SceGxmDepthStencilForceStoreMode forceStore)
+{
+    surface->zlsControl = (surface->zlsControl & ~0x4u) |
+                          ((unsigned int)forceStore & 0x4u);
+}
+
+EXPORT(SceGxm, 0x544AA05A, SceGxmDepthStencilForceStoreMode,
+       sceGxmDepthStencilSurfaceGetForceStoreMode, const SceGxmDepthStencilSurface *surface)
+{
+    return (SceGxmDepthStencilForceStoreMode)(surface->zlsControl & 0x4u);
+}
+
+EXPORT(SceGxm, 0x8504038D, SceGxmDepthStencilFormat, sceGxmDepthStencilSurfaceGetFormat,
+       const SceGxmDepthStencilSurface *surface)
+{
+    return gxm_ds_surface_get_format(surface);
+}
+
+EXPORT(SceGxm, 0x11628789, unsigned int, sceGxmDepthStencilSurfaceGetStrideInSamples,
+       const SceGxmDepthStencilSurface *surface)
+{
+    return (unsigned int)((((surface->zlsControl >> 3) & 0xfu) + 1) << 5);
 }
 
 EXPORT(SceGxm, 0x14BD831F, void, sceGxmSetFrontDepthFunc, SceGxmContext *context,
@@ -997,6 +1660,320 @@ EXPORT(SceGxm, 0x1A68C8D2, void, sceGxmSetBackStencilFunc, SceGxmContext *contex
     context->back_stencil_write_mask = writeMask;
 }
 
+EXPORT(SceGxm, 0x3EB3380B, void, sceGxmSetViewport, SceGxmContext *context, float xOffset,
+       float xScale, float yOffset, float yScale, float zOffset, float zScale)
+{
+    context->viewport_x_offset = xOffset;
+    context->viewport_x_scale = xScale;
+    context->viewport_y_offset = yOffset;
+    context->viewport_y_scale = yScale;
+    context->viewport_z_offset = zOffset;
+    context->viewport_z_scale = zScale;
+    context->viewport_enable = SCE_GXM_VIEWPORT_ENABLED;
+}
+
+EXPORT(SceGxm, 0x814F61EB, void, sceGxmSetViewportEnable, SceGxmContext *context,
+       SceGxmViewportMode enable)
+{
+    context->viewport_enable = enable;
+}
+
+EXPORT(SceGxm, 0x70C86868, void, sceGxmSetRegionClip, SceGxmContext *context,
+       SceGxmRegionClipMode mode, unsigned int xMin, unsigned int yMin, unsigned int xMax,
+       unsigned int yMax)
+{
+    context->region_clip_mode = mode;
+    context->region_clip_xmin = xMin;
+    context->region_clip_ymin = yMin;
+    context->region_clip_xmax = xMax;
+    context->region_clip_ymax = yMax;
+}
+
+EXPORT(SceGxm, 0x60CF708E, void, sceGxmSetDefaultRegionClipAndViewport, SceGxmContext *context,
+       unsigned int xMax, unsigned int yMax)
+{
+    context->viewport_x_offset = 0.5f * (1.0f + (float)xMax);
+    context->viewport_y_offset = 0.5f * (1.0f + (float)yMax);
+    context->viewport_z_offset = 0.5f;
+    context->viewport_x_scale = 0.5f * (1.0f + (float)xMax);
+    context->viewport_y_scale = -0.5f * (1.0f + (float)yMax);
+    context->viewport_z_scale = 0.5f;
+    context->viewport_enable = SCE_GXM_VIEWPORT_ENABLED;
+
+    context->region_clip_mode = SCE_GXM_REGION_CLIP_OUTSIDE;
+    context->region_clip_xmin = 0;
+    context->region_clip_ymin = 0;
+    context->region_clip_xmax = xMax;
+    context->region_clip_ymax = yMax;
+}
+
+EXPORT(SceGxm, 0xE1CA72AE, void, sceGxmSetCullMode, SceGxmContext *context,
+       SceGxmCullMode mode)
+{
+    context->cull_mode = mode;
+}
+
+EXPORT(SceGxm, 0xFD93209D, void, sceGxmSetFrontPolygonMode, SceGxmContext *context,
+       SceGxmPolygonMode mode)
+{
+    context->front_polygon_mode = mode;
+}
+
+EXPORT(SceGxm, 0xF66EC6FE, void, sceGxmSetBackPolygonMode, SceGxmContext *context,
+       SceGxmPolygonMode mode)
+{
+    context->back_polygon_mode = mode;
+}
+
+EXPORT(SceGxm, 0x0DE9AEB7, void, sceGxmSetTwoSidedEnable, SceGxmContext *context,
+       SceGxmTwoSidedMode enable)
+{
+    context->two_sided = enable;
+}
+
+EXPORT(SceGxm, 0x06752183, void, sceGxmSetFrontPointLineWidth, SceGxmContext *context,
+       unsigned int width)
+{
+    context->front_point_line_width = width;
+}
+
+EXPORT(SceGxm, 0x8DCB0EDB, void, sceGxmSetBackPointLineWidth, SceGxmContext *context,
+       unsigned int width)
+{
+    context->back_point_line_width = width;
+}
+
+EXPORT(SceGxm, 0xAAA97F81, void, sceGxmSetFrontDepthBias, SceGxmContext *context, int factor,
+       int units)
+{
+    context->front_depth_bias_factor = factor;
+    context->front_depth_bias_units = units;
+}
+
+EXPORT(SceGxm, 0x17B3BF86, void, sceGxmSetBackDepthBias, SceGxmContext *context, int factor,
+       int units)
+{
+    context->back_depth_bias_factor = factor;
+    context->back_depth_bias_units = units;
+}
+
+EXPORT(SceGxm, 0xD096336E, void, sceGxmSetWClampValue, SceGxmContext *context, float clampValue)
+{
+    context->w_clamp_value = clampValue;
+}
+
+EXPORT(SceGxm, 0x1BF8B853, void, sceGxmSetWClampEnable, SceGxmContext *context,
+       SceGxmWClampMode enable)
+{
+    context->w_clamp_enable = enable;
+}
+
+EXPORT(SceGxm, 0x575958A8, void, sceGxmSetFrontFragmentProgramEnable, SceGxmContext *context,
+       SceGxmFragmentProgramMode enable)
+{
+    context->front_fragment_program_enable = enable;
+}
+
+EXPORT(SceGxm, 0xE26B4834, void, sceGxmSetBackFragmentProgramEnable, SceGxmContext *context,
+       SceGxmFragmentProgramMode enable)
+{
+    context->back_fragment_program_enable = enable;
+}
+
+EXPORT(SceGxm, 0x5765DE9F, void, sceGxmSetFrontLineFillLastPixelEnable, SceGxmContext *context,
+       SceGxmLineFillLastPixelMode enable)
+{
+    (void)context;
+    (void)enable;
+}
+
+EXPORT(SceGxm, 0xC88EB702, void, sceGxmSetBackLineFillLastPixelEnable, SceGxmContext *context,
+       SceGxmLineFillLastPixelMode enable)
+{
+    (void)context;
+    (void)enable;
+}
+
+EXPORT(SceGxm, 0xEED86975, void, sceGxmSetWBufferEnable, SceGxmContext *context,
+       SceGxmWBufferMode enable)
+{
+    (void)context;
+    (void)enable;
+}
+
+EXPORT(SceGxm, 0x7767EC49, int, sceGxmSetVisibilityBuffer, SceGxmContext *context,
+       void *bufferBase, unsigned int stridePerCore)
+{
+    (void)stridePerCore;
+    if (!context || !bufferBase)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    /* The GLES backend cannot use the Vita visibility buffer; mark all visible. */
+    memset(bufferBase, 0xff, 4 * stridePerCore);
+    return 0;
+}
+
+EXPORT(SceGxm, 0x30459117, void, sceGxmSetFrontVisibilityTestEnable, SceGxmContext *context,
+       SceGxmVisibilityTestMode enable)
+{
+    (void)context;
+    (void)enable;
+}
+
+EXPORT(SceGxm, 0x17CF46B9, void, sceGxmSetBackVisibilityTestEnable, SceGxmContext *context,
+       SceGxmVisibilityTestMode enable)
+{
+    (void)context;
+    (void)enable;
+}
+
+EXPORT(SceGxm, 0x12625C34, void, sceGxmSetFrontVisibilityTestIndex, SceGxmContext *context,
+       unsigned int index)
+{
+    (void)context;
+    (void)index;
+}
+
+EXPORT(SceGxm, 0xAE7886FE, void, sceGxmSetBackVisibilityTestIndex, SceGxmContext *context,
+       unsigned int index)
+{
+    (void)context;
+    (void)index;
+}
+
+EXPORT(SceGxm, 0xD0E3CD9A, void, sceGxmSetFrontVisibilityTestOp, SceGxmContext *context,
+       SceGxmVisibilityTestOp op)
+{
+    (void)context;
+    (void)op;
+}
+
+EXPORT(SceGxm, 0xC83F0AB3, void, sceGxmSetBackVisibilityTestOp, SceGxmContext *context,
+       SceGxmVisibilityTestOp op)
+{
+    (void)context;
+    (void)op;
+}
+
+EXPORT(SceGxm, 0xB32917F0, int, sceGxmSetYuvProfile, SceGxmContext *context,
+       unsigned int index, SceGxmYuvProfile profile)
+{
+    (void)context;
+    (void)index;
+    (void)profile;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x8C6A24C9, void, sceGxmSetValidationEnable, SceGxmContext *context,
+       SceBool enable)
+{
+    (void)context;
+    (void)enable;
+}
+
+EXPORT(SceGxm, 0x3276C475, int, sceGxmPushUserMarker, SceGxmContext *context, const char *tag)
+{
+    (void)context;
+    LOG("SceGxm: marker %s", tag ? tag : "");
+    return 0;
+}
+
+EXPORT(SceGxm, 0x4FA073A6, int, sceGxmPopUserMarker, SceGxmContext *context)
+{
+    (void)context;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xC7A8CB77, int, sceGxmSetUserMarker, SceGxmContext *context, const char *tag)
+{
+    (void)context;
+    LOG("SceGxm: marker %s", tag ? tag : "");
+    return 0;
+}
+
+EXPORT(SceGxm, 0x3D25FCE9, int, sceGxmPadHeartbeat, const SceGxmColorSurface *displaySurface,
+       SceGxmSyncObject *displaySyncObject)
+{
+    (void)displaySurface;
+    (void)displaySyncObject;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x47E06984, int, sceGxmPadTriggerGpuPaTrace, void)
+{
+    return 0;
+}
+
+EXPORT(SceGxm, 0x2B5C0444, int, sceGxmMidSceneFlush, SceGxmContext *context, unsigned int flags,
+       SceGxmSyncObject *vertexSyncObject, const SceGxmNotification *vertexNotification)
+{
+    (void)flags;
+    (void)vertexSyncObject;
+    (void)vertexNotification;
+    if (!context->in_scene)
+        return SCE_GXM_ERROR_NOT_WITHIN_SCENE;
+    if (g_gl)
+        g_gl->glFinish();
+    return 0;
+}
+
+EXPORT(SceGxm, 0x9EB4380F, int, sceGxmSetVertexTexture, SceGxmContext *context,
+       unsigned int textureIndex, const SceGxmTexture *texture)
+{
+    if (textureIndex >= SCE_GXM_MAX_TEXTURE_UNITS)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+    context->vertex_textures[textureIndex] = *(const SceGxmTextureInner *)texture;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xC68015E4, int, sceGxmSetVertexUniformBuffer, SceGxmContext *context,
+       unsigned int bufferIndex, const void *bufferData)
+{
+    if (!context || !bufferData)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    if (bufferIndex >= SCE_GXM_MAX_UNIFORM_BUFFERS)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+    context->vertex_uniform_buffers[bufferIndex] = bufferData;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xEA0FC310, int, sceGxmSetFragmentUniformBuffer, SceGxmContext *context,
+       unsigned int bufferIndex, const void *bufferData)
+{
+    if (!context || !bufferData)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    if (bufferIndex >= SCE_GXM_MAX_UNIFORM_BUFFERS)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+    context->fragment_uniform_buffers[bufferIndex] = bufferData;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x91B4F7F4, int, sceGxmSetAuxiliarySurface, SceGxmContext *context,
+       unsigned int surfaceIndex, const SceGxmAuxiliarySurface *surface)
+{
+    (void)context;
+    (void)surfaceIndex;
+    (void)surface;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xD0EDAB4C, int, sceGxmRenderTargetGetHostMem, const SceGxmRenderTarget *renderTarget,
+       void **hostMem)
+{
+    if (!renderTarget || !hostMem)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    *hostMem = (void *)renderTarget;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x49553737, int, sceGxmRenderTargetGetDriverMemBlock,
+       const SceGxmRenderTarget *renderTarget, SceUID *driverMemBlock)
+{
+    (void)renderTarget;
+    if (driverMemBlock)
+        *driverMemBlock = 0;
+    return 0;
+}
+
 EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsigned int flags,
        const SceGxmRenderTarget *renderTarget, const SceGxmValidRegion *validRegion,
        SceGxmSyncObject *vertexSyncObject, SceGxmSyncObject *fragmentSyncObject,
@@ -1012,13 +1989,21 @@ EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsign
         return SCE_GXM_ERROR_INVALID_POINTER;
 
     context->render_target = renderTarget;
-    context->color_surface = (const SceGxmColorSurfaceInner *)colorSurface;
-    context->ds_surface = depthStencil;
+    context->color_surface =
+        (colorSurface && !((const SceGxmColorSurfaceInner *)colorSurface)->disabled)
+            ? (const SceGxmColorSurfaceInner *)colorSurface
+            : NULL;
+    context->ds_surface =
+        (depthStencil && !(depthStencil->zlsControl & SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_DISABLE_BIT))
+            ? depthStencil
+            : NULL;
     context->fragment_sync = fragmentSyncObject;
     context->vertex_uniform_head = 0;
     context->fragment_uniform_head = 0;
     context->vertex_uniforms = NULL;
     context->fragment_uniforms = NULL;
+    context->precomputed_vertex = NULL;
+    context->precomputed_fragment = NULL;
     context->in_scene = true;
 
     if (g_gl) {
@@ -1031,6 +2016,116 @@ EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsign
     }
 
     return 0;
+}
+
+static uint32_t gxm_color_format_bytes(SceGxmColorFormat format)
+{
+    uint32_t base = format & SCE_GXM_COLOR_BASE_FORMAT_MASK;
+
+    switch (base) {
+    case SCE_GXM_COLOR_BASE_FORMAT_U8U8U8U8:
+        return 4;
+    case SCE_GXM_COLOR_BASE_FORMAT_U8U8U8:
+        return 3;
+    case SCE_GXM_COLOR_BASE_FORMAT_U5U6U5:
+    case SCE_GXM_COLOR_BASE_FORMAT_U1U5U5U5:
+    case SCE_GXM_COLOR_BASE_FORMAT_U4U4U4U4:
+    case SCE_GXM_COLOR_BASE_FORMAT_U8U3U3U2:
+        return 2;
+    case SCE_GXM_COLOR_BASE_FORMAT_U8:
+    case SCE_GXM_COLOR_BASE_FORMAT_S8:
+        return 1;
+    default:
+        return 4;
+    }
+}
+
+static void gxm_write_color_pixel(uint8_t *dst, const uint8_t rgba[4], SceGxmColorFormat format)
+{
+    uint32_t base = format & SCE_GXM_COLOR_BASE_FORMAT_MASK;
+    uint32_t swizzle = (format >> 20) & 3;
+    uint8_t r = rgba[0], g = rgba[1], b = rgba[2], a = rgba[3];
+
+    switch (base) {
+    case SCE_GXM_COLOR_BASE_FORMAT_U8U8U8U8:
+        switch (swizzle) {
+        case 1: /* ARGB: word A R G B -> bytes B G R A */
+            dst[0] = b;
+            dst[1] = g;
+            dst[2] = r;
+            dst[3] = a;
+            break;
+        case 2: /* RGBA: word R G B A -> bytes A B G R */
+            dst[0] = a;
+            dst[1] = b;
+            dst[2] = g;
+            dst[3] = r;
+            break;
+        case 3: /* BGRA: word B G R A -> bytes A R G B */
+            dst[0] = a;
+            dst[1] = r;
+            dst[2] = g;
+            dst[3] = b;
+            break;
+        case 0: /* ABGR (A8B8G8R8): bytes R G B A */
+        default:
+            dst[0] = r;
+            dst[1] = g;
+            dst[2] = b;
+            dst[3] = a;
+            break;
+        }
+        break;
+
+    case SCE_GXM_COLOR_BASE_FORMAT_U8U8U8:
+        if (swizzle & 1) { /* RGB */
+            dst[0] = b;
+            dst[1] = g;
+            dst[2] = r;
+        } else { /* BGR */
+            dst[0] = r;
+            dst[1] = g;
+            dst[2] = b;
+        }
+        break;
+
+    case SCE_GXM_COLOR_BASE_FORMAT_U5U6U5: {
+        uint16_t value = swizzle & 1 ? (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3))
+                                     : (uint16_t)(((b >> 3) << 11) | ((g >> 2) << 5) | (r >> 3));
+        dst[0] = (uint8_t)(value & 0xff);
+        dst[1] = (uint8_t)(value >> 8);
+        break;
+    }
+
+    case SCE_GXM_COLOR_BASE_FORMAT_U1U5U5U5: {
+        uint16_t value = (uint16_t)(((a >> 7) << 15) | ((b >> 3) << 10) | ((g >> 3) << 5) |
+                                    (r >> 3));
+        dst[0] = (uint8_t)(value & 0xff);
+        dst[1] = (uint8_t)(value >> 8);
+        break;
+    }
+
+    case SCE_GXM_COLOR_BASE_FORMAT_U4U4U4U4: {
+        uint16_t value = (uint16_t)(((a >> 4) << 12) | ((b >> 4) << 8) | ((g >> 4) << 4) |
+                                    (r >> 4));
+        dst[0] = (uint8_t)(value & 0xff);
+        dst[1] = (uint8_t)(value >> 8);
+        break;
+    }
+
+    case SCE_GXM_COLOR_BASE_FORMAT_U8U3U3U2: {
+        uint16_t value = (uint16_t)(((uint16_t)a << 8) | (((r >> 5) & 7) << 5) |
+                                    (((g >> 5) & 7) << 2) | ((b >> 6) & 3));
+        dst[0] = (uint8_t)(value & 0xff);
+        dst[1] = (uint8_t)(value >> 8);
+        break;
+    }
+
+    case SCE_GXM_COLOR_BASE_FORMAT_U8:
+    default:
+        dst[0] = r;
+        break;
+    }
 }
 
 EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
@@ -1054,7 +2149,7 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
     g_gl->glFinish();
 
     surface = context->color_surface;
-    if (!surface || !surface->data)
+    if (!surface || !surface->data || surface->disabled)
         return 0;
 
     width = surface->width < context->render_target->params.width ? surface->width
@@ -1062,7 +2157,7 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
     height = surface->height < context->render_target->params.height
                  ? surface->height
                  : context->render_target->params.height;
-    stride = surface->strideInPixels;
+    stride = surface->strideInPixels ? surface->strideInPixels : width;
 
     rgba = malloc((size_t)width * height * 4);
     if (!rgba)
@@ -1073,23 +2168,32 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
     g_gl->glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
 
     /* GL's origin is bottom-left; Vita surfaces are top-left. */
-    for (uint32_t y = 0; y < height; y++) {
-        const uint8_t *src = rgba + (size_t)(height - 1 - y) * width * 4;
-        uint8_t *dst = (uint8_t *)surface->data + (size_t)y * stride * 4;
+    {
+        uint32_t bytes_per_pixel = gxm_color_format_bytes(surface->colorFormat);
 
-        if (surface->colorFormat == SCE_GXM_COLOR_FORMAT_A8B8G8R8) {
-            for (uint32_t x = 0; x < width; x++) {
-                dst[x * 4 + 0] = src[x * 4 + 2];
-                dst[x * 4 + 1] = src[x * 4 + 1];
-                dst[x * 4 + 2] = src[x * 4 + 0];
-                dst[x * 4 + 3] = src[x * 4 + 3];
-            }
-        } else {
-            memcpy(dst, src, (size_t)width * 4);
+        for (uint32_t y = 0; y < height; y++) {
+            const uint8_t *src = rgba + (size_t)(height - 1 - y) * width * 4;
+            uint8_t *dst = (uint8_t *)surface->data + (size_t)y * stride * bytes_per_pixel;
+
+            for (uint32_t x = 0; x < width; x++)
+                gxm_write_color_pixel(dst + (size_t)x * bytes_per_pixel, src + (size_t)x * 4,
+                                      surface->colorFormat);
         }
     }
 
     free(rgba);
+
+    if (fragmentNotification && fragmentNotification->address) {
+        __sync_synchronize();
+        *fragmentNotification->address = fragmentNotification->value;
+        __sync_synchronize();
+    }
+    if (vertexNotification && vertexNotification->address) {
+        __sync_synchronize();
+        *vertexNotification->address = vertexNotification->value;
+        __sync_synchronize();
+    }
+
     return 0;
 }
 
@@ -1132,18 +2236,11 @@ EXPORT(SceGxm, 0x29C34DF5, int, sceGxmSetFragmentTexture, SceGxmContext *context
 EXPORT(SceGxm, 0x895DF2E9, int, sceGxmSetVertexStream, SceGxmContext *context,
        unsigned int streamIndex, const void *streamData)
 {
-    VitaMemBlockInfo *block;
-
     if (streamIndex >= SCE_GXM_MAX_VERTEX_STREAMS)
         return SCE_GXM_ERROR_INVALID_VALUE;
 
-    block = SceSysmem_get_vita_memblock_info_for_addr(streamData);
-    if (!block)
-        return SCE_GXM_ERROR_INVALID_VALUE;
-
     context->streams[streamIndex].data = streamData;
-    context->streams[streamIndex].size =
-        (uint32_t)(block->size - ((uintptr_t)streamData - (uintptr_t)block->base));
+    context->streams[streamIndex].size = 0;
     return 0;
 }
 
@@ -1263,46 +2360,328 @@ EXPORT(SceGxm, 0x65DD0C84, int, sceGxmSetUniformDataF, void *uniformBuffer,
     return 0;
 }
 
+static uint32_t gxm_floor_log2(uint32_t value)
+{
+    uint32_t bit = 0;
+
+    while (value >>= 1)
+        bit++;
+    return bit;
+}
+
+static int gxm_texture_init(SceGxmTexture *texture, const void *data, SceGxmTextureFormat format,
+                            unsigned int width, unsigned int height, unsigned int mip_count,
+                            SceGxmTextureType type)
+{
+    SceGxmTextureInner *inner = (SceGxmTextureInner *)texture;
+    bool swizzled = type == SCE_GXM_TEXTURE_SWIZZLED || type == SCE_GXM_TEXTURE_CUBE;
+
+    if (!texture)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    if (!width || !height || width > 4096 || height > 4096 || mip_count > 13)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+    if (swizzled && ((width & (width - 1)) != 0 || (height & (height - 1)) != 0))
+        return SCE_GXM_ERROR_INVALID_VALUE;
+
+    memset(inner, 0, sizeof(*inner));
+    inner->mip_count = mip_count ? (mip_count - 1 > 15 ? 15 : mip_count - 1) : 15;
+    inner->format0 = (format & 0x80000000u) >> 31;
+    inner->lod_bias = 31;
+    inner->uaddr_mode = inner->vaddr_mode = SCE_GXM_TEXTURE_ADDR_CLAMP;
+
+    if (swizzled) {
+        inner->width_base2 = gxm_floor_log2(width);
+        inner->height_base2 = gxm_floor_log2(height);
+    } else {
+        inner->width = width - 1;
+        inner->height = height - 1;
+    }
+
+    inner->base_format = (format & 0x1f000000u) >> 24;
+    inner->type = (uint32_t)type >> 29;
+    inner->data_addr = (uint32_t)(uintptr_t)data >> 2;
+    inner->swizzle_format = (format & 0x7000u) >> 12;
+    inner->normalize_mode = 1;
+    inner->min_filter = SCE_GXM_TEXTURE_FILTER_POINT;
+    inner->mag_filter = SCE_GXM_TEXTURE_FILTER_POINT;
+    inner->mip_filter = 0;
+
+    return 0;
+}
+
 EXPORT(SceGxm, 0x4811AECB, int, sceGxmTextureInitLinear, SceGxmTexture *texture, const void *data,
        SceGxmTextureFormat texFormat, unsigned int width, unsigned int height,
        unsigned int mipCount)
 {
-    SceGxmTextureInner *inner = (SceGxmTextureInner *)texture;
+    return gxm_texture_init(texture, data, texFormat, width, height, mipCount,
+                            SCE_GXM_TEXTURE_LINEAR);
+}
 
-    if (!texture)
-        return SCE_GXM_ERROR_INVALID_POINTER;
-    if (width > 4096 || height > 4096 || mipCount > 13)
+EXPORT(SceGxm, 0xD572D547, int, sceGxmTextureInitSwizzled, SceGxmTexture *texture, const void *data,
+       SceGxmTextureFormat texFormat, unsigned int width, unsigned int height,
+       unsigned int mipCount)
+{
+    return gxm_texture_init(texture, data, texFormat, width, height, mipCount,
+                            SCE_GXM_TEXTURE_SWIZZLED);
+}
+
+EXPORT(SceGxm, 0x5DBFBA2C, int, sceGxmTextureInitSwizzledArbitrary, SceGxmTexture *texture,
+       const void *data, SceGxmTextureFormat texFormat, unsigned int width, unsigned int height,
+       unsigned int mipCount)
+{
+    return gxm_texture_init(texture, data, texFormat, width, height, mipCount,
+                            SCE_GXM_TEXTURE_SWIZZLED_ARBITRARY);
+}
+
+EXPORT(SceGxm, 0x11DC8DC9, int, sceGxmTextureInitCube, SceGxmTexture *texture, const void *data,
+       SceGxmTextureFormat texFormat, unsigned int width, unsigned int height,
+       unsigned int mipCount)
+{
+    return gxm_texture_init(texture, data, texFormat, width, height, mipCount, SCE_GXM_TEXTURE_CUBE);
+}
+
+EXPORT(SceGxm, 0xE3DF5E3B, int, sceGxmTextureInitCubeArbitrary, SceGxmTexture *texture,
+       const void *data, SceGxmTextureFormat texFormat, unsigned int width, unsigned int height,
+       unsigned int mipCount)
+{
+    return gxm_texture_init(texture, data, texFormat, width, height, mipCount,
+                            SCE_GXM_TEXTURE_CUBE_ARBITRARY);
+}
+
+EXPORT(SceGxm, 0xE6F0DB27, int, sceGxmTextureInitTiled, SceGxmTexture *texture, const void *data,
+       SceGxmTextureFormat texFormat, unsigned int width, unsigned int height,
+       unsigned int mipCount)
+{
+    return gxm_texture_init(texture, data, texFormat, width, height, mipCount,
+                            SCE_GXM_TEXTURE_TILED);
+}
+
+static void gxm_texture_set_stride_bits(SceGxmTextureInner *inner, unsigned int byteStride)
+{
+    uint32_t words = byteStride / 4;
+    uint32_t value = words ? words - 1 : 0;
+
+    inner->mip_filter = value & 1;
+    inner->min_filter = (value >> 1) & 3;
+    inner->mip_count = (value >> 3) & 0xf;
+    inner->lod_bias = (value >> 7) & 0x3f;
+}
+
+EXPORT(SceGxm, 0x6679BEF0, int, sceGxmTextureInitLinearStrided, SceGxmTexture *texture,
+       const void *data, SceGxmTextureFormat texFormat, unsigned int width, unsigned int height,
+       unsigned int byteStride)
+{
+    SceGxmTextureInner *inner = (SceGxmTextureInner *)texture;
+    uint32_t bits = gxm_texture_base_bits(texFormat);
+    int result;
+
+    if (!byteStride || (byteStride & 3) || byteStride / 4 > 0x2000)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+    if (bits && byteStride * 8 < width * bits)
         return SCE_GXM_ERROR_INVALID_VALUE;
 
-    memset(inner, 0, sizeof(*inner));
-    inner->mip_count = (mipCount ? mipCount : 1) - 1;
-    inner->format0 = (texFormat & 0x80000000) >> 31;
-    inner->lod_bias = 31;
-    inner->uaddr_mode = inner->vaddr_mode = SCE_GXM_TEXTURE_ADDR_CLAMP;
-    inner->height = height - 1;
-    inner->width = width - 1;
-    inner->base_format = (texFormat & 0x1F000000) >> 24;
-    inner->type = SCE_GXM_TEXTURE_LINEAR >> 29;
-    inner->data_addr = (uint32_t)(uintptr_t)data >> 2;
-    inner->swizzle_format = (texFormat & 0x7000) >> 12;
-    inner->normalize_mode = 1;
-    inner->min_filter = SCE_GXM_TEXTURE_FILTER_POINT;
-    inner->mag_filter = SCE_GXM_TEXTURE_FILTER_POINT;
+    result = gxm_texture_init(texture, data, texFormat, width, height, 1,
+                              SCE_GXM_TEXTURE_LINEAR_STRIDED);
+    if (result != 0)
+        return result;
+
+    gxm_texture_set_stride_bits(inner, byteStride);
     return 0;
 }
 
-#define GXM_TEX_GETTER(name, expr)                                                                 \
-    EXPORT(SceGxm, name, uint32_t, sce##name, const SceGxmTexture *texture)                        \
+EXPORT(SceGxm, 0x855814C4, int, sceGxmTextureSetData, SceGxmTexture *texture, const void *data)
+{
+    ((SceGxmTextureInner *)texture)->data_addr = (uint32_t)(uintptr_t)data >> 2;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xFC943596, int, sceGxmTextureSetFormat, SceGxmTexture *texture,
+       SceGxmTextureFormat texFormat)
+{
+    SceGxmTextureInner *inner = (SceGxmTextureInner *)texture;
+
+    inner->format0 = (texFormat & 0x80000000u) >> 31;
+    inner->base_format = (texFormat & 0x1f000000u) >> 24;
+    inner->swizzle_format = (texFormat & 0x7000u) >> 12;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x416764E3, int, sceGxmTextureSetMinFilter, SceGxmTexture *texture,
+       SceGxmTextureFilter minFilter)
+{
+    ((SceGxmTextureInner *)texture)->min_filter = minFilter;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xFA695FD7, int, sceGxmTextureSetMagFilter, SceGxmTexture *texture,
+       SceGxmTextureFilter magFilter)
+{
+    ((SceGxmTextureInner *)texture)->mag_filter = magFilter;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x1CA9FE0B, int, sceGxmTextureSetMipFilter, SceGxmTexture *texture,
+       SceGxmTextureMipFilter mipFilter)
+{
+    ((SceGxmTextureInner *)texture)->mip_filter = mipFilter ? 1 : 0;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x4281763E, int, sceGxmTextureSetUAddrMode, SceGxmTexture *texture,
+       SceGxmTextureAddrMode addrMode)
+{
+    ((SceGxmTextureInner *)texture)->uaddr_mode = addrMode;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x126CDAA3, int, sceGxmTextureSetVAddrMode, SceGxmTexture *texture,
+       SceGxmTextureAddrMode addrMode)
+{
+    ((SceGxmTextureInner *)texture)->vaddr_mode = addrMode;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x8699ECF4, int, sceGxmTextureSetUAddrModeSafe, SceGxmTexture *texture,
+       SceGxmTextureAddrMode addrMode)
+{
+    SceGxmTextureInner *inner = (SceGxmTextureInner *)texture;
+
+    inner->uaddr_mode = gxm_texture_get_type(inner) == SCE_GXM_TEXTURE_LINEAR_STRIDED
+                            ? SCE_GXM_TEXTURE_ADDR_CLAMP
+                            : addrMode;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xFA22F6CC, int, sceGxmTextureSetVAddrModeSafe, SceGxmTexture *texture,
+       SceGxmTextureAddrMode addrMode)
+{
+    SceGxmTextureInner *inner = (SceGxmTextureInner *)texture;
+
+    inner->vaddr_mode = gxm_texture_get_type(inner) == SCE_GXM_TEXTURE_LINEAR_STRIDED
+                            ? SCE_GXM_TEXTURE_ADDR_CLAMP
+                            : addrMode;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xB65EE6F7, int, sceGxmTextureSetLodBias, SceGxmTexture *texture, unsigned int bias)
+{
+    ((SceGxmTextureInner *)texture)->lod_bias = bias & 0x3f;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xB79E43DD, int, sceGxmTextureSetLodMin, SceGxmTexture *texture, unsigned int min)
+{
+    SceGxmTextureInner *inner = (SceGxmTextureInner *)texture;
+
+    inner->lod_min0 = min & 3;
+    inner->lod_min1 = (min >> 2) & 3;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x58D0EB0A, int, sceGxmTextureSetStride, SceGxmTexture *texture,
+       unsigned int byteStride)
+{
+    if (!byteStride || (byteStride & 3) || byteStride / 4 > 0x2000)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+    gxm_texture_set_stride_bits((SceGxmTextureInner *)texture, byteStride);
+    return 0;
+}
+
+EXPORT(SceGxm, 0x2EA178BE, int, sceGxmTextureSetWidth, SceGxmTexture *texture, unsigned int width)
+{
+    SceGxmTextureInner *inner = (SceGxmTextureInner *)texture;
+
+    if (!width || width > 4096)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+    if (gxm_texture_get_type(inner) == SCE_GXM_TEXTURE_SWIZZLED ||
+        gxm_texture_get_type(inner) == SCE_GXM_TEXTURE_CUBE)
+        inner->width_base2 = gxm_floor_log2(width);
+    else
+        inner->width = width - 1;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xAEE7FDD1, int, sceGxmTextureSetHeight, SceGxmTexture *texture, unsigned int height)
+{
+    SceGxmTextureInner *inner = (SceGxmTextureInner *)texture;
+
+    if (!height || height > 4096)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+    if (gxm_texture_get_type(inner) == SCE_GXM_TEXTURE_SWIZZLED ||
+        gxm_texture_get_type(inner) == SCE_GXM_TEXTURE_CUBE)
+        inner->height_base2 = gxm_floor_log2(height);
+    else
+        inner->height = height - 1;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xD2DC4643, int, sceGxmTextureSetMipmapCount, SceGxmTexture *texture,
+       unsigned int mipCount)
+{
+    SceGxmTextureInner *inner = (SceGxmTextureInner *)texture;
+
+    if (mipCount > 13)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+    inner->mip_count = mipCount ? (mipCount - 1 > 15 ? 15 : mipCount - 1) : 15;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xDD6AABFA, int, sceGxmTextureSetPalette, SceGxmTexture *texture,
+       const void *paletteData)
+{
+    if ((uintptr_t)paletteData & (SCE_GXM_PALETTE_ALIGNMENT - 1))
+        return SCE_GXM_ERROR_INVALID_ALIGNMENT;
+    ((SceGxmTextureInner *)texture)->palette_addr = (uint32_t)(uintptr_t)paletteData >> 6;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xA6D9F4DA, int, sceGxmTextureSetGammaMode, SceGxmTexture *texture,
+       SceGxmTextureGammaMode gammaMode)
+{
+    SceGxmTextureInner *inner = (SceGxmTextureInner *)texture;
+
+    if (gammaMode & ~0x60000000u)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+    inner->gamma_mode = (gammaMode >> 27) & 3;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xCE8DDAD0, int, sceGxmTextureSetNormalizeMode, SceGxmTexture *texture,
+       SceBool normalize)
+{
+    ((SceGxmTextureInner *)texture)->normalize_mode = normalize ? 1 : 0;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x5331BED3, int, sceGxmTextureValidate, const SceGxmTexture *texture)
+{
+    SceGxmTextureFormat format;
+    uint32_t width, height;
+
+    if (!texture)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    format = (SceGxmTextureFormat)gxm_texture_get_format((const SceGxmTextureInner *)texture);
+    width = (uint32_t)gxm_texture_get_width((const SceGxmTextureInner *)texture);
+    height = (uint32_t)gxm_texture_get_height((const SceGxmTextureInner *)texture);
+
+    if (!gxm_texture_base_bits(format) || !width || !height || width > 4096 || height > 4096)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+    return 0;
+}
+
+#define GXM_TEX_GETTER(nid, name, expr)                                                            \
+    EXPORT(SceGxm, nid, uint32_t, sceGxmTexture##name, const SceGxmTexture *texture)               \
     {                                                                                              \
         return (uint32_t)(expr);                                                                   \
     }
 
-GXM_TEX_GETTER(0x5420A086, gxm_texture_get_height((const SceGxmTextureInner *)texture))
-GXM_TEX_GETTER(0x126A3EB3, gxm_texture_get_width((const SceGxmTextureInner *)texture))
-GXM_TEX_GETTER(0xB0BD52F3, gxm_texture_get_type((const SceGxmTextureInner *)texture) ==
-                                   SCE_GXM_TEXTURE_LINEAR_STRIDED
-                               ? gxm_texture_get_stride_in_bytes((const SceGxmTextureInner *)texture)
-                               : 0)
+GXM_TEX_GETTER(0x5420A086, GetHeight, gxm_texture_get_height((const SceGxmTextureInner *)texture))
+GXM_TEX_GETTER(0x126A3EB3, GetWidth, gxm_texture_get_width((const SceGxmTextureInner *)texture))
+GXM_TEX_GETTER(0xB0BD52F3, GetStride,
+               gxm_texture_get_type((const SceGxmTextureInner *)texture) ==
+                       SCE_GXM_TEXTURE_LINEAR_STRIDED
+                   ? gxm_texture_get_stride_in_bytes((const SceGxmTextureInner *)texture)
+                   : 0)
 
 EXPORT(SceGxm, 0x5341BD46, void *, sceGxmTextureGetData, const SceGxmTexture *texture)
 {
@@ -1427,23 +2806,24 @@ EXPORT(SceGxm, 0x277794C4, const SceGxmProgramParameter *, sceGxmProgramFindPara
     return NULL;
 }
 
-#define GXM_PARAM_GETTER(name, type, expr)                                                         \
-    EXPORT(SceGxm, name, type, sce##name, const SceGxmProgramParameter *parameter)                 \
+#define GXM_PARAM_GETTER(nid, name, type, expr)                                                    \
+    EXPORT(SceGxm, nid, type, sceGxmProgramParameter##name,                                        \
+           const SceGxmProgramParameter *parameter)                                                \
     {                                                                                              \
         return (type)(expr);                                                                       \
     }
 
-GXM_PARAM_GETTER(0xDBA8D061, uint32_t, parameter->array_size)
-GXM_PARAM_GETTER(0x1997DC17, SceGxmParameterCategory, parameter->category)
-GXM_PARAM_GETTER(0xBD2998D1, uint32_t, parameter->component_count)
-GXM_PARAM_GETTER(0xBB58267D, uint32_t, parameter->container_index)
-GXM_PARAM_GETTER(0x5C79D59A, uint32_t, parameter->resource_index)
-GXM_PARAM_GETTER(0x7B9023C3, SceGxmParameterType, parameter->type)
-GXM_PARAM_GETTER(0xE6D9C4CE, SceGxmParameterSemantic,
+GXM_PARAM_GETTER(0xDBA8D061, GetArraySize, uint32_t, parameter->array_size)
+GXM_PARAM_GETTER(0x1997DC17, GetCategory, SceGxmParameterCategory, parameter->category)
+GXM_PARAM_GETTER(0xBD2998D1, GetComponentCount, uint32_t, parameter->component_count)
+GXM_PARAM_GETTER(0xBB58267D, GetContainerIndex, uint32_t, parameter->container_index)
+GXM_PARAM_GETTER(0x5C79D59A, GetResourceIndex, uint32_t, parameter->resource_index)
+GXM_PARAM_GETTER(0x7B9023C3, GetType, SceGxmParameterType, parameter->type)
+GXM_PARAM_GETTER(0xE6D9C4CE, GetSemantic, SceGxmParameterSemantic,
                  parameter->category == SCE_GXM_PARAMETER_CATEGORY_ATTRIBUTE
                      ? parameter->semantic
                      : SCE_GXM_PARAMETER_SEMANTIC_NONE)
-GXM_PARAM_GETTER(0xB85CC13E, uint32_t, parameter->semantic_index & 0xf)
+GXM_PARAM_GETTER(0xB85CC13E, GetSemanticIndex, uint32_t, parameter->semantic_index & 0xf)
 
 EXPORT(SceGxm, 0x6AF88A5D, const char *, sceGxmProgramParameterGetName,
        const SceGxmProgramParameter *parameter)
@@ -1460,18 +2840,104 @@ EXPORT(SceGxm, 0x6E61DDF5, uint32_t, sceGxmProgramParameterGetIndex, const SceGx
     return (uint32_t)((uintptr_t)parameter - parameter_offset) >> 4;
 }
 
-EXPORT(SceGxm, 0xBC059AFC, int, sceGxmDraw, SceGxmContext *context, SceGxmPrimitiveType primType,
-       SceGxmIndexFormat indexType, const void *indexData, unsigned int indexCount)
+static uint32_t gxm_read_index(const void *data, SceGxmIndexFormat format, unsigned int index)
+{
+    if (format == SCE_GXM_INDEX_FORMAT_U32)
+        return ((const uint32_t *)data)[index];
+    return ((const uint16_t *)data)[index];
+}
+
+static bool gxm_polygon_is_line(SceGxmPolygonMode mode)
+{
+    return mode == SCE_GXM_POLYGON_MODE_LINE || mode == SCE_GXM_POLYGON_MODE_TRIANGLE_LINE;
+}
+
+static bool gxm_polygon_is_point(SceGxmPolygonMode mode)
+{
+    return mode == SCE_GXM_POLYGON_MODE_POINT || mode == SCE_GXM_POLYGON_MODE_POINT_10UV ||
+           mode == SCE_GXM_POLYGON_MODE_POINT_01UV ||
+           mode == SCE_GXM_POLYGON_MODE_TRIANGLE_POINT;
+}
+
+static uint32_t *gxm_wireframe_indices(SceGxmPrimitiveType primitive, SceGxmIndexFormat format,
+                                       const void *indexData, unsigned int indexCount,
+                                       uint32_t *out_count)
+{
+    uint32_t *indices;
+    uint32_t count = 0;
+
+    if (primitive != SCE_GXM_PRIMITIVE_TRIANGLES &&
+        primitive != SCE_GXM_PRIMITIVE_TRIANGLE_STRIP &&
+        primitive != SCE_GXM_PRIMITIVE_TRIANGLE_FAN)
+        return NULL;
+
+    indices = malloc((size_t)indexCount * 3 * sizeof(uint32_t));
+    if (!indices)
+        return NULL;
+
+    if (primitive == SCE_GXM_PRIMITIVE_TRIANGLES) {
+        for (unsigned int i = 0; i + 2 < indexCount; i += 3) {
+            uint32_t a = gxm_read_index(indexData, format, i);
+            uint32_t b = gxm_read_index(indexData, format, i + 1);
+            uint32_t c = gxm_read_index(indexData, format, i + 2);
+
+            indices[count++] = a;
+            indices[count++] = b;
+            indices[count++] = b;
+            indices[count++] = c;
+            indices[count++] = c;
+            indices[count++] = a;
+        }
+    } else if (primitive == SCE_GXM_PRIMITIVE_TRIANGLE_STRIP) {
+        for (unsigned int i = 0; i + 2 < indexCount; i++) {
+            uint32_t a = gxm_read_index(indexData, format, i);
+            uint32_t b = gxm_read_index(indexData, format, i + 1);
+            uint32_t c = gxm_read_index(indexData, format, i + 2);
+
+            indices[count++] = a;
+            indices[count++] = b;
+            indices[count++] = b;
+            indices[count++] = c;
+            indices[count++] = c;
+            indices[count++] = a;
+        }
+    } else {
+        uint32_t first = gxm_read_index(indexData, format, 0);
+
+        for (unsigned int i = 1; i + 1 < indexCount; i++) {
+            uint32_t a = gxm_read_index(indexData, format, i);
+            uint32_t b = gxm_read_index(indexData, format, i + 1);
+
+            indices[count++] = first;
+            indices[count++] = a;
+            indices[count++] = a;
+            indices[count++] = b;
+            indices[count++] = b;
+            indices[count++] = first;
+        }
+    }
+
+    *out_count = count;
+    return indices;
+}
+
+static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
+                           SceGxmIndexFormat indexType, const void *indexData,
+                           unsigned int indexCount, unsigned int instances)
 {
     GLuint program;
     GLenum gl_index_type;
+    GLenum gl_primitive;
     size_t index_size;
-    uint32_t index_offset = 0;
+    uint32_t max_index = 0;
+    SceGxmPolygonMode polygon_mode;
 
     if (!context->in_scene)
         return SCE_GXM_ERROR_NOT_WITHIN_SCENE;
     if (!context->vertex_program || !context->fragment_program)
         return SCE_GXM_ERROR_NULL_PROGRAM;
+    if (!indexData || !indexCount)
+        return SCE_GXM_ERROR_INVALID_VALUE;
     if (!g_gl)
         return 0;
 
@@ -1479,7 +2945,15 @@ EXPORT(SceGxm, 0xBC059AFC, int, sceGxmDraw, SceGxmContext *context, SceGxmPrimit
     if (!program)
         return SCE_GXM_ERROR_INVALID_VALUE;
 
-    gxm_flush_state(context, program);
+    {
+        for (unsigned int i = 0; i < indexCount; i++) {
+            uint32_t index = gxm_read_index(indexData, indexType, i);
+            if (index > max_index)
+                max_index = index;
+        }
+
+        gxm_flush_state(context, program, max_index);
+    }
 
     if (indexType == SCE_GXM_INDEX_FORMAT_U32) {
         gl_index_type = GL_UNSIGNED_INT;
@@ -1489,22 +2963,61 @@ EXPORT(SceGxm, 0xBC059AFC, int, sceGxmDraw, SceGxmContext *context, SceGxmPrimit
         index_size = 2;
     }
 
-    if (indexData) {
-        VitaMemBlockInfo *block = SceSysmem_get_vita_memblock_info_for_addr(indexData);
-        if (block)
-            index_offset = (uint32_t)((uintptr_t)indexData - (uintptr_t)block->base);
-        (void)index_offset;
+    if (!context->ibo)
+        g_gl->glGenBuffers(1, &context->ibo);
+    g_gl->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, context->ibo);
+    g_gl->glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(indexCount * index_size), indexData,
+                       GL_STREAM_DRAW);
 
-        if (!context->ibo)
-            g_gl->glGenBuffers(1, &context->ibo);
-        g_gl->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, context->ibo);
-        g_gl->glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(indexCount * index_size), indexData,
-                           GL_STREAM_DRAW);
+    gl_primitive = gxm_primitive_to_gl(primType);
+    polygon_mode = context->front_polygon_mode;
+
+    if (gxm_polygon_is_line(polygon_mode)) {
+        uint32_t wire_count = 0;
+        uint32_t *wire = gxm_wireframe_indices(primType, indexType, indexData, indexCount,
+                                               &wire_count);
+
+        if (wire) {
+            if (!context->wire_ibo)
+                g_gl->glGenBuffers(1, &context->wire_ibo);
+            g_gl->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, context->wire_ibo);
+            g_gl->glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(wire_count * 4), wire,
+                               GL_STREAM_DRAW);
+            free(wire);
+            g_gl->glDrawElements(GL_LINES, (GLsizei)wire_count, GL_UNSIGNED_INT, 0);
+            return 0;
+        }
     }
 
-    g_gl->glDrawElements(gxm_primitive_to_gl(primType), (GLsizei)indexCount, gl_index_type, 0);
+    if (gxm_polygon_is_point(polygon_mode))
+        gl_primitive = GL_POINTS;
+
+    if (instances > 1 && gl_primitive != GL_POINTS)
+        g_gl->glDrawElementsInstanced(gl_primitive, (GLsizei)indexCount, gl_index_type, 0,
+                                      (GLsizei)instances);
+    else
+        g_gl->glDrawElements(gl_primitive, (GLsizei)indexCount, gl_index_type, 0);
+
+    gxm_gl_check("draw");
 
     return 0;
+}
+
+EXPORT(SceGxm, 0xBC059AFC, int, sceGxmDraw, SceGxmContext *context, SceGxmPrimitiveType primType,
+       SceGxmIndexFormat indexType, const void *indexData, unsigned int indexCount)
+{
+    return gxm_draw_common(context, primType, indexType, indexData, indexCount, 1);
+}
+
+EXPORT(SceGxm, 0x14C4E7D3, int, sceGxmDrawInstanced, SceGxmContext *context,
+       SceGxmPrimitiveType primType, SceGxmIndexFormat indexType, const void *indexData,
+       unsigned int indexCount, unsigned int indexWrap)
+{
+    if (!indexWrap)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+
+    return gxm_draw_common(context, primType, indexType, indexData, indexWrap,
+                           indexCount / indexWrap);
 }
 
 EXPORT(SceGxm, 0xC61E34FC, int, sceGxmMapMemory, void *base, SceSize size,
@@ -1552,6 +3065,894 @@ EXPORT(SceGxm, 0x80CCEDBB, int, sceGxmUnmapFragmentUsseMemor, void *base)
 {
     (void)base;
     return 0;
+}
+
+EXPORT(SceGxm, 0xD5D5FCCD, unsigned int, sceGxmProgramGetParameterCount,
+       const SceGxmProgram *program)
+{
+    return program ? program->parameter_count : 0;
+}
+
+static const SceGxmProgramParameter *gxm_program_parameter(const SceGxmProgram *program,
+                                                           unsigned int index)
+{
+    const uint8_t *base;
+
+    if (!program || index >= program->parameter_count)
+        return NULL;
+
+    base = (const uint8_t *)&program->parameters_offset + program->parameters_offset;
+    return (const SceGxmProgramParameter *)(base + index * sizeof(SceGxmProgramParameter));
+}
+
+EXPORT(SceGxm, 0x06FF9151, const SceGxmProgramParameter *, sceGxmProgramGetParameter,
+       const SceGxmProgram *program, unsigned int index)
+{
+    return gxm_program_parameter(program, index);
+}
+
+EXPORT(SceGxm, 0x633CAA54, const SceGxmProgramParameter *, sceGxmProgramFindParameterBySemantic,
+       const SceGxmProgram *program, SceGxmParameterSemantic semantic, unsigned int index)
+{
+    if (!program)
+        return NULL;
+
+    for (unsigned int i = 0; i < program->parameter_count; i++) {
+        const SceGxmProgramParameter *parameter = gxm_program_parameter(program, i);
+
+        if (parameter->semantic == semantic && (parameter->semantic_index & 0xf) == index)
+            return parameter;
+    }
+
+    return NULL;
+}
+
+EXPORT(SceGxm, 0xED8B6C69, int, sceGxmProgramCheck, const SceGxmProgram *program)
+{
+    if (!program)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    if (program->magic != 0x00505847u /* "GXP\0" */ || program->size == 0)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xBF5E2090, unsigned int, sceGxmProgramGetSize, const SceGxmProgram *program)
+{
+    return program ? program->size : 0;
+}
+
+EXPORT(SceGxm, 0x04BB3C59, SceGxmProgramType, sceGxmProgramGetType, const SceGxmProgram *program)
+{
+    return program && (program->program_flags & 1) ? SCE_GXM_FRAGMENT_PROGRAM
+                                                   : SCE_GXM_VERTEX_PROGRAM;
+}
+
+EXPORT(SceGxm, 0x029B4F1C, SceBool, sceGxmProgramIsDiscardUsed, const SceGxmProgram *program)
+{
+    return program && (program->program_flags & (1u << 3)) ? 1 : 0;
+}
+
+EXPORT(SceGxm, 0x89613EF2, SceBool, sceGxmProgramIsDepthReplaceUsed, const SceGxmProgram *program)
+{
+    return program && (program->program_flags & (1u << 4)) ? 1 : 0;
+}
+
+EXPORT(SceGxm, 0xE63C53D8, SceBool, sceGxmProgramIsSpriteCoordUsed, const SceGxmProgram *program)
+{
+    return program && (program->program_flags & (1u << 5)) ? 1 : 0;
+}
+
+EXPORT(SceGxm, 0xA4297E57, SceBool, sceGxmProgramIsNativeColorUsed, const SceGxmProgram *program)
+{
+    return program && (program->program_flags & (1u << 6)) ? 1 : 0;
+}
+
+EXPORT(SceGxm, 0x104F23F4, SceBool, sceGxmProgramIsFragColorUsed, const SceGxmProgram *program)
+{
+    return program && (program->program_flags & (1u << 7)) ? 1 : 0;
+}
+
+EXPORT(SceGxm, 0xF7AA978B, SceBool, sceGxmProgramParameterIsSamplerCube,
+       const SceGxmProgramParameter *parameter)
+{
+    return parameter && ((parameter->semantic_index >> 4) & 1) ? 1 : 0;
+}
+
+EXPORT(SceGxm, 0x871E5009, SceBool, sceGxmProgramParameterIsRegFormat,
+       const SceGxmProgram *program, const SceGxmProgramParameter *parameter)
+{
+    const uint8_t *base;
+    uint64_t untyped = 0;
+
+    if (!program || !parameter || (program->program_flags & 1))
+        return 0;
+    if (parameter->category != SCE_GXM_PARAMETER_CATEGORY_ATTRIBUTE)
+        return 0;
+
+    base = (const uint8_t *)&program->varyings_offset + program->varyings_offset;
+    memcpy(&untyped, base + 8, sizeof(untyped));
+    return (untyped & (1ull << parameter->resource_index)) ? 1 : 0;
+}
+
+EXPORT(SceGxm, 0xC6924709, unsigned int, sceGxmProgramGetFragmentProgramInputs,
+       const SceGxmProgram *program)
+{
+    (void)program;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xFB01C7E5, unsigned int, sceGxmProgramGetVertexProgramOutputs,
+       const SceGxmProgram *program)
+{
+    const uint8_t *base;
+    uint32_t outputs = 0;
+
+    if (!program || (program->program_flags & 1))
+        return 0;
+    base = (const uint8_t *)&program->varyings_offset + program->varyings_offset;
+    memcpy(&outputs, base + 16, sizeof(outputs));
+    return outputs;
+}
+
+EXPORT(SceGxm, 0xE0E3B3F8, const SceGxmProgram *, sceGxmFragmentProgramGetProgram,
+       const SceGxmFragmentProgram *fragmentProgram)
+{
+    return fragmentProgram ? fragmentProgram->programId->programHeader : NULL;
+}
+
+EXPORT(SceGxm, 0xBC52320E, const SceGxmProgram *, sceGxmVertexProgramGetProgram,
+       const SceGxmVertexProgram *vertexProgram)
+{
+    return vertexProgram ? vertexProgram->programId->programHeader : NULL;
+}
+
+/* ---------------------------------------------------- shader patcher extras */
+
+EXPORT(SceGxm, 0xF9B8FCFD, int, sceGxmShaderPatcherSetUserData, SceGxmShaderPatcher *shaderPatcher,
+       void *userData)
+{
+    shaderPatcher->params.userData = userData;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x96A7E6DD, void *, sceGxmShaderPatcherGetUserData, SceGxmShaderPatcher *shaderPatcher)
+{
+    return shaderPatcher->params.userData;
+}
+
+EXPORT(SceGxm, 0x9DBBC71C, unsigned int, sceGxmShaderPatcherGetHostMemAllocated,
+       const SceGxmShaderPatcher *shaderPatcher)
+{
+    (void)shaderPatcher;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xC694D039, unsigned int, sceGxmShaderPatcherGetBufferMemAllocated,
+       const SceGxmShaderPatcher *shaderPatcher)
+{
+    (void)shaderPatcher;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x7D2F83C1, unsigned int, sceGxmShaderPatcherGetVertexUsseMemAllocated,
+       const SceGxmShaderPatcher *shaderPatcher)
+{
+    (void)shaderPatcher;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x3C9DDB4A, unsigned int, sceGxmShaderPatcherGetFragmentUsseMemAllocated,
+       const SceGxmShaderPatcher *shaderPatcher)
+{
+    (void)shaderPatcher;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x630D4B2E, int, sceGxmShaderPatcherForceUnregisterProgram,
+       SceGxmShaderPatcher *shaderPatcher, SceGxmShaderPatcherId programId)
+{
+    return sceGxmShaderPatcherUnregisterProgram(shaderPatcher, programId);
+}
+
+EXPORT(SceGxm, 0x8E5FCC2A, int, sceGxmShaderPatcherSetAuxiliarySurface,
+       SceGxmShaderPatcher *shaderPatcher, unsigned int auxSurfaceIndex,
+       const SceGxmAuxiliarySurface *auxSurface)
+{
+    (void)shaderPatcher;
+    (void)auxSurfaceIndex;
+    (void)auxSurface;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x0FD1E589, int, sceGxmShaderPatcherAddRefVertexProgram,
+       SceGxmShaderPatcher *shaderPatcher, SceGxmVertexProgram *vertexProgram)
+{
+    (void)shaderPatcher;
+    vertexProgram->refcount++;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x4CD2D19F, int, sceGxmShaderPatcherAddRefFragmentProgram,
+       SceGxmShaderPatcher *shaderPatcher, SceGxmFragmentProgram *fragmentProgram)
+{
+    (void)shaderPatcher;
+    fragmentProgram->refcount++;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xA1A16FF6, int, sceGxmShaderPatcherGetVertexProgramRefCount,
+       SceGxmShaderPatcher *shaderPatcher, SceGxmVertexProgram *vertexProgram,
+       unsigned int *count)
+{
+    (void)shaderPatcher;
+    if (!vertexProgram || !count)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    *count = (unsigned int)vertexProgram->refcount;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x2C5550F0, int, sceGxmShaderPatcherGetFragmentProgramRefCount,
+       SceGxmShaderPatcher *shaderPatcher, SceGxmFragmentProgram *fragmentProgram,
+       unsigned int *count)
+{
+    (void)shaderPatcher;
+    if (!fragmentProgram || !count)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    *count = (unsigned int)fragmentProgram->refcount;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xA4433427, int, sceGxmShaderPatcherCreateMaskUpdateFragmentProgram,
+       SceGxmShaderPatcher *shaderPatcher, SceGxmFragmentProgram **fragmentProgram)
+{
+    SceGxmFragmentProgram *fp = calloc(1, sizeof(*fp));
+
+    (void)shaderPatcher;
+    if (!fp)
+        return SCE_KERNEL_ERROR_NO_MEMORY;
+
+    fp->refcount = 1;
+    fp->mask_update = true;
+    fp->blendInfo = (SceGxmBlendInfo){
+        SCE_GXM_COLOR_MASK_NONE, SCE_GXM_BLEND_FUNC_NONE, SCE_GXM_BLEND_FUNC_NONE,
+        SCE_GXM_BLEND_FACTOR_ONE, SCE_GXM_BLEND_FACTOR_ZERO,
+        SCE_GXM_BLEND_FACTOR_ONE, SCE_GXM_BLEND_FACTOR_ZERO,
+    };
+    *fragmentProgram = fp;
+    return 0;
+}
+
+/* ----------------------------------------------------------- transfer APIs */
+
+static uint32_t gxm_transfer_bpp(SceGxmTransferFormat format)
+{
+    switch (format) {
+    case SCE_GXM_TRANSFER_FORMAT_U8U8U8U8_ABGR:
+    case SCE_GXM_TRANSFER_FORMAT_U2U10U10U10_ABGR:
+    case SCE_GXM_TRANSFER_FORMAT_RAW32:
+        return 4;
+    case SCE_GXM_TRANSFER_FORMAT_U8U8U8_BGR:
+        return 3;
+    case SCE_GXM_TRANSFER_FORMAT_U4U4U4U4_ABGR:
+    case SCE_GXM_TRANSFER_FORMAT_U1U5U5U5_ABGR:
+    case SCE_GXM_TRANSFER_FORMAT_U5U6U5_BGR:
+    case SCE_GXM_TRANSFER_FORMAT_U8U8_GR:
+    case SCE_GXM_TRANSFER_FORMAT_VYUY422:
+    case SCE_GXM_TRANSFER_FORMAT_YVYU422:
+    case SCE_GXM_TRANSFER_FORMAT_UYVY422:
+    case SCE_GXM_TRANSFER_FORMAT_YUYV422:
+    case SCE_GXM_TRANSFER_FORMAT_RAW16:
+        return 2;
+    case SCE_GXM_TRANSFER_FORMAT_U8_R:
+        return 1;
+    case SCE_GXM_TRANSFER_FORMAT_RAW64:
+        return 8;
+    case SCE_GXM_TRANSFER_FORMAT_RAW128:
+        return 16;
+    default:
+        return 4;
+    }
+}
+
+EXPORT(SceGxm, 0x69DDFF5E, int, sceGxmTransferFill, uint32_t color,
+       SceGxmTransferFormat destFormat, void *destAddress, uint32_t destX, uint32_t destY,
+       uint32_t destWidth, uint32_t destHeight, int32_t destStride, SceGxmSyncObject *syncObject,
+       uint32_t syncFlags, const SceGxmNotification *notification)
+{
+    uint32_t bpp = gxm_transfer_bpp(destFormat);
+
+    (void)syncObject;
+    (void)syncFlags;
+    (void)notification;
+
+    if (!destAddress || !destWidth || !destHeight || destStride <= 0)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+
+    for (uint32_t y = 0; y < destHeight; y++) {
+        uint8_t *row = (uint8_t *)destAddress + (size_t)(destY + y) * (size_t)destStride * bpp +
+                       (size_t)destX * bpp;
+
+        for (uint32_t x = 0; x < destWidth; x++) {
+            switch (bpp) {
+            case 1:
+                row[x] = (uint8_t)color;
+                break;
+            case 2:
+                ((uint16_t *)row)[x] = (uint16_t)color;
+                break;
+            case 3:
+                row[x * 3 + 0] = (uint8_t)color;
+                row[x * 3 + 1] = (uint8_t)(color >> 8);
+                row[x * 3 + 2] = (uint8_t)(color >> 16);
+                break;
+            default:
+                ((uint32_t *)row)[x] = color;
+                break;
+            }
+        }
+    }
+
+    return 0;
+}
+
+EXPORT(SceGxm, 0x62312BF8, int, sceGxmTransferCopy, uint32_t width, uint32_t height,
+       uint32_t colorKeyValue, uint32_t colorKeyMask, SceGxmTransferColorKeyMode colorKeyMode,
+       SceGxmTransferFormat srcFormat, SceGxmTransferType srcType, const void *srcAddress,
+       uint32_t srcX, uint32_t srcY, int32_t srcStride, SceGxmTransferFormat destFormat,
+       SceGxmTransferType destType, void *destAddress, uint32_t destX, uint32_t destY,
+       int32_t destStride, SceGxmSyncObject *syncObject, uint32_t syncFlags,
+       const SceGxmNotification *notification)
+{
+    uint32_t src_bpp = gxm_transfer_bpp(srcFormat);
+    uint32_t dst_bpp = gxm_transfer_bpp(destFormat);
+
+    (void)colorKeyValue;
+    (void)colorKeyMask;
+    (void)colorKeyMode;
+    (void)srcType;
+    (void)destType;
+    (void)syncObject;
+    (void)syncFlags;
+    (void)notification;
+
+    if (!srcAddress || !destAddress || !width || !height)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+
+    for (uint32_t y = 0; y < height; y++) {
+        const uint8_t *src = (const uint8_t *)srcAddress +
+                             (size_t)(srcY + y) * (size_t)srcStride * src_bpp +
+                             (size_t)srcX * src_bpp;
+        uint8_t *dst = (uint8_t *)destAddress +
+                       (size_t)(destY + y) * (size_t)destStride * dst_bpp +
+                       (size_t)destX * dst_bpp;
+
+        if (src_bpp == dst_bpp)
+            memcpy(dst, src, (size_t)width * src_bpp);
+        else
+            return SCE_GXM_ERROR_INVALID_VALUE;
+    }
+
+    return 0;
+}
+
+EXPORT(SceGxm, 0xD10F7EAD, int, sceGxmTransferDownscale, SceGxmTransferFormat srcFormat,
+       const void *srcAddress, unsigned int srcX, unsigned int srcY, unsigned int srcWidth,
+       unsigned int srcHeight, int srcStride, SceGxmTransferFormat destFormat,
+       void *destAddress, unsigned int destX, unsigned int destY, int destStride,
+       SceGxmSyncObject *syncObject, unsigned int syncFlags,
+       const SceGxmNotification *notification)
+{
+    uint32_t src_bpp = gxm_transfer_bpp(srcFormat);
+    uint32_t dst_bpp = gxm_transfer_bpp(destFormat);
+
+    (void)syncObject;
+    (void)syncFlags;
+    (void)notification;
+
+    if (!srcAddress || !destAddress || !srcWidth || !srcHeight || src_bpp != dst_bpp)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+
+    for (unsigned int y = 0; y < srcHeight / 2; y++) {
+        for (unsigned int x = 0; x < srcWidth / 2; x++) {
+            const uint8_t *p00 = (const uint8_t *)srcAddress +
+                                 (size_t)(srcY + y * 2) * (size_t)srcStride * src_bpp +
+                                 (size_t)(srcX + x * 2) * src_bpp;
+            const uint8_t *p01 = (const uint8_t *)srcAddress +
+                                 (size_t)(srcY + y * 2) * (size_t)srcStride * src_bpp +
+                                 (size_t)(srcX + x * 2 + 1) * src_bpp;
+            const uint8_t *p10 = (const uint8_t *)srcAddress +
+                                 (size_t)(srcY + y * 2 + 1) * (size_t)srcStride * src_bpp +
+                                 (size_t)(srcX + x * 2) * src_bpp;
+            const uint8_t *p11 = (const uint8_t *)srcAddress +
+                                 (size_t)(srcY + y * 2 + 1) * (size_t)srcStride * src_bpp +
+                                 (size_t)(srcX + x * 2 + 1) * src_bpp;
+            uint8_t *dst = (uint8_t *)destAddress +
+                           (size_t)(destY + y) * (size_t)destStride * dst_bpp +
+                           (size_t)(destX + x) * dst_bpp;
+
+            for (uint32_t c = 0; c < dst_bpp; c++)
+                dst[c] = (uint8_t)((p00[c] + p01[c] + p10[c] + p11[c] + 2) / 4);
+        }
+    }
+
+    return 0;
+}
+
+EXPORT(SceGxm, 0x45229C39, int, sceGxmTransferFinish, void)
+{
+    if (g_gl)
+        g_gl->glFinish();
+    return 0;
+}
+
+/* --------------------------------------------------------- deferred stubs */
+
+EXPORT(SceGxm, 0x249D5B00, int, sceGxmCreateDeferredContext,
+       const SceGxmDeferredContextParams *params, SceGxmContext **context)
+{
+    (void)params;
+    if (context)
+        *context = NULL;
+    return SCE_GXM_ERROR_UNSUPPORTED;
+}
+
+EXPORT(SceGxm, 0xD6A2FF2F, int, sceGxmDestroyDeferredContext, SceGxmContext *context)
+{
+    (void)context;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x944D3F83, int, sceGxmBeginCommandList, SceGxmContext *context)
+{
+    (void)context;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x36D85916, int, sceGxmEndCommandList, SceGxmContext *context,
+       SceGxmCommandList *list)
+{
+    (void)context;
+    (void)list;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xE8E139DD, int, sceGxmExecuteCommandList, SceGxmContext *context,
+       SceGxmCommandList *list)
+{
+    (void)context;
+    (void)list;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x2A1BCDDB, int, sceGxmGetContextType, const SceGxmContext *context)
+{
+    return context ? 0 : SCE_GXM_ERROR_INVALID_POINTER;
+}
+
+EXPORT(SceGxm, 0xAD8C2EBA, int, sceGxmGetDeferredContextVdmBuffer,
+       const SceGxmContext *context, void **buffer, unsigned int *size)
+{
+    (void)context;
+    if (buffer)
+        *buffer = NULL;
+    if (size)
+        *size = 0;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x87632B9C, int, sceGxmGetDeferredContextVertexBuffer,
+       const SceGxmContext *context, void **buffer)
+{
+    (void)context;
+    if (buffer)
+        *buffer = NULL;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xFA081D05, int, sceGxmGetDeferredContextFragmentBuffer,
+       const SceGxmContext *context, void **buffer)
+{
+    (void)context;
+    if (buffer)
+        *buffer = NULL;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x0B9D13CE, void, sceGxmSetDeferredContextVdmBuffer, SceGxmContext *context,
+       void *buffer, unsigned int size)
+{
+    (void)context;
+    (void)buffer;
+    (void)size;
+}
+
+EXPORT(SceGxm, 0x27CAD127, void, sceGxmSetDeferredContextVertexBuffer, SceGxmContext *context,
+       void *buffer)
+{
+    (void)context;
+    (void)buffer;
+}
+
+EXPORT(SceGxm, 0xC6B3FCD0, void, sceGxmSetDeferredContextFragmentBuffer, SceGxmContext *context,
+       void *buffer)
+{
+    (void)context;
+    (void)buffer;
+}
+
+#define GXM_PRECOMPUTED_MAGIC 0x47504d31u /* "GPM1" */
+
+typedef struct {
+    uint32_t magic;
+    uint32_t pointer;
+} GxmPrecomputedHeader;
+
+typedef struct {
+    const SceGxmVertexProgram *program;
+    void *default_uniform;
+    const void *uniform_buffers[SCE_GXM_MAX_UNIFORM_BUFFERS];
+    SceGxmTexture textures[SCE_GXM_MAX_TEXTURE_UNITS];
+} GxmPrecomputedVertex;
+
+typedef struct {
+    const SceGxmFragmentProgram *program;
+    void *default_uniform;
+    const void *uniform_buffers[SCE_GXM_MAX_UNIFORM_BUFFERS];
+    SceGxmTexture textures[SCE_GXM_MAX_TEXTURE_UNITS];
+    SceGxmAuxiliarySurface auxiliary[SCE_GXM_MAX_AUXILIARY_SURFACES];
+} GxmPrecomputedFragment;
+
+typedef struct {
+    const SceGxmVertexProgram *program;
+    const void *streams[SCE_GXM_MAX_VERTEX_STREAMS];
+    SceGxmPrimitiveType primitive;
+    SceGxmIndexFormat index_format;
+    const void *index_data;
+    unsigned int index_count;
+    unsigned int index_wrap;
+} GxmPrecomputedDrawState;
+
+static void *gxm_precomputed_alloc(unsigned int *words, size_t size)
+{
+    GxmPrecomputedHeader *header = (GxmPrecomputedHeader *)words;
+    void *state;
+
+    if (header->magic == GXM_PRECOMPUTED_MAGIC && header->pointer)
+        free((void *)(uintptr_t)header->pointer);
+
+    state = calloc(1, size);
+    if (!state)
+        return NULL;
+
+    header->magic = GXM_PRECOMPUTED_MAGIC;
+    header->pointer = (uint32_t)(uintptr_t)state;
+    return state;
+}
+
+static void *gxm_precomputed_get(const unsigned int *words)
+{
+    const GxmPrecomputedHeader *header = (const GxmPrecomputedHeader *)words;
+
+    return header->magic == GXM_PRECOMPUTED_MAGIC ? (void *)(uintptr_t)header->pointer : NULL;
+}
+
+EXPORT(SceGxm, 0x9D83CA3B, unsigned int, sceGxmGetPrecomputedVertexStateSize,
+       const SceGxmVertexProgram *vertexProgram)
+{
+    (void)vertexProgram;
+    return sizeof(SceGxmPrecomputedVertexState);
+}
+
+EXPORT(SceGxm, 0x85DE8506, unsigned int, sceGxmGetPrecomputedFragmentStateSize,
+       const SceGxmFragmentProgram *fragmentProgram)
+{
+    (void)fragmentProgram;
+    return sizeof(SceGxmPrecomputedFragmentState);
+}
+
+EXPORT(SceGxm, 0x41BBD792, unsigned int, sceGxmGetPrecomputedDrawSize,
+       const SceGxmVertexProgram *vertexProgram)
+{
+    (void)vertexProgram;
+    return sizeof(SceGxmPrecomputedDraw);
+}
+
+EXPORT(SceGxm, 0xBE937F8D, int, sceGxmPrecomputedVertexStateInit,
+       SceGxmPrecomputedVertexState *precomputedState, const SceGxmVertexProgram *vertexProgram,
+       void *memBlock)
+{
+    GxmPrecomputedVertex *state;
+
+    if (!precomputedState || !vertexProgram || !memBlock)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    if ((uintptr_t)memBlock & 0xf)
+        return SCE_GXM_ERROR_INVALID_ALIGNMENT;
+
+    state = gxm_precomputed_alloc(precomputedState->data, sizeof(*state));
+    if (!state)
+        return SCE_GXM_ERROR_OUT_OF_MEMORY;
+    state->program = vertexProgram;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x34BF64E3, void, sceGxmPrecomputedVertexStateSetDefaultUniformBuffer,
+       SceGxmPrecomputedVertexState *precomputedState, void *defaultBuffer)
+{
+    GxmPrecomputedVertex *state = gxm_precomputed_get(precomputedState->data);
+    if (state)
+        state->default_uniform = defaultBuffer;
+}
+
+EXPORT(SceGxm, 0xBE5A68EF, void *, sceGxmPrecomputedVertexStateGetDefaultUniformBuffer,
+       const SceGxmPrecomputedVertexState *precomputedState)
+{
+    const GxmPrecomputedVertex *state = gxm_precomputed_get(precomputedState->data);
+    return state ? state->default_uniform : NULL;
+}
+
+EXPORT(SceGxm, 0xC40C9127, int, sceGxmPrecomputedVertexStateSetAllTextures,
+       SceGxmPrecomputedVertexState *precomputedState, const SceGxmTexture *textures)
+{
+    GxmPrecomputedVertex *state = gxm_precomputed_get(precomputedState->data);
+    if (!state || !textures)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    memcpy(state->textures, textures, sizeof(state->textures));
+    return 0;
+}
+
+EXPORT(SceGxm, 0x6A29EB06, int, sceGxmPrecomputedVertexStateSetTexture,
+       SceGxmPrecomputedVertexState *precomputedState, unsigned int textureIndex,
+       const SceGxmTexture *texture)
+{
+    GxmPrecomputedVertex *state = gxm_precomputed_get(precomputedState->data);
+    if (!state || !texture || textureIndex >= SCE_GXM_MAX_TEXTURE_UNITS)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+    state->textures[textureIndex] = *texture;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x0389861D, int, sceGxmPrecomputedVertexStateSetAllUniformBuffers,
+       SceGxmPrecomputedVertexState *precomputedState, const void *const *bufferDataArray)
+{
+    GxmPrecomputedVertex *state = gxm_precomputed_get(precomputedState->data);
+    if (!state || !bufferDataArray)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    memcpy(state->uniform_buffers, bufferDataArray, sizeof(state->uniform_buffers));
+    return 0;
+}
+
+EXPORT(SceGxm, 0xDBF97ED6, int, sceGxmPrecomputedVertexStateSetUniformBuffer,
+       SceGxmPrecomputedVertexState *precomputedState, unsigned int bufferIndex,
+       const void *bufferData)
+{
+    GxmPrecomputedVertex *state = gxm_precomputed_get(precomputedState->data);
+    if (!state || bufferIndex >= SCE_GXM_MAX_UNIFORM_BUFFERS)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+    state->uniform_buffers[bufferIndex] = bufferData;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xE297D7AF, int, sceGxmPrecomputedFragmentStateInit,
+       SceGxmPrecomputedFragmentState *precomputedState,
+       const SceGxmFragmentProgram *fragmentProgram, void *memBlock)
+{
+    GxmPrecomputedFragment *state;
+
+    if (!precomputedState || !fragmentProgram || !memBlock)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    if ((uintptr_t)memBlock & 0xf)
+        return SCE_GXM_ERROR_INVALID_ALIGNMENT;
+
+    state = gxm_precomputed_alloc(precomputedState->data, sizeof(*state));
+    if (!state)
+        return SCE_GXM_ERROR_OUT_OF_MEMORY;
+    state->program = fragmentProgram;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x91236858, void, sceGxmPrecomputedFragmentStateSetDefaultUniformBuffer,
+       SceGxmPrecomputedFragmentState *precomputedState, void *defaultBuffer)
+{
+    GxmPrecomputedFragment *state = gxm_precomputed_get(precomputedState->data);
+    if (state)
+        state->default_uniform = defaultBuffer;
+}
+
+EXPORT(SceGxm, 0xCECB584A, void *, sceGxmPrecomputedFragmentStateGetDefaultUniformBuffer,
+       const SceGxmPrecomputedFragmentState *precomputedState)
+{
+    const GxmPrecomputedFragment *state = gxm_precomputed_get(precomputedState->data);
+    return state ? state->default_uniform : NULL;
+}
+
+EXPORT(SceGxm, 0xC383DE39, int, sceGxmPrecomputedFragmentStateSetAllTextures,
+       SceGxmPrecomputedFragmentState *precomputedState, const SceGxmTexture *textureArray)
+{
+    GxmPrecomputedFragment *state = gxm_precomputed_get(precomputedState->data);
+    if (!state || !textureArray)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    memcpy(state->textures, textureArray, sizeof(state->textures));
+    return 0;
+}
+
+EXPORT(SceGxm, 0x29118BF1, int, sceGxmPrecomputedFragmentStateSetTexture,
+       SceGxmPrecomputedFragmentState *precomputedState, unsigned int textureIndex,
+       const SceGxmTexture *texture)
+{
+    GxmPrecomputedFragment *state = gxm_precomputed_get(precomputedState->data);
+    if (!state || !texture || textureIndex >= SCE_GXM_MAX_TEXTURE_UNITS)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+    state->textures[textureIndex] = *texture;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x5A783DC3, int, sceGxmPrecomputedFragmentStateSetAllUniformBuffers,
+       SceGxmPrecomputedFragmentState *precomputedState, const void *const *bufferDataArray)
+{
+    GxmPrecomputedFragment *state = gxm_precomputed_get(precomputedState->data);
+    if (!state || !bufferDataArray)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    memcpy(state->uniform_buffers, bufferDataArray, sizeof(state->uniform_buffers));
+    return 0;
+}
+
+EXPORT(SceGxm, 0xB452F1FB, int, sceGxmPrecomputedFragmentStateSetUniformBuffer,
+       SceGxmPrecomputedFragmentState *precomputedState, unsigned int bufferIndex,
+       const void *bufferData)
+{
+    GxmPrecomputedFragment *state = gxm_precomputed_get(precomputedState->data);
+    if (!state || bufferIndex >= SCE_GXM_MAX_UNIFORM_BUFFERS)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+    state->uniform_buffers[bufferIndex] = bufferData;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x9D93B63A, int, sceGxmPrecomputedFragmentStateSetAllAuxiliarySurfaces,
+       SceGxmPrecomputedFragmentState *precomputedState,
+       const SceGxmAuxiliarySurface *auxSurfaceArray)
+{
+    GxmPrecomputedFragment *state = gxm_precomputed_get(precomputedState->data);
+    if (!state || !auxSurfaceArray)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    memcpy(state->auxiliary, auxSurfaceArray, sizeof(state->auxiliary));
+    return 0;
+}
+
+EXPORT(SceGxm, 0xA197F096, int, sceGxmPrecomputedDrawInit,
+       SceGxmPrecomputedDraw *precomputedDraw, const SceGxmVertexProgram *vertexProgram,
+       void *memBlock)
+{
+    GxmPrecomputedDrawState *state;
+
+    if (!precomputedDraw || !vertexProgram || !memBlock)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    if ((uintptr_t)memBlock & 0xf)
+        return SCE_GXM_ERROR_INVALID_ALIGNMENT;
+
+    state = gxm_precomputed_alloc(precomputedDraw->data, sizeof(*state));
+    if (!state)
+        return SCE_GXM_ERROR_OUT_OF_MEMORY;
+    state->program = vertexProgram;
+    state->primitive = SCE_GXM_PRIMITIVE_TRIANGLES;
+    state->index_format = SCE_GXM_INDEX_FORMAT_U16;
+    return 0;
+}
+
+EXPORT(SceGxm, 0xB6C6F571, int, sceGxmPrecomputedDrawSetAllVertexStreams,
+       SceGxmPrecomputedDraw *precomputedDraw, const void *const *streamDataArray)
+{
+    GxmPrecomputedDrawState *state = gxm_precomputed_get(precomputedDraw->data);
+    if (!state || !streamDataArray)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    memcpy(state->streams, streamDataArray, sizeof(state->streams));
+    return 0;
+}
+
+EXPORT(SceGxm, 0x6C936214, int, sceGxmPrecomputedDrawSetVertexStream,
+       SceGxmPrecomputedDraw *precomputedDraw, unsigned int streamIndex, const void *streamData)
+{
+    GxmPrecomputedDrawState *state = gxm_precomputed_get(precomputedDraw->data);
+    if (!state || streamIndex >= SCE_GXM_MAX_VERTEX_STREAMS)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+    state->streams[streamIndex] = streamData;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x884D0D08, void, sceGxmPrecomputedDrawSetParams,
+       SceGxmPrecomputedDraw *precomputedDraw, SceGxmPrimitiveType primType,
+       SceGxmIndexFormat indexType, const void *indexData, unsigned int indexCount)
+{
+    GxmPrecomputedDrawState *state = gxm_precomputed_get(precomputedDraw->data);
+    if (!state)
+        return;
+    state->primitive = primType;
+    state->index_format = indexType;
+    state->index_data = indexData;
+    state->index_count = indexCount;
+    state->index_wrap = indexCount;
+}
+
+EXPORT(SceGxm, 0x3A7B1633, void, sceGxmPrecomputedDrawSetParamsInstanced,
+       SceGxmPrecomputedDraw *precomputedDraw, SceGxmPrimitiveType primType,
+       SceGxmIndexFormat indexType, const void *indexData, unsigned int indexCount,
+       unsigned int indexWrap)
+{
+    GxmPrecomputedDrawState *state = gxm_precomputed_get(precomputedDraw->data);
+    if (!state)
+        return;
+    state->primitive = primType;
+    state->index_format = indexType;
+    state->index_data = indexData;
+    state->index_count = indexCount;
+    state->index_wrap = indexWrap;
+}
+
+EXPORT(SceGxm, 0xB7626A93, void, sceGxmSetPrecomputedVertexState, SceGxmContext *context,
+       const SceGxmPrecomputedVertexState *precomputedState)
+{
+    context->precomputed_vertex = precomputedState;
+}
+
+EXPORT(SceGxm, 0xF8952750, void, sceGxmSetPrecomputedFragmentState, SceGxmContext *context,
+       const SceGxmPrecomputedFragmentState *precomputedState)
+{
+    context->precomputed_fragment = precomputedState;
+}
+
+static void gxm_apply_precomputed_state(SceGxmContext *context)
+{
+    if (context->precomputed_vertex) {
+        GxmPrecomputedVertex *state = gxm_precomputed_get(context->precomputed_vertex->data);
+
+        if (state) {
+            context->vertex_program = state->program;
+            context->vertex_uniforms = state->default_uniform;
+            memcpy(context->vertex_uniform_buffers, state->uniform_buffers,
+                   sizeof(context->vertex_uniform_buffers));
+            memcpy(context->vertex_textures, state->textures, sizeof(context->vertex_textures));
+        }
+    }
+
+    if (context->precomputed_fragment) {
+        GxmPrecomputedFragment *state = gxm_precomputed_get(context->precomputed_fragment->data);
+
+        if (state) {
+            context->fragment_program = state->program;
+            context->fragment_uniforms = state->default_uniform;
+            memcpy(context->fragment_uniform_buffers, state->uniform_buffers,
+                   sizeof(context->fragment_uniform_buffers));
+            memcpy(context->fragment_textures, state->textures,
+                   sizeof(context->fragment_textures));
+        }
+    }
+}
+
+EXPORT(SceGxm, 0xED3F78B8, int, sceGxmDrawPrecomputed, SceGxmContext *context,
+       const SceGxmPrecomputedDraw *precomputedDraw)
+{
+    GxmPrecomputedDrawState *state;
+
+    if (!context || !precomputedDraw)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+
+    state = gxm_precomputed_get(precomputedDraw->data);
+    if (!state || !state->index_data)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+
+    gxm_apply_precomputed_state(context);
+
+    for (unsigned int i = 0; i < SCE_GXM_MAX_VERTEX_STREAMS; i++) {
+        if (state->streams[i])
+            context->streams[i].data = state->streams[i];
+    }
+
+    if (state->index_wrap && state->index_wrap < state->index_count)
+        return gxm_draw_common(context, state->primitive, state->index_format,
+                               state->index_data, state->index_wrap,
+                               state->index_count / state->index_wrap);
+
+    return gxm_draw_common(context, state->primitive, state->index_format, state->index_data,
+                           state->index_count, 1);
 }
 
 DECLARE_LIBRARY(SceGxm, 0xf76b66bd);

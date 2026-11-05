@@ -106,6 +106,8 @@ int main(int argc, char **argv)
     }
 
     printf("GLSL ES length: %zu\n", strlen(glsl));
+    if (argc > 2 && strcmp(argv[2], "--dump") == 0)
+        printf("%s\n", glsl);
     printf("shader_smoke: ok\n");
 
     free(glsl);

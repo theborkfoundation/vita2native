@@ -73,19 +73,27 @@ typedef struct {
 static_assert(sizeof(SceGxmTextureInner) == sizeof(SceGxmTexture), "Incorrect size");
 
 typedef struct {
-    // opaque start
     uint32_t disabled : 1;
     uint32_t downscale : 1;
-    uint32_t pad : 30;
+    uint32_t gamma_mode : 2;
+    uint32_t dither_mode : 2;
+    uint32_t pad : 26;
     uint32_t width;
     uint32_t height;
     uint32_t strideInPixels;
     void *data;
     SceGxmColorFormat colorFormat;
     SceGxmColorSurfaceType surfaceType;
-    // opaque end
     uint32_t outputRegisterSize;
-    SceGxmTexture backgroundTex;
+    uint16_t clipXMin;
+    uint16_t clipYMin;
+    uint16_t clipXMax;
+    uint16_t clipYMax;
+#if UINTPTR_MAX > 0xffffffffu
+    uint32_t reserved[1];
+#else
+    uint32_t reserved[2];
+#endif
 } SceGxmColorSurfaceInner;
 static_assert(sizeof(SceGxmColorSurfaceInner) == sizeof(SceGxmColorSurface), "Incorrect size");
 
