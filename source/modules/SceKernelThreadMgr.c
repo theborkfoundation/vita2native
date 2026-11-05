@@ -23,6 +23,7 @@
 #include "modules/SceKernelSync.h"
 #include "modules/SceKernelThreadMgr.h"
 #include "modules/SceLibKernel.h"
+#include "modules/SceProcessmgr.h"
 #include "modules/SceSysmem.h"
 
 #define SCE_KERNEL_HIGHEST_PRIORITY_USER               64
@@ -435,6 +436,8 @@ int SceKernelThreadMgr_main_entry(SceKernelThreadEntry entry, int args, void *ar
         LOG("Error waiting for the process to finish: 0x%" PRIx32, res);
         return -1;
     }
+
+    SceProcessmgr_run_termination_callbacks();
 
     // TODO: Also wait for all threads to finish?
     sceKernelWaitThreadEnd(thid, NULL, NULL);

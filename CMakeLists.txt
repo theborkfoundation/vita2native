@@ -105,6 +105,7 @@ add_executable(vita2native
     source/modules/SceLibKernelAeabi.c
     source/modules/SceFios2.c
     source/modules/ScePgf.c
+    source/modules/SceProcessmgr.c
     source/modules/SceSqlite.c
     source/modules/SceIoAsync.c
     source/modules/SceLibClib.c
@@ -405,6 +406,24 @@ if(BUILD_TESTING)
     target_compile_definitions(net_smoke PRIVATE _GNU_SOURCE=1)
     target_link_libraries(net_smoke PRIVATE pthread m)
     add_test(NAME net_smoke COMMAND net_smoke)
+
+    add_executable(processmgr_smoke
+        tests/processmgr_smoke.c
+        source/modules/SceProcessmgr.c
+        source/host/host_thread.c
+    )
+    target_include_directories(processmgr_smoke PRIVATE include external/vita-headers/include)
+    target_compile_definitions(processmgr_smoke PRIVATE _GNU_SOURCE=1)
+    target_link_libraries(processmgr_smoke PRIVATE pthread m)
+    add_test(NAME processmgr_smoke COMMAND processmgr_smoke)
+
+    add_executable(dialog_smoke
+        tests/dialog_smoke.c
+        source/modules/SceCommonDialog.c
+    )
+    target_include_directories(dialog_smoke PRIVATE include external/vita-headers/include)
+    target_compile_definitions(dialog_smoke PRIVATE _GNU_SOURCE=1)
+    add_test(NAME dialog_smoke COMMAND dialog_smoke)
 
     add_executable(ngs_smoke
         tests/ngs_smoke.c

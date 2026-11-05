@@ -36,6 +36,10 @@ UEvent *SceLibKernel_get_process_exit_uevent(void)
     return &g_exit_event;
 }
 
+void SceProcessmgr_run_termination_callbacks(void)
+{
+}
+
 static atomic_int g_wait_signal_done;
 static atomic_int g_signal_timeout_result;
 static atomic_int g_vfp_old_first;
