@@ -52,8 +52,11 @@ static VitaSemaInfo *sema_lookup(SceUID uid)
 {
     VitaSemaInfo *sema;
 
+    VitaSemaInfo **slot;
+
     rwlockReadLock(&g_semas_lock);
-    sema = *vita_sema_dict_get(g_semas, uid);
+    slot = vita_sema_dict_get(g_semas, uid);
+    sema = slot ? *slot : NULL;
     rwlockReadUnlock(&g_semas_lock);
 
     return sema;
@@ -303,8 +306,11 @@ static VitaEventFlagInfo *event_flag_lookup(SceUID uid)
 {
     VitaEventFlagInfo *evf;
 
+    VitaEventFlagInfo **slot;
+
     rwlockReadLock(&g_event_flags_lock);
-    evf = *vita_event_flag_dict_get(g_event_flags, uid);
+    slot = vita_event_flag_dict_get(g_event_flags, uid);
+    evf = slot ? *slot : NULL;
     rwlockReadUnlock(&g_event_flags_lock);
 
     return evf;

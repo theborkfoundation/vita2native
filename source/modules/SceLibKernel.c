@@ -59,9 +59,11 @@ static RwLock g_vita_opened_dirs_lock;
 static VitaOpenedFile *get_opened_file_for_fd(SceUID fd)
 {
     VitaOpenedFile *vfile;
+    VitaOpenedFile **slot;
 
     rwlockReadLock(&g_vita_opened_files_lock);
-    vfile = *vita_opened_files_dict_get(g_vita_opened_files, fd);
+    slot = vita_opened_files_dict_get(g_vita_opened_files, fd);
+    vfile = slot ? *slot : NULL;
     rwlockReadUnlock(&g_vita_opened_files_lock);
 
     return vfile;
@@ -70,9 +72,11 @@ static VitaOpenedFile *get_opened_file_for_fd(SceUID fd)
 static VitaOpenedDir *get_opened_dir_for_fd(SceUID fd)
 {
     VitaOpenedDir *vdir;
+    VitaOpenedDir **slot;
 
     rwlockReadLock(&g_vita_opened_dirs_lock);
-    vdir = *vita_opened_dirs_dict_get(g_vita_opened_dirs, fd);
+    slot = vita_opened_dirs_dict_get(g_vita_opened_dirs, fd);
+    vdir = slot ? *slot : NULL;
     rwlockReadUnlock(&g_vita_opened_dirs_lock);
 
     return vdir;

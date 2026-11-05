@@ -36,7 +36,9 @@ static SceUID g_next_handle;
 
 static AudioDecoder *audiodec_lookup(SceUID uid)
 {
-    return *vita_audiodec_dict_get(g_decoders, uid);
+    AudioDecoder **slot = vita_audiodec_dict_get(g_decoders, uid);
+
+    return slot ? *slot : NULL;
 }
 
 EXPORT(SceAudiodecUser, 0x445C2CEF, int, sceAudiodecInitLibrary, SceUInt32 codec_type,

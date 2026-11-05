@@ -21,8 +21,11 @@ static VitaMemBlockInfo *get_memblock_info_for_uid(SceUID uid)
 {
     VitaMemBlockInfo *block;
 
+    VitaMemBlockInfo **slot;
+
     rwlockReadLock(&g_vita_memblock_infos_lock);
-    block = *vita_memblock_info_dict_get(g_vita_memblock_infos, uid);
+    slot = vita_memblock_info_dict_get(g_vita_memblock_infos, uid);
+    block = slot ? *slot : NULL;
     rwlockReadUnlock(&g_vita_memblock_infos_lock);
 
     return block;

@@ -51,7 +51,9 @@ static uint32_t g_group_channels;
 
 static AtracStream *atrac_lookup(int handle)
 {
-    return *vita_atrac_dict_get(g_streams, (SceUID)handle);
+    AtracStream **slot = vita_atrac_dict_get(g_streams, (SceUID)handle);
+
+    return slot ? *slot : NULL;
 }
 
 static uint32_t read_le32(const uint8_t *p)

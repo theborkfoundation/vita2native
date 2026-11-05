@@ -84,8 +84,11 @@ static VitaThreadInfo *get_thread_info_for_uid(SceUID thid)
 {
     VitaThreadInfo *ti;
 
+    VitaThreadInfo **slot;
+
     rwlockReadLock(&g_vita_thread_infos_lock);
-    ti = *vita_thread_info_dict_get(g_vita_thread_infos, thid);
+    slot = vita_thread_info_dict_get(g_vita_thread_infos, thid);
+    ti = slot ? *slot : NULL;
     rwlockReadUnlock(&g_vita_thread_infos_lock);
 
     return ti;
@@ -321,8 +324,11 @@ static VitaMutexInfo *get_mutex_info(SceUID uid)
 {
     VitaMutexInfo *info;
 
+    VitaMutexInfo **slot;
+
     rwlockReadLock(&g_vita_sync_objects_lock);
-    info = *vita_mutex_info_dict_get(g_vita_mutex_infos, uid);
+    slot = vita_mutex_info_dict_get(g_vita_mutex_infos, uid);
+    info = slot ? *slot : NULL;
     rwlockReadUnlock(&g_vita_sync_objects_lock);
 
     return info;
@@ -332,8 +338,11 @@ static VitaMsgPipeInfo *get_msgpipe_info(SceUID uid)
 {
     VitaMsgPipeInfo *info;
 
+    VitaMsgPipeInfo **slot;
+
     rwlockReadLock(&g_vita_sync_objects_lock);
-    info = *vita_msgpipe_info_dict_get(g_vita_msgpipe_infos, uid);
+    slot = vita_msgpipe_info_dict_get(g_vita_msgpipe_infos, uid);
+    info = slot ? *slot : NULL;
     rwlockReadUnlock(&g_vita_sync_objects_lock);
 
     return info;
@@ -675,8 +684,11 @@ static VitaCondInfo *cond_lookup(SceUID uid)
 {
     VitaCondInfo *cond;
 
+    VitaCondInfo **slot;
+
     rwlockReadLock(&g_conds_lock);
-    cond = *vita_cond_dict_get(g_conds, uid);
+    slot = vita_cond_dict_get(g_conds, uid);
+    cond = slot ? *slot : NULL;
     rwlockReadUnlock(&g_conds_lock);
 
     return cond;
