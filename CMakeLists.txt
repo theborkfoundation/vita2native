@@ -111,6 +111,10 @@ add_executable(vita2native
     source/modules/ScePgf.c
     source/modules/SceProcessmgr.c
     source/modules/SceRegistryMgr.c
+    source/modules/SceAdhoc.c
+    source/modules/SceMediaExport.c
+    source/modules/ScePromoterUtil.c
+    source/modules/SceUsbMtp.c
     source/modules/SceVshBridge.c
     source/modules/SceSqlite.c
     source/modules/SceIoAsync.c
@@ -242,6 +246,19 @@ if(BUILD_TESTING)
     target_include_directories(regmgr_smoke PRIVATE include external/vita-headers/include)
     target_compile_definitions(regmgr_smoke PRIVATE _GNU_SOURCE=1)
     add_test(NAME regmgr_smoke COMMAND regmgr_smoke)
+
+    add_executable(extra_imports_smoke
+        tests/extra_imports_smoke.c
+        source/module.c
+        source/modules/SceAdhoc.c
+        source/modules/SceMediaExport.c
+        source/modules/ScePromoterUtil.c
+        source/modules/SceUsbMtp.c
+    )
+    target_include_directories(extra_imports_smoke PRIVATE include external/vita-headers/include)
+    target_compile_definitions(extra_imports_smoke PRIVATE _GNU_SOURCE=1)
+    target_link_libraries(extra_imports_smoke PRIVATE pthread)
+    add_test(NAME extra_imports_smoke COMMAND extra_imports_smoke)
 
     add_executable(gfx_smoke
         tests/gfx_smoke.c
