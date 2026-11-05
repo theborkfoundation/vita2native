@@ -24,6 +24,7 @@
 #include "host.h"
 #include "log.h"
 #include "module.h"
+#include "modules/SceKernelSync.h"
 #include "modules/SceKernelThreadMgr.h"
 #include "modules/SceSysmem.h"
 #include "util.h"
@@ -553,11 +554,7 @@ EXPORT(SceThreadmgr, 0x9A68F547, int, sceKernelCloseEventFlag, SceUID uid)
  * UID. A host mutex is allocated on create and its address is kept in the
  * work area's first word.
  */
-typedef struct {
-    pthread_mutex_t mutex;
-} VitaLwMutex;
-
-static VitaLwMutex *lw_mutex_from_work(SceKernelLwMutexWork *work)
+VitaLwMutex *SceKernelSync_lw_mutex_from_work(SceKernelLwMutexWork *work)
 {
     void *pointer;
 
@@ -604,7 +601,7 @@ EXPORT(SceLibKernel, 0x244E76D2, int, sceKernelDeleteLwMutex, SceKernelLwMutexWo
     if (!work)
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
 
-    lw = lw_mutex_from_work(work);
+    lw = SceKernelSync_lw_mutex_from_work(work);
     if (!lw)
         return 0;
 
@@ -625,7 +622,7 @@ EXPORT(SceLibKernel, 0x46E7BE7B, int, sceKernelLockLwMutex, SceKernelLwMutexWork
     if (!work)
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
 
-    lw = lw_mutex_from_work(work);
+    lw = SceKernelSync_lw_mutex_from_work(work);
     if (!lw)
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
 
@@ -643,7 +640,7 @@ EXPORT(SceLibKernel, 0xA6A2C915, int, sceKernelTryLockLwMutex, SceKernelLwMutexW
     if (!work)
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
 
-    lw = lw_mutex_from_work(work);
+    lw = SceKernelSync_lw_mutex_from_work(work);
     if (!lw)
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
 
@@ -663,7 +660,7 @@ EXPORT(SceLibKernel, 0x91FA6614, int, sceKernelUnlockLwMutex, SceKernelLwMutexWo
     if (!work)
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
 
-    lw = lw_mutex_from_work(work);
+    lw = SceKernelSync_lw_mutex_from_work(work);
     if (!lw)
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
 

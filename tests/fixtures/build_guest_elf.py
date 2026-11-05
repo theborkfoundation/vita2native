@@ -1193,6 +1193,226 @@ def build_kernel_runtime_elf():
     return assemble_elf(rx, rw, rela, KR_MODINFO)
 
 
+# --- SceKernel locks fixture ------------------------------------------------
+
+LK_STUB_BASE = 0x200
+LK_LIB1_NAME = 0x2A0
+LK_LIB2_NAME = 0x2B0
+LK_MODINFO = 0x2C0
+LK_IMPORT1 = 0x320
+LK_IMPORT2 = 0x344
+LK_NIDS1 = 0x370
+LK_ENTRIES1 = 0x398
+LK_NIDS2 = 0x3C0
+LK_ENTRIES2 = 0x3D0
+LK_RX_SIZE = 0x3E0
+
+LK_LIB1 = b"SceLibKernel\0"
+LK_LIB2 = b"SceThreadmgr\0"
+LK_LIB1_NID = 0xCAE9ACE6
+LK_LIB2_NID = 0x859A24B1
+
+LK_KERNEL_FUNCS = [
+    0x8667951D,  # sceKernelCreateRWLock
+    0x079A573B,  # sceKernelGetRWLockInfo
+    0xFA670F0F,  # sceKernelLockReadRWLock
+    0x67A187BB,  # sceKernelLockWriteRWLock
+    0xDA6EC8EF,  # sceKernelCreateLwMutex
+    0x48C7EAE6,  # sceKernelCreateLwCond
+    0x3AC63B9A,  # sceKernelSignalLwCond
+    0x721F6CB3,  # sceKernelDeleteLwCond
+    0x244E76D2,  # sceKernelDeleteLwMutex
+]
+
+LK_THREADMGR_FUNCS = [
+    0xE73649CA,  # sceKernelDeleteRWLock
+    0x3EF91145,  # sceKernelUnlockReadRWLock
+    0xB4151397,  # sceKernelUnlockWriteRWLock
+]
+
+LK_RW_UID = 0x000
+LK_RW_INFO = 0x008
+LK_RW_MUTEX = 0x050
+LK_RW_COND = 0x070
+LK_RW_NAME = 0x090
+LK_RW_NAME2 = 0x098
+LK_RW_SIZE = 0x100
+
+
+def build_kernel_locks_elf():
+    """Guest ELF for RW locks and lightweight mutex/cond lifecycle."""
+    code = []
+    rx_relocs = []
+
+    def emit(word):
+        code.append(word & 0xFFFFFFFF)
+
+    def movw_movt_rw(rd, offset):
+        base = len(code) * 4
+        emit(arm_movw(rd, 0))
+        emit(arm_movt(rd, 0))
+        rx_relocs.append(encode_rela(0, 1, base, offset, R_ARM_MOVW_ABS_NC))
+        rx_relocs.append(encode_rela(0, 1, base + 4, offset, R_ARM_MOVT_ABS))
+
+    def call(index):
+        emit(arm_bl(len(code) * 4, LK_STUB_BASE + index * 12))
+
+    def load_rw(rd, offset):
+        movw_movt_rw(rd, offset)
+        emit(0xE5900000 | (rd << 16) | (rd << 12))  # ldr rd, [rd]
+
+    def check(bit):
+        emit(0xE3500000)             # cmp r0, #0
+        emit(0x13844000 | arm_encode_imm(bit))  # orrne r4, r4, #bit
+
+    def check_nonzero(bit):
+        emit(0xE3500000)             # cmp r0, #0
+        emit(0x03844000 | arm_encode_imm(bit))  # orreq r4, r4, #bit
+
+    emit(0xE92D4010)                 # push {r4, lr}
+    emit(arm_mov_imm(4, 0))          # mov r4, #0
+
+    # rw = sceKernelCreateRWLock("rw", 0, NULL)
+    movw_movt_rw(0, LK_RW_NAME)
+    emit(arm_mov_imm(1, 0))
+    emit(arm_mov_imm(2, 0))
+    call(0)
+    movw_movt_rw(1, LK_RW_UID)
+    emit(0xE5810000)
+    check_nonzero(1)
+
+    # lock read, then info.lockCount == 1
+    load_rw(0, LK_RW_UID)
+    call(2)
+    check(2)
+    load_rw(0, LK_RW_UID)
+    movw_movt_rw(1, LK_RW_INFO)
+    call(1)
+    check(4)
+    movw_movt_rw(1, LK_RW_INFO)
+    emit(0xE591002C)                 # ldr r0, [r1, #44] (lockCount)
+    emit(0xE3500001)                 # cmp r0, #1
+    emit(0x13844000 | arm_encode_imm(8))
+
+    # unlock read, lock write, lockCount == 1 and owner != 0
+    load_rw(0, LK_RW_UID)
+    call(10)
+    check(16)
+    load_rw(0, LK_RW_UID)
+    call(3)
+    check(32)
+    load_rw(0, LK_RW_UID)
+    movw_movt_rw(1, LK_RW_INFO)
+    call(1)
+    check(64)
+    movw_movt_rw(1, LK_RW_INFO)
+    emit(0xE591002C)                 # ldr r0, [r1, #44]
+    emit(0xE3500001)                 # cmp r0, #1
+    emit(0x13844000 | arm_encode_imm(128))
+    emit(0xE5910030)                 # ldr r0, [r1, #48] (writeOwnerId)
+    emit(0xE3500000)                 # cmp r0, #0
+    emit(0x03844000 | arm_encode_imm(256))
+
+    # unlock write and delete
+    load_rw(0, LK_RW_UID)
+    call(11)
+    check(512)
+    load_rw(0, LK_RW_UID)
+    call(9)
+    check(1024)
+
+    # lwmutex = sceKernelCreateLwMutex(&work, "lw", 0, 0, NULL)
+    movw_movt_rw(0, LK_RW_MUTEX)
+    movw_movt_rw(1, LK_RW_NAME2)
+    emit(arm_mov_imm(2, 0))
+    emit(arm_mov_imm(3, 0))
+    emit(0xE24DD008)                 # sub sp, sp, #8
+    emit(arm_mov_imm(12, 0))
+    emit(0xE58DC000)                 # str r12, [sp]
+    call(4)
+    emit(0xE28DD008)                 # add sp, sp, #8
+    check(2048)
+
+    # lwcond = sceKernelCreateLwCond(&cond, "lc", 0, &mutex, NULL)
+    movw_movt_rw(0, LK_RW_COND)
+    movw_movt_rw(1, LK_RW_NAME2)
+    emit(arm_mov_imm(2, 0))
+    movw_movt_rw(3, LK_RW_MUTEX)
+    emit(0xE24DD008)                 # sub sp, sp, #8
+    emit(arm_mov_imm(12, 0))
+    emit(0xE58DC000)
+    call(5)
+    emit(0xE28DD008)
+    check(4096)
+
+    movw_movt_rw(0, LK_RW_COND)
+    call(6)
+    check(8192)
+    movw_movt_rw(0, LK_RW_COND)
+    call(7)
+    check(16384)
+    movw_movt_rw(0, LK_RW_MUTEX)
+    call(8)
+    check(32768)
+
+    emit(0xE1A00004)                 # mov r0, r4
+    emit(0xE3500000)                 # cmp r0, #0
+    emit(0x03A0002A)                 # moveq r0, #42
+    emit(0xE8BD8010)                 # pop {r4, pc}
+
+    assert len(code) * 4 <= LK_STUB_BASE, "locks fixture code overlaps the stubs"
+
+    rx = bytearray(LK_RX_SIZE)
+    rx[:len(code) * 4] = b"".join(struct.pack("<I", w) for w in code)
+    rx[LK_LIB1_NAME:LK_LIB1_NAME + len(LK_LIB1)] = LK_LIB1
+    rx[LK_LIB2_NAME:LK_LIB2_NAME + len(LK_LIB2)] = LK_LIB2
+
+    info = bytearray(MODULE_INFO_SIZE)
+    struct.pack_into("<HH", info, 0x00, 0x0000, 0x0101)
+    info[0x04:0x04 + len(MODULE_NAME)] = MODULE_NAME
+    struct.pack_into("<I", info, 0x2C, LK_IMPORT1)
+    struct.pack_into("<I", info, 0x30, LK_IMPORT2 + IMPORT_SIZE)
+    struct.pack_into("<I", info, 0x34, 0x12345678)
+    struct.pack_into("<I", info, 0x44, 0x00000000)
+    struct.pack_into("<I", info, 0x48, 0xFFFFFFFF)
+    struct.pack_into("<I", info, 0x5C, 0x03570011)
+    rx[LK_MODINFO:LK_MODINFO + MODULE_INFO_SIZE] = info
+
+    imp1 = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp1, 0, IMPORT_SIZE, 1, 0, len(LK_KERNEL_FUNCS), 0, 0)
+    struct.pack_into("<I", imp1, IMP_LIBRARY_NID, LK_LIB1_NID)
+    rx[LK_IMPORT1:LK_IMPORT1 + IMPORT_SIZE] = imp1
+
+    imp2 = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp2, 0, IMPORT_SIZE, 1, 0, len(LK_THREADMGR_FUNCS), 0, 0)
+    struct.pack_into("<I", imp2, IMP_LIBRARY_NID, LK_LIB2_NID)
+    rx[LK_IMPORT2:LK_IMPORT2 + IMPORT_SIZE] = imp2
+
+    for i, nid in enumerate(LK_KERNEL_FUNCS):
+        struct.pack_into("<I", rx, LK_NIDS1 + i * 4, nid)
+    for i, nid in enumerate(LK_THREADMGR_FUNCS):
+        struct.pack_into("<I", rx, LK_NIDS2 + i * 4, nid)
+
+    rx_relocs.append(encode_rela(0, 0, LK_IMPORT1 + IMP_LIBRARY_NAME, LK_LIB1_NAME))
+    rx_relocs.append(encode_rela(0, 0, LK_IMPORT1 + IMP_FUNC_NID_TABLE, LK_NIDS1))
+    rx_relocs.append(encode_rela(0, 0, LK_IMPORT1 + IMP_FUNC_ENTRY_TABLE, LK_ENTRIES1))
+    rx_relocs.append(encode_rela(0, 0, LK_IMPORT2 + IMP_LIBRARY_NAME, LK_LIB2_NAME))
+    rx_relocs.append(encode_rela(0, 0, LK_IMPORT2 + IMP_FUNC_NID_TABLE, LK_NIDS2))
+    rx_relocs.append(encode_rela(0, 0, LK_IMPORT2 + IMP_FUNC_ENTRY_TABLE, LK_ENTRIES2))
+
+    for i in range(len(LK_KERNEL_FUNCS)):
+        rx_relocs.append(encode_rela(0, 0, LK_ENTRIES1 + i * 4, LK_STUB_BASE + i * 12))
+    for i in range(len(LK_THREADMGR_FUNCS)):
+        rx_relocs.append(encode_rela(0, 0, LK_ENTRIES2 + i * 4,
+                                     LK_STUB_BASE + (len(LK_KERNEL_FUNCS) + i) * 12))
+
+    rw = bytearray(LK_RW_SIZE)
+    rw[LK_RW_NAME:LK_RW_NAME + 3] = b"rw\0"
+    rw[LK_RW_NAME2:LK_RW_NAME2 + 3] = b"lw\0"
+    rela = bytearray(b"".join(rx_relocs))
+    return assemble_elf(rx, rw, rela, LK_MODINFO)
+
+
 # --- SceAppUtil fixture ----------------------------------------------------
 
 APPUTIL_STUB_BASE = 0x140
@@ -1837,6 +2057,11 @@ def main():
     with open(runtime_path, "wb") as f:
         f.write(build_kernel_runtime_elf())
     print(f"wrote {runtime_path}")
+
+    locks_path = os.path.join(out_dir, "guest_kernel_locks.elf")
+    with open(locks_path, "wb") as f:
+        f.write(build_kernel_locks_elf())
+    print(f"wrote {locks_path}")
 
     if os.path.exists(os.path.join(shader_dir, "texture_v.gxp")) and os.path.exists(
             os.path.join(shader_dir, "texture_f.gxp")):
