@@ -298,6 +298,36 @@ static void begin_frame_with_surface(Scene *scene, SceGxmColorSurface *surface)
     sceGxmSetFrontPolygonMode(scene->context, SCE_GXM_POLYGON_MODE_TRIANGLE_FILL);
 }
 
+/* Draw into a target whose dimensions differ from the colour surface (MSAA
+ * downscale/supersample tests). */
+static void begin_frame_sized(Scene *scene, SceGxmColorSurface *surface, uint32_t width,
+                              uint32_t height)
+{
+    assert(sceGxmBeginScene(scene->context, 0, scene->target, NULL, NULL, NULL, surface, NULL) == 0);
+    sceGxmSetDefaultRegionClipAndViewport(scene->context, width, height);
+    sceGxmSetRegionClip(scene->context, SCE_GXM_REGION_CLIP_NONE, 0, 0, width - 1, height - 1);
+    sceGxmSetCullMode(scene->context, SCE_GXM_CULL_NONE);
+    sceGxmSetFrontPolygonMode(scene->context, SCE_GXM_POLYGON_MODE_TRIANGLE_FILL);
+}
+
+static uint8_t test_linear_to_srgb(uint8_t value)
+{
+    float c = value / 255.0f;
+    float s = c <= 0.0031308f ? c * 12.92f : 1.055f * powf(c, 1.0f / 2.4f) - 0.055f;
+    int v = (int)(s * 255.0f + 0.5f);
+
+    return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
+}
+
+static uint8_t test_srgb_to_linear(uint8_t value)
+{
+    float c = value / 255.0f;
+    float l = c <= 0.04045f ? c / 12.92f : powf((c + 0.055f) / 1.055f, 2.4f);
+    int v = (int)(l * 255.0f + 0.5f);
+
+    return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
+}
+
 static void end_frame(Scene *scene)
 {
     assert(sceGxmEndScene(scene->context, NULL, NULL) == 0);
@@ -761,6 +791,231 @@ int main(int argc, char **argv)
             goto done;
         }
         printf("4x multisample target: ok\n");
+    }
+
+    /* 6d: gamma texture decoding and gamma colour-surface encoding. */
+    {
+        set_solid_color(solid_pixels, 128, 64, 32, 255);
+
+        {
+            int rc = sceGxmTextureSetGammaMode(&solid_texture, SCE_GXM_TEXTURE_GAMMA_BGR);
+
+            if (rc != 0 ||
+                sceGxmTextureGetGammaMode(&solid_texture) != SCE_GXM_TEXTURE_GAMMA_BGR) {
+                fprintf(stderr, "texture gamma setter failed (rc=%d, get=0x%08x)\n", rc,
+                        sceGxmTextureGetGammaMode(&solid_texture));
+                goto done;
+            }
+        }
+        begin_frame(&scene);
+        draw_quad(&scene, &solid_texture);
+        end_frame(&scene);
+
+        {
+            const uint8_t expected[3] = {
+                test_srgb_to_linear(128),
+                test_srgb_to_linear(64),
+                test_srgb_to_linear(32),
+            };
+            const uint8_t *p =
+                (const uint8_t *)&scene.pixels[(HEIGHT / 2) * WIDTH + WIDTH / 2];
+
+            if (p[0] != expected[0] || p[1] != expected[1] || p[2] != expected[2]) {
+                fprintf(stderr, "gamma texture decode gave %02x %02x %02x, expected %02x %02x %02x\n",
+                        p[0], p[1], p[2], expected[0], expected[1], expected[2]);
+                goto done;
+            }
+        }
+
+        /* The inverse path: a linear texture into a gamma colour surface. */
+        sceGxmTextureSetGammaMode(&solid_texture, SCE_GXM_TEXTURE_GAMMA_NONE);
+        sceGxmColorSurfaceSetGammaMode(&scene.color_surface, SCE_GXM_COLOR_SURFACE_GAMMA_BGR);
+        begin_frame(&scene);
+        draw_quad(&scene, &solid_texture);
+        end_frame(&scene);
+
+        {
+            const uint8_t expected[3] = {
+                test_linear_to_srgb(128),
+                test_linear_to_srgb(64),
+                test_linear_to_srgb(32),
+            };
+            const uint8_t *p =
+                (const uint8_t *)&scene.pixels[(HEIGHT / 2) * WIDTH + WIDTH / 2];
+
+            if (p[0] != expected[0] || p[1] != expected[1] || p[2] != expected[2]) {
+                fprintf(stderr, "gamma surface encode gave %02x %02x %02x, expected %02x %02x %02x\n",
+                        p[0], p[1], p[2], expected[0], expected[1], expected[2]);
+                goto done;
+            }
+        }
+
+        sceGxmColorSurfaceSetGammaMode(&scene.color_surface, SCE_GXM_COLOR_SURFACE_GAMMA_NONE);
+        printf("gamma texture and colour surface: ok\n");
+    }
+
+    /* 6e: ordered dithering on a 16-bit colour surface. */
+    {
+        SceGxmColorSurface dithered_surface;
+        uint16_t *dithered_pixels = calloc((size_t)WIDTH * HEIGHT, sizeof(uint16_t));
+
+        assert(dithered_pixels);
+        assert(sceGxmColorSurfaceInit(&dithered_surface, SCE_GXM_COLOR_FORMAT_U5U6U5_RGB,
+                                      SCE_GXM_COLOR_SURFACE_LINEAR,
+                                      SCE_GXM_COLOR_SURFACE_SCALE_NONE,
+                                      SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, WIDTH, HEIGHT, WIDTH,
+                                      dithered_pixels) == 0);
+        set_solid_color(solid_pixels, 16, 32, 96, 255);
+
+        begin_frame_with_surface(&scene, &dithered_surface);
+        draw_quad(&scene, &solid_texture);
+        end_frame(&scene);
+
+        {
+            const uint16_t first = dithered_pixels[0];
+            uint32_t i;
+
+            if (first != (uint16_t)((2u << 11) | (8u << 5) | 12u)) {
+                fprintf(stderr, "undithered 565 pixel is 0x%04x\n", first);
+                free(dithered_pixels);
+                goto done;
+            }
+            for (i = 1; i < (uint32_t)(WIDTH * HEIGHT); i++) {
+                if (dithered_pixels[i] != first) {
+                    fprintf(stderr, "undithered 565 surface is not uniform\n");
+                    free(dithered_pixels);
+                    goto done;
+                }
+            }
+        }
+
+        sceGxmColorSurfaceSetDitherMode(&dithered_surface,
+                                        SCE_GXM_COLOR_SURFACE_DITHER_ENABLED);
+        begin_frame_with_surface(&scene, &dithered_surface);
+        draw_quad(&scene, &solid_texture);
+        end_frame(&scene);
+
+        {
+            uint32_t distinct_red = 0;
+            uint32_t seen_red[4] = { 0 };
+            uint32_t x, y;
+
+            for (y = 0; y < 4; y++) {
+                for (x = 0; x < 4; x++) {
+                    uint16_t value = dithered_pixels[y * WIDTH + x];
+                    uint32_t r = (value >> 11) & 31u;
+                    uint32_t g = (value >> 5) & 63u;
+                    uint32_t b = value & 31u;
+                    bool found = false;
+
+                    if (r < 1 || r > 2 || g < 7 || g > 8 || b < 11 || b > 12) {
+                        fprintf(stderr,
+                                "dithered 565 pixel %u,%u is r=%u g=%u b=%u, expected ~2/8/12\n",
+                                x, y, r, g, b);
+                        free(dithered_pixels);
+                        goto done;
+                    }
+                    for (uint32_t i = 0; i < distinct_red; i++)
+                        found = found || seen_red[i] == r;
+                    if (!found)
+                        seen_red[distinct_red++] = r;
+                }
+            }
+
+            if (distinct_red < 2) {
+                fprintf(stderr, "ordered dither produced only %u red levels\n", distinct_red);
+                free(dithered_pixels);
+                goto done;
+            }
+        }
+
+        free(dithered_pixels);
+        printf("colour surface dither: ok\n");
+    }
+
+    /* 6f: MSAA surface scale modes. */
+    {
+        SceGxmRenderTarget *msaa_target = NULL;
+        SceGxmRenderTarget *saved_target = scene.target;
+        SceGxmRenderTargetParams msaa_params = target_params;
+        SceGxmColorSurface surface;
+        uint8_t *supersampled = calloc((size_t)WIDTH * HEIGHT * 4, 1);
+        uint8_t *resolved = calloc((size_t)(WIDTH / 2) * (HEIGHT / 2) * 4, 1);
+
+        assert(supersampled && resolved);
+        msaa_params.width = WIDTH / 2;
+        msaa_params.height = HEIGHT / 2;
+        msaa_params.multisampleMode = SCE_GXM_MULTISAMPLE_2X;
+        if (sceGxmCreateRenderTarget(&msaa_params, &msaa_target) != 0) {
+            fprintf(stderr, "could not create a 2x multisampled render target\n");
+            free(supersampled);
+            free(resolved);
+            goto done;
+        }
+
+        scene.target = msaa_target;
+        set_solid_color(solid_pixels, 90, 180, 30, 255);
+
+        /* SCALE_NONE: the guest surface holds the doubled image. */
+        assert(sceGxmColorSurfaceInit(&surface, SCE_GXM_COLOR_FORMAT_A8B8G8R8,
+                                      SCE_GXM_COLOR_SURFACE_LINEAR,
+                                      SCE_GXM_COLOR_SURFACE_SCALE_NONE,
+                                      SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, WIDTH, HEIGHT, WIDTH,
+                                      supersampled) == 0);
+        begin_frame_sized(&scene, &surface, WIDTH / 2, HEIGHT / 2);
+        draw_quad(&scene, &solid_texture);
+        end_frame(&scene);
+
+        {
+            const uint8_t *corner = supersampled + ((HEIGHT - 1) * WIDTH + WIDTH - 1) * 4;
+
+            if (!pixel_is((const uint32_t *)supersampled, 0, 0, 90, 180, 30, 255) ||
+                !pixel_is((const uint32_t *)supersampled, WIDTH - 1, HEIGHT - 1, 90, 180, 30,
+                          255) ||
+                corner[0] != 90) {
+                fprintf(stderr, "supersampled surface was not filled (corner %02x %02x %02x)\n",
+                        corner[0], corner[1], corner[2]);
+                scene.target = saved_target;
+                sceGxmDestroyRenderTarget(msaa_target);
+                free(supersampled);
+                free(resolved);
+                goto done;
+            }
+        }
+
+        /* SCALE_MSAA_DOWNSCALE: a full-res surface receives the resolved image. */
+        assert(sceGxmColorSurfaceInit(&surface, SCE_GXM_COLOR_FORMAT_A8B8G8R8,
+                                      SCE_GXM_COLOR_SURFACE_LINEAR,
+                                      SCE_GXM_COLOR_SURFACE_SCALE_MSAA_DOWNSCALE,
+                                      SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, WIDTH / 2, HEIGHT / 2,
+                                      WIDTH / 2, resolved) == 0);
+        begin_frame_sized(&scene, &surface, WIDTH / 2, HEIGHT / 2);
+        draw_quad(&scene, &solid_texture);
+        end_frame(&scene);
+
+        {
+            const uint8_t *last =
+                resolved + (((HEIGHT / 2 - 1) * (WIDTH / 2) + (WIDTH / 2 - 1)) * 4);
+
+            if (resolved[0] != 90 || resolved[1] != 180 || resolved[2] != 30 ||
+                last[0] != 90 || last[1] != 180 || last[2] != 30) {
+                fprintf(stderr, "MSAA downscale surface was not resolved (%02x%02x%02x%02x / "
+                                "%02x%02x%02x%02x)\n",
+                        resolved[0], resolved[1], resolved[2], resolved[3], last[0], last[1],
+                        last[2], last[3]);
+                scene.target = saved_target;
+                sceGxmDestroyRenderTarget(msaa_target);
+                free(supersampled);
+                free(resolved);
+                goto done;
+            }
+        }
+
+        scene.target = saved_target;
+        sceGxmDestroyRenderTarget(msaa_target);
+        free(supersampled);
+        free(resolved);
+        printf("MSAA surface scale modes: ok\n");
     }
 
     /* 7: a deferred context records a draw that the immediate context replays. */

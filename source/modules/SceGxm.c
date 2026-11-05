@@ -80,9 +80,47 @@ typedef struct {
     uint32_t height;
     uint32_t format;
     uint32_t mip_count;
+    uint32_t gamma_mode;
     uint32_t hash;
     bool valid;
 } GxmTextureCache;
+
+/*
+ * sRGB transfer functions. A gamma colour surface stores sRGB-encoded values
+ * while shaders and blending work in linear space, so writeback encodes. Gamma
+ * textures are decoded on the CPU during layout conversion so the result does
+ * not depend on driver sRGB support.
+ */
+static uint8_t s_linear_to_srgb[256];
+static uint8_t s_srgb_to_linear[256];
+static bool s_color_tables_ready;
+
+static uint8_t gxm_linear_to_srgb_u8(uint8_t value)
+{
+    float c = value / 255.0f;
+    float s = c <= 0.0031308f ? c * 12.92f : 1.055f * powf(c, 1.0f / 2.4f) - 0.055f;
+    int v = (int)(s * 255.0f + 0.5f);
+
+    return v < 0 ? 0 : v > 255 ? 255 : (uint8_t)v;
+}
+
+static uint8_t gxm_srgb_to_linear_u8(uint8_t value)
+{
+    float c = value / 255.0f;
+    float l = c <= 0.04045f ? c / 12.92f : powf((c + 0.055f) / 1.055f, 2.4f);
+    int v = (int)(l * 255.0f + 0.5f);
+
+    return v < 0 ? 0 : v > 255 ? 255 : (uint8_t)v;
+}
+
+static void gxm_color_tables_init(void)
+{
+    for (int i = 0; i < 256; i++) {
+        s_linear_to_srgb[i] = gxm_linear_to_srgb_u8((uint8_t)i);
+        s_srgb_to_linear[i] = gxm_srgb_to_linear_u8((uint8_t)i);
+    }
+    s_color_tables_ready = true;
+}
 
 typedef struct GxmCommand GxmCommand;
 
@@ -801,7 +839,8 @@ static bool gxm_upload_texture(GxmTextureCache *cache, const SceGxmTextureInner 
 
     if (cache->valid && cache->hash == hash && cache->data == data &&
         cache->format == (uint32_t)gxm_texture_get_format(texture) &&
-        cache->mip_count == mip_count && cache->target == target) {
+        cache->mip_count == mip_count && cache->gamma_mode == texture->gamma_mode &&
+        cache->target == target) {
         gxm_texture_params(texture, target, mip_count);
         return true;
     }
@@ -844,6 +883,25 @@ static bool gxm_upload_texture(GxmTextureCache *cache, const SceGxmTextureInner 
             if (cube)
                 upload_target = GL_TEXTURE_CUBE_MAP_POSITIVE_X + face;
 
+            /*
+             * A gamma texture stores sRGB-encoded texels. Decoding is done on
+             * the CPU after layout conversion so every driver sees identical
+             * linear data (Mesa's GLES path does not always apply the sRGB
+             * internal-format decode to texture() reads). The public gamma
+             * constants cannot express per-channel modes (the header aliases
+             * BGR to R), so any non-zero mode means full sRGB, matching
+             * Vita3K.
+             */
+            if (texture->gamma_mode) {
+                if (!s_color_tables_ready)
+                    gxm_color_tables_init();
+                for (uint32_t i = 0; i < info.width * info.height; i++) {
+                    rgba[i * 4 + 0] = s_srgb_to_linear[rgba[i * 4 + 0]];
+                    rgba[i * 4 + 1] = s_srgb_to_linear[rgba[i * 4 + 1]];
+                    rgba[i * 4 + 2] = s_srgb_to_linear[rgba[i * 4 + 2]];
+                }
+            }
+
             g_gl->glTexImage2D(upload_target, (GLint)level, GL_RGBA8, (GLsizei)info.width,
                                (GLsizei)info.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
         }
@@ -859,6 +917,7 @@ static bool gxm_upload_texture(GxmTextureCache *cache, const SceGxmTextureInner 
     cache->height = height;
     cache->format = (uint32_t)gxm_texture_get_format(texture);
     cache->mip_count = mip_count;
+    cache->gamma_mode = texture->gamma_mode;
     cache->hash = hash;
     cache->valid = true;
 
@@ -1706,10 +1765,12 @@ EXPORT(SceGxm, 0x207AF96B, int, sceGxmCreateRenderTarget, const SceGxmRenderTarg
                 rt->msaa_fbo = 0;
                 rt->msaa_color = 0;
                 rt->msaa_depth = 0;
-                rt->samples = 0;
+                /*
+                 * Keep rt->samples as the requested count: the surface scale
+                 * mode is a guest-visible property, and a driver without MSAA
+                 * still needs the supersampled/downscaled writeback shape.
+                 */
             }
-        } else {
-            rt->samples = 0;
         }
         g_gl->glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
@@ -2715,7 +2776,7 @@ EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsign
     context->in_scene = true;
 
     if (g_gl) {
-        GLuint draw_fbo = renderTarget->samples ? renderTarget->msaa_fbo : renderTarget->fbo;
+        GLuint draw_fbo = renderTarget->msaa_fbo ? renderTarget->msaa_fbo : renderTarget->fbo;
 
         g_gl->glBindFramebuffer(GL_FRAMEBUFFER, draw_fbo);
         g_gl->glViewport(0, 0, renderTarget->params.width, renderTarget->params.height);
@@ -2809,11 +2870,50 @@ static size_t gxm_color_pixel_offset(const SceGxmColorSurfaceInner *surface, uin
     return ((size_t)y * stride + x) * bytes_per_pixel;
 }
 
-static void gxm_write_color_pixel(uint8_t *dst, const uint8_t rgba[4], SceGxmColorFormat format)
+/* 4x4 ordered dither matrix (Bayer). */
+static const uint8_t gxm_dither_matrix[4][4] = {
+    { 0, 8, 2, 10 },
+    { 12, 4, 14, 6 },
+    { 3, 11, 1, 9 },
+    { 15, 7, 13, 5 },
+};
+
+/*
+ * Quantise an 8-bit channel to `bits`. Without dithering the high bits are
+ * kept (the historical behaviour); with dithering the ordered threshold biases
+ * each pixel so the average over a 4x4 cell matches the full-precision value.
+ * The threshold is deliberately not applied to alpha: dithering coverage makes
+ * transparency shimmer.
+ */
+static uint32_t gxm_quantize_channel(uint8_t value, unsigned int bits, bool dither, uint32_t x,
+                                     uint32_t y)
+{
+    unsigned int max = (1u << bits) - 1;
+    unsigned int threshold;
+    unsigned int q;
+
+    if (!dither)
+        return (uint32_t)value >> (8 - bits);
+
+    threshold = ((unsigned int)gxm_dither_matrix[y & 3][x & 3] * 255u) >> 4;
+    q = ((unsigned int)value * max + threshold) / 255u;
+    return q > max ? max : q;
+}
+
+static void gxm_write_color_pixel(uint8_t *dst, const uint8_t rgba[4], SceGxmColorFormat format,
+                                  uint32_t x, uint32_t y, bool gamma, bool dither)
 {
     uint32_t base = format & SCE_GXM_COLOR_BASE_FORMAT_MASK;
     uint32_t swizzle = (format >> 20) & 3;
     uint8_t r = rgba[0], g = rgba[1], b = rgba[2], a = rgba[3];
+
+    if (gamma) {
+        if (!s_color_tables_ready)
+            gxm_color_tables_init();
+        r = s_linear_to_srgb[r];
+        g = s_linear_to_srgb[g];
+        b = s_linear_to_srgb[b];
+    }
 
     switch (base) {
     case SCE_GXM_COLOR_BASE_FORMAT_U8U8U8U8:
@@ -2859,32 +2959,41 @@ static void gxm_write_color_pixel(uint8_t *dst, const uint8_t rgba[4], SceGxmCol
         break;
 
     case SCE_GXM_COLOR_BASE_FORMAT_U5U6U5: {
-        uint16_t value = swizzle & 1 ? (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3))
-                                     : (uint16_t)(((b >> 3) << 11) | ((g >> 2) << 5) | (r >> 3));
+        uint32_t rq = gxm_quantize_channel(r, 5, dither, x, y);
+        uint32_t gq = gxm_quantize_channel(g, 6, dither, x, y);
+        uint32_t bq = gxm_quantize_channel(b, 5, dither, x, y);
+        uint16_t value = swizzle & 1 ? (uint16_t)((rq << 11) | (gq << 5) | bq)
+                                     : (uint16_t)((bq << 11) | (gq << 5) | rq);
         dst[0] = (uint8_t)(value & 0xff);
         dst[1] = (uint8_t)(value >> 8);
         break;
     }
 
     case SCE_GXM_COLOR_BASE_FORMAT_U1U5U5U5: {
-        uint16_t value = (uint16_t)(((a >> 7) << 15) | ((b >> 3) << 10) | ((g >> 3) << 5) |
-                                    (r >> 3));
+        uint32_t rq = gxm_quantize_channel(r, 5, dither, x, y);
+        uint32_t gq = gxm_quantize_channel(g, 5, dither, x, y);
+        uint32_t bq = gxm_quantize_channel(b, 5, dither, x, y);
+        uint16_t value = (uint16_t)(((a >> 7) << 15) | (bq << 10) | (gq << 5) | rq);
         dst[0] = (uint8_t)(value & 0xff);
         dst[1] = (uint8_t)(value >> 8);
         break;
     }
 
     case SCE_GXM_COLOR_BASE_FORMAT_U4U4U4U4: {
-        uint16_t value = (uint16_t)(((a >> 4) << 12) | ((b >> 4) << 8) | ((g >> 4) << 4) |
-                                    (r >> 4));
+        uint32_t rq = gxm_quantize_channel(r, 4, dither, x, y);
+        uint32_t gq = gxm_quantize_channel(g, 4, dither, x, y);
+        uint32_t bq = gxm_quantize_channel(b, 4, dither, x, y);
+        uint16_t value = (uint16_t)(((a >> 4) << 12) | (bq << 8) | (gq << 4) | rq);
         dst[0] = (uint8_t)(value & 0xff);
         dst[1] = (uint8_t)(value >> 8);
         break;
     }
 
     case SCE_GXM_COLOR_BASE_FORMAT_U8U3U3U2: {
-        uint16_t value = (uint16_t)(((uint16_t)a << 8) | (((r >> 5) & 7) << 5) |
-                                    (((g >> 5) & 7) << 2) | ((b >> 6) & 3));
+        uint32_t rq = gxm_quantize_channel(r, 3, dither, x, y);
+        uint32_t gq = gxm_quantize_channel(g, 3, dither, x, y);
+        uint32_t bq = gxm_quantize_channel(b, 2, dither, x, y);
+        uint16_t value = (uint16_t)(((uint16_t)a << 8) | (rq << 5) | (gq << 2) | bq);
         dst[0] = (uint8_t)(value & 0xff);
         dst[1] = (uint8_t)(value >> 8);
         break;
@@ -2927,12 +3036,26 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
 
     surface = context->color_surface;
     if (surface && surface->data && !surface->disabled) {
-        width = surface->width < context->render_target->params.width
-                    ? surface->width
-                    : context->render_target->params.width;
-        height = surface->height < context->render_target->params.height
-                     ? surface->height
-                     : context->render_target->params.height;
+        const SceGxmRenderTarget *target = context->render_target;
+        uint32_t scale = 1;
+
+        width = surface->width < target->params.width ? surface->width : target->params.width;
+        height = surface->height < target->params.height ? surface->height : target->params.height;
+
+        /*
+         * Without MSAA_DOWNSCALE the guest expects the supersampled image in
+         * the colour surface (twice the render-target size), then reduces it
+         * itself with sceGxmTransferDownscale. We cannot expose the individual
+         * GL samples, so resolve and replicate each pixel into its 2x2 block.
+         * A subsequent average reconstructs the resolved image.
+         */
+        if (target->samples && !surface->downscale &&
+            surface->width >= target->params.width * 2 &&
+            surface->height >= target->params.height * 2) {
+            scale = 2;
+            width = target->params.width;
+            height = target->params.height;
+        }
 
         rgba = malloc((size_t)width * height * 4);
         if (!rgba)
@@ -2948,20 +3071,33 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
             uint32_t clip_y0 = surface->clipYMin;
             uint32_t clip_x1 = surface->clipXMax;
             uint32_t clip_y1 = surface->clipYMax;
+            bool gamma = surface->gamma_mode != 0;
+            bool dither = surface->dither_mode != 0;
 
-            if (clip_x1 >= width)
-                clip_x1 = width - 1;
-            if (clip_y1 >= height)
-                clip_y1 = height - 1;
+            if (clip_x1 >= surface->width)
+                clip_x1 = surface->width - 1;
+            if (clip_y1 >= surface->height)
+                clip_y1 = surface->height - 1;
 
             for (uint32_t y = clip_y0; y <= clip_y1; y++) {
-                const uint8_t *src = rgba + (size_t)(height - 1 - y) * width * 4;
+                uint32_t sy = scale > 1 ? y / scale : y;
+                const uint8_t *src;
+
+                if (sy >= height)
+                    continue;
+                src = rgba + (size_t)(height - 1 - sy) * width * 4;
 
                 for (uint32_t x = clip_x0; x <= clip_x1; x++) {
-                    uint8_t *dst = (uint8_t *)surface->data +
-                                   gxm_color_pixel_offset(surface, x, y, bytes_per_pixel);
+                    uint32_t sx = scale > 1 ? x / scale : x;
+                    uint8_t *dst;
 
-                    gxm_write_color_pixel(dst, src + (size_t)x * 4, surface->colorFormat);
+                    if (sx >= width)
+                        continue;
+                    dst = (uint8_t *)surface->data +
+                          gxm_color_pixel_offset(surface, x, y, bytes_per_pixel);
+
+                    gxm_write_color_pixel(dst, src + (size_t)sx * 4, surface->colorFormat, x, y,
+                                          gamma, dither);
                 }
             }
         }
@@ -3445,7 +3581,7 @@ EXPORT(SceGxm, 0xA6D9F4DA, int, sceGxmTextureSetGammaMode, SceGxmTexture *textur
 {
     SceGxmTextureInner *inner = (SceGxmTextureInner *)texture;
 
-    if (gammaMode & ~0x60000000u)
+    if (gammaMode & ~0x18000000u)
         return SCE_GXM_ERROR_INVALID_VALUE;
     inner->gamma_mode = (gammaMode >> 27) & 3;
     return 0;
@@ -5325,6 +5461,7 @@ DECLARE_LIBRARY(SceGxmInternalForVsh, 0xc98aeb79);
 int SceGxm_init(HostGpuDevice device)
 {
     g_device = device;
+    gxm_color_tables_init();
     return 0;
 }
 
