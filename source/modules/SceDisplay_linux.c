@@ -370,6 +370,13 @@ EXPORT(SceDisplay, 0x98436A80, int, sceDisplayUnregisterVblankStartCallback, Sce
     return 0;
 }
 
+EXPORT(SceDisplay, 0x9686859E, int, sceDisplayGetVcountInternal, int display)
+{
+    (void)display;
+
+    return sceDisplayGetVcount();
+}
+
 DECLARE_LIBRARY(SceDisplay, 0x5ed8f994);
 DECLARE_LIBRARY(SceDisplayUser, 0x4faacd11);
 

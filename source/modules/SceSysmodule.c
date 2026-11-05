@@ -57,4 +57,24 @@ EXPORT(SceSysmodule, 0x09A4AF1D, int, sceSysmoduleIsLoadedInternal,
     return SCE_SYSMODULE_LOADED;
 }
 
+EXPORT(SceSysmodule, 0xFF206B19, int, sceSysmoduleUnloadModuleInternal,
+       SceSysmoduleInternalModuleId id)
+{
+    (void)id;
+
+    return 0;
+}
+
+EXPORT(SceSysmodule, 0xA2F40C4C, int, sceSysmoduleUnloadModuleInternalWithArg,
+       SceSysmoduleInternalModuleId id, SceSize args, void *argp,
+       const SceSysmoduleOpt *option)
+{
+    (void)id;
+    (void)args;
+    (void)argp;
+    (void)option;
+
+    return 0;
+}
+
 DECLARE_LIBRARY(SceSysmodule, 0x03fcf19d);
