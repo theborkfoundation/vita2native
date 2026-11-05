@@ -1,0 +1,16 @@
+diff --git a/C/src/utility.c b/C/src/utility.c
+index 54b9e2a..05a6542 100644
+--- a/C/src/utility.c
++++ b/C/src/utility.c
+@@ -6,6 +6,11 @@ int Min(int a, int b) { return a > b ? b : a; }
+ 
+ unsigned int BitReverse32(unsigned int value, int bitCount)
+ {
++	/* A shift by the width of the type is undefined; sizeBits can be 0. */
++	if (bitCount <= 0)
++		return 0;
++	if (bitCount >= 32)
++		return value;
+ 	value = ((value & 0xaaaaaaaa) >> 1) | ((value & 0x55555555) << 1);
+ 	value = ((value & 0xcccccccc) >> 2) | ((value & 0x33333333) << 2);
+ 	value = ((value & 0xf0f0f0f0) >> 4) | ((value & 0x0f0f0f0f) << 4);

@@ -20,6 +20,8 @@
 
 #include "modules/SceCtrl.h"
 #include "modules/SceAudio.h"
+#include "modules/SceAudiodec.h"
+#include "modules/SceAtrac.h"
 #include "modules/SceDisplay.h"
 #include "modules/SceGxm.h"
 #include "modules/SceKernelThreadMgr.h"
@@ -154,6 +156,12 @@ static int launch(SceKernelThreadEntry entry)
     ret = SceAudio_init();
     if (ret != 0)
         goto done;
+    ret = SceAudiodec_init();
+    if (ret != 0)
+        goto done;
+    ret = SceAtrac_init();
+    if (ret != 0)
+        goto done;
 
     LOG("Entering SceKernelThreadMgr...");
 
@@ -163,6 +171,8 @@ static int launch(SceKernelThreadEntry entry)
 
     SceGxm_finish();
     SceDisplay_finish();
+    SceAtrac_finish();
+    SceAudiodec_finish();
     SceAudio_finish();
     SceKernelSync_finish();
     SceKernelThreadMgr_finish();

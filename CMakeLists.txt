@@ -67,12 +67,28 @@ add_executable(vita2native
     source/util.c
     source/vita3k_shader_recompiler_iface_c.cpp
     source/vpk.c
+
+    external/Vita3K/external/LibAtrac9/C/src/band_extension.c
+    external/Vita3K/external/LibAtrac9/C/src/bit_allocation.c
+    external/Vita3K/external/LibAtrac9/C/src/bit_reader.c
+    external/Vita3K/external/LibAtrac9/C/src/decinit.c
+    external/Vita3K/external/LibAtrac9/C/src/decoder.c
+    external/Vita3K/external/LibAtrac9/C/src/huffCodes.c
+    external/Vita3K/external/LibAtrac9/C/src/imdct.c
+    external/Vita3K/external/LibAtrac9/C/src/libatrac9.c
+    external/Vita3K/external/LibAtrac9/C/src/quantization.c
+    external/Vita3K/external/LibAtrac9/C/src/scale_factors.c
+    external/Vita3K/external/LibAtrac9/C/src/tables.c
+    external/Vita3K/external/LibAtrac9/C/src/unpack.c
+    external/Vita3K/external/LibAtrac9/C/src/utility.c
     ${VITA2NATIVE_CTRL_SOURCE}
     ${VITA2NATIVE_DISPLAY_SOURCE}
     ${VITA2NATIVE_AUDIO_SOURCE}
     source/modules/SceAudio.c
     source/modules/SceGxm.c
     source/modules/SceAppMgr.c
+    source/modules/SceAtrac.c
+    source/modules/SceAudiodec.c
     source/modules/SceAppUtil.c
     source/modules/SceCommonDialog.c
     source/modules/SceKernelThreadMgr.c
@@ -92,6 +108,7 @@ target_include_directories(vita2native PRIVATE
     include
     source/host
     external/khronos/include
+    external/Vita3K/external/LibAtrac9/C/src
     external/vita-headers/include
     external/Vita3K/vita3k/renderer/include
     ${SDL2_INCLUDE_DIRS}
@@ -220,6 +237,58 @@ if(BUILD_TESTING)
     target_link_libraries(sync_smoke PRIVATE pthread m)
     add_test(NAME sync_smoke COMMAND sync_smoke)
 
+    add_executable(audiodec_smoke
+        tests/audiodec_smoke.c
+        source/modules/SceAudiodec.c
+        source/log.c
+        source/netlog.c
+        source/host/host_thread.c
+        external/Vita3K/external/LibAtrac9/C/src/band_extension.c
+        external/Vita3K/external/LibAtrac9/C/src/bit_allocation.c
+        external/Vita3K/external/LibAtrac9/C/src/bit_reader.c
+        external/Vita3K/external/LibAtrac9/C/src/decinit.c
+        external/Vita3K/external/LibAtrac9/C/src/decoder.c
+        external/Vita3K/external/LibAtrac9/C/src/huffCodes.c
+        external/Vita3K/external/LibAtrac9/C/src/imdct.c
+        external/Vita3K/external/LibAtrac9/C/src/libatrac9.c
+        external/Vita3K/external/LibAtrac9/C/src/quantization.c
+        external/Vita3K/external/LibAtrac9/C/src/scale_factors.c
+        external/Vita3K/external/LibAtrac9/C/src/tables.c
+        external/Vita3K/external/LibAtrac9/C/src/unpack.c
+        external/Vita3K/external/LibAtrac9/C/src/utility.c
+    )
+    target_include_directories(audiodec_smoke PRIVATE include source/modules
+        external/vita-headers/include external/Vita3K/external/LibAtrac9/C/src external/mlib)
+    target_compile_definitions(audiodec_smoke PRIVATE _GNU_SOURCE=1 _FILE_OFFSET_BITS=64)
+    target_link_libraries(audiodec_smoke PRIVATE pthread m)
+    add_test(NAME audiodec_smoke COMMAND audiodec_smoke)
+
+    add_executable(atrac_smoke
+        tests/atrac_smoke.c
+        source/modules/SceAtrac.c
+        source/log.c
+        source/netlog.c
+        source/host/host_thread.c
+        external/Vita3K/external/LibAtrac9/C/src/band_extension.c
+        external/Vita3K/external/LibAtrac9/C/src/bit_allocation.c
+        external/Vita3K/external/LibAtrac9/C/src/bit_reader.c
+        external/Vita3K/external/LibAtrac9/C/src/decinit.c
+        external/Vita3K/external/LibAtrac9/C/src/decoder.c
+        external/Vita3K/external/LibAtrac9/C/src/huffCodes.c
+        external/Vita3K/external/LibAtrac9/C/src/imdct.c
+        external/Vita3K/external/LibAtrac9/C/src/libatrac9.c
+        external/Vita3K/external/LibAtrac9/C/src/quantization.c
+        external/Vita3K/external/LibAtrac9/C/src/scale_factors.c
+        external/Vita3K/external/LibAtrac9/C/src/tables.c
+        external/Vita3K/external/LibAtrac9/C/src/unpack.c
+        external/Vita3K/external/LibAtrac9/C/src/utility.c
+    )
+    target_include_directories(atrac_smoke PRIVATE include source/modules
+        external/vita-headers/include external/Vita3K/external/LibAtrac9/C/src external/mlib)
+    target_compile_definitions(atrac_smoke PRIVATE _GNU_SOURCE=1 _FILE_OFFSET_BITS=64)
+    target_link_libraries(atrac_smoke PRIVATE pthread m)
+    add_test(NAME atrac_smoke COMMAND atrac_smoke)
+
     add_executable(apputil_smoke
         tests/apputil_smoke.c
         source/modules/SceAppUtil.c
@@ -260,6 +329,7 @@ if(BUILD_TESTING)
             include
             source/host
             external/khronos/include
+    external/Vita3K/external/LibAtrac9/C/src
             external/vita-headers/include
             ${SDL2_INCLUDE_DIRS}
         )
@@ -336,6 +406,7 @@ if(BUILD_TESTING)
         include
         source/host
         external/khronos/include
+    external/Vita3K/external/LibAtrac9/C/src
         external/vita-headers/include
         external/Vita3K/vita3k/renderer/include
     )

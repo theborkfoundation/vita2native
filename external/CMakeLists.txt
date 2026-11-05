@@ -82,6 +82,30 @@ foreach(patch vita3k-arm32-alignment.patch)
     endif()
 endforeach()
 
+# LibAtrac9 is its own repository inside the Vita3K submodule, so its patch is
+# applied from that directory.
+set(LIBATRAC9_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Vita3K/external/LibAtrac9)
+foreach(patch libatrac9-bitreverse.patch)
+    if(EXISTS ${VITA3K_PATCH_DIR}/${patch})
+        execute_process(
+            COMMAND git apply --reverse --check ${VITA3K_PATCH_DIR}/${patch}
+            WORKING_DIRECTORY ${LIBATRAC9_DIR}
+            RESULT_VARIABLE LIBATRAC9_PATCH_APPLIED
+            OUTPUT_QUIET ERROR_QUIET)
+        if(NOT LIBATRAC9_PATCH_APPLIED EQUAL 0)
+            execute_process(
+                COMMAND git apply ${VITA3K_PATCH_DIR}/${patch}
+                WORKING_DIRECTORY ${LIBATRAC9_DIR}
+                RESULT_VARIABLE LIBATRAC9_PATCH_RESULT
+                ERROR_VARIABLE LIBATRAC9_PATCH_ERROR)
+            if(NOT LIBATRAC9_PATCH_RESULT EQUAL 0)
+                message(FATAL_ERROR "Failed to apply ${patch}: ${LIBATRAC9_PATCH_ERROR}")
+            endif()
+            message(STATUS "Applied LibAtrac9 patch: ${patch}")
+        endif()
+    endif()
+endforeach()
+
 add_subdirectory(Vita3K/vita3k/shader EXCLUDE_FROM_ALL)
 
 # The shim headers must win over Vita3K's own util headers (log/fs/string utils).
