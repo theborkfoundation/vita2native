@@ -79,6 +79,7 @@ add_executable(vita2native
     source/modules/SceKernelSync.c
     source/modules/SceLibKernel.c
     source/modules/SceNet.c
+    source/modules/ScePower.c
     source/modules/SceRtc.c
     source/modules/SceSharedFb.c
     source/modules/SceSysmodule.c
