@@ -80,10 +80,10 @@ A GLES 3.x GPU device (EGL surfaceless + pbuffer) is created at startup when the
 libraries are available; otherwise a null backend is used. GXM is translated to
 GLES 3.x: GXP shaders through Vita3K's recompiler, render targets, textures,
 depth/stencil, MSAA and the transfer calls. `SceAudioOut`/`SceAudioIn`,
-MP3/ATRAC9 decoding, JPEG encode/decode, `SceNet`/`SceHttp`/`SceSsl`,
+MP3/ATRAC9/AAC decoding, JPEG encode/decode, `SceNet`/`SceHttp`/`SceSsl`,
 `SceSqlite`, `ScePgf`, `SceTouch`, `SceCommonDialog`, a synthetic camera and the
-kernel/thread surface are implemented. AAC and CELP decoding and encrypted SELF
-files are not supported.
+kernel/thread surface are implemented. AAC uses the bundled FAAD2 decoder;
+CELP decoding and encrypted SELF files are not supported.
 
 Guest code runs natively in the host process; there is no sandbox or isolation.
 
@@ -123,6 +123,10 @@ need devkitPro or any Horizon OS tooling.
   [contributing](https://vita3k.org/#contribute).
 - The Khronos Group for the EGL/GLES headers vendored under
   `external/khronos/`.
+- [FAAD2](https://github.com/knik0/faad2) — AAC decoding, vendored under
+  `external/faad2/` (GPLv2; see `external/faad2/COPYING`).
+- [stb](https://github.com/nothings/stb) — image decode/encode used by
+  `SceJpeg` (public domain / MIT).
 
 ## Disclaimer
 

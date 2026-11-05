@@ -18,6 +18,7 @@
 #include "minimp3.h"
 #include "module.h"
 #include "modules/SceLibKernel.h"
+#include "neaacdec.h"
 
 #define AUDIODEC_MAX_HANDLES 64
 
@@ -26,6 +27,8 @@ typedef struct {
     SceAudiodecType type;
     void *at9;
     mp3dec_t mp3;
+    void *aac;
+    bool aac_initialized;
     Atrac9CodecInfo codec;
     uint32_t frame_samples;
 } AudioDecoder;
@@ -34,8 +37,10 @@ DICT_DEF2(vita_audiodec_dict, SceUID, M_DEFAULT_OPLIST, AudioDecoder *, M_POD_OP
 static vita_audiodec_dict_t g_decoders;
 static bool g_at9_initialized;
 static bool g_mp3_initialized;
+static bool g_aac_initialized;
 static uint32_t g_at9_channels;
 static uint32_t g_mp3_streams;
+static uint32_t g_aac_streams;
 static SceUID g_next_handle;
 
 static AudioDecoder *audiodec_lookup(SceUID uid)
@@ -70,6 +75,13 @@ EXPORT(SceAudiodecUser, 0x445C2CEF, int, sceAudiodecInitLibrary, SceUInt32 codec
         g_mp3_initialized = true;
         return 0;
     case SCE_AUDIODEC_TYPE_AAC:
+        if (g_aac_initialized)
+            return SCE_AUDIODEC_ERROR_ALREADY_INITIALIZED;
+        if (init_param->aac.totalStreams == 0 || init_param->aac.totalStreams > 64)
+            return SCE_AUDIODEC_ERROR_INVALID_INIT_PARAM;
+        g_aac_streams = init_param->aac.totalStreams;
+        g_aac_initialized = true;
+        return 0;
     case SCE_AUDIODEC_TYPE_CELP:
         return SCE_AUDIODEC_ERROR_INVALID_TYPE;
     default:
@@ -85,6 +97,8 @@ EXPORT(SceAudiodecUser, 0x45719B9D, int, sceAudiodecTermLibrary, SceUInt32 codec
         g_at9_initialized = false;
     if (codec_type == SCE_AUDIODEC_TYPE_MP3)
         g_mp3_initialized = false;
+    if (codec_type == SCE_AUDIODEC_TYPE_AAC)
+        g_aac_initialized = false;
     return 0;
 }
 
@@ -209,6 +223,53 @@ static int create_mp3_decoder(SceAudiodecCtrl *ctrl)
     return 0;
 }
 
+static int create_aac_decoder(SceAudiodecCtrl *ctrl)
+{
+    AudioDecoder *decoder;
+    NeAACDecConfigurationPtr config;
+    uint32_t rate;
+
+    if (!g_aac_initialized)
+        return SCE_AUDIODEC_ERROR_NOT_INITIALIZED;
+    if (!ctrl || !ctrl->pInfo)
+        return SCE_AUDIODEC_ERROR_INVALID_PTR;
+
+    decoder = calloc(1, sizeof(*decoder));
+    if (!decoder)
+        return SCE_AUDIODEC_ERROR_OUT_OF_MEMORY;
+
+    decoder->aac = NeAACDecOpen();
+    if (!decoder->aac) {
+        free(decoder);
+        return SCE_AUDIODEC_ERROR_API_FAIL;
+    }
+
+    rate = ctrl->pInfo->aac.samplingRate ? ctrl->pInfo->aac.samplingRate : 44100;
+    config = NeAACDecGetCurrentConfiguration(decoder->aac);
+    if (config) {
+        config->defSampleRate = rate;
+        config->outputFormat = FAAD_FMT_16BIT;
+        NeAACDecSetConfiguration(decoder->aac, config);
+    }
+
+    decoder->type = SCE_AUDIODEC_TYPE_AAC;
+    decoder->frame_samples = 1024;
+    decoder->uid = ++g_next_handle;
+
+    ctrl->pInfo->aac.size = sizeof(SceAudiodecInfoAac);
+    if (ctrl->pInfo->aac.ch == 0)
+        ctrl->pInfo->aac.ch = 2;
+    ctrl->maxEsSize = 8192;
+    ctrl->maxPcmSize = 2048u * ctrl->pInfo->aac.ch * (SceUInt32)sizeof(int16_t) * 2u;
+    ctrl->wordLength = 16;
+    ctrl->handle = (SceInt32)decoder->uid;
+
+    vita_audiodec_dict_set_at(g_decoders, decoder->uid, decoder);
+
+    LOG("SceAudiodec: AAC decoder: %u stream(s)", g_aac_streams);
+    return 0;
+}
+
 EXPORT(SceAudiodecUser, 0x4DFD3AAA, int, sceAudiodecCreateDecoder, SceAudiodecCtrl *ctrl,
        SceUInt32 codec_type)
 {
@@ -220,6 +281,8 @@ EXPORT(SceAudiodecUser, 0x4DFD3AAA, int, sceAudiodecCreateDecoder, SceAudiodecCt
         return create_at9_decoder(ctrl);
     case SCE_AUDIODEC_TYPE_MP3:
         return create_mp3_decoder(ctrl);
+    case SCE_AUDIODEC_TYPE_AAC:
+        return create_aac_decoder(ctrl);
     default:
         return SCE_AUDIODEC_ERROR_INVALID_TYPE;
     }
@@ -254,6 +317,8 @@ EXPORT(SceAudiodecUser, 0xE7A24E16, int, sceAudiodecDeleteDecoder, SceAudiodecCt
     vita_audiodec_dict_erase(g_decoders, (SceUID)ctrl->handle);
     if (decoder->type == SCE_AUDIODEC_TYPE_AT9)
         Atrac9ReleaseHandle(decoder->at9);
+    if (decoder->type == SCE_AUDIODEC_TYPE_AAC && decoder->aac)
+        NeAACDecClose(decoder->aac);
     free(decoder);
     ctrl->handle = 0;
 
@@ -288,6 +353,19 @@ EXPORT(SceAudiodecUser, 0xF72F9B64, int, sceAudiodecClearContext, SceAudiodecCtr
 
     if (decoder->type == SCE_AUDIODEC_TYPE_MP3)
         mp3dec_init(&decoder->mp3);
+    if (decoder->type == SCE_AUDIODEC_TYPE_AAC && decoder->aac) {
+        NeAACDecClose(decoder->aac);
+        decoder->aac = NeAACDecOpen();
+        decoder->aac_initialized = false;
+        if (decoder->aac) {
+            NeAACDecConfigurationPtr config = NeAACDecGetCurrentConfiguration(decoder->aac);
+
+            if (config) {
+                config->outputFormat = FAAD_FMT_16BIT;
+                NeAACDecSetConfiguration(decoder->aac, config);
+            }
+        }
+    }
     return 0;
 }
 
@@ -355,6 +433,71 @@ static int audiodec_decode_frames(SceAudiodecCtrl *ctrl, SceUInt32 frame_count)
                 (SceUInt32)samples * (SceUInt32)frame_info.channels * (SceUInt32)sizeof(int16_t);
             pcm += (SceUInt32)samples * (SceUInt32)frame_info.channels *
                    (SceUInt32)sizeof(int16_t);
+        } else if (decoder->type == SCE_AUDIODEC_TYPE_AAC) {
+            NeAACDecFrameInfo frame_info;
+            unsigned long consumed;
+            uint32_t remaining = ctrl->maxEsSize;
+            void *samples;
+            size_t bytes;
+
+            if (!decoder->aac)
+                return SCE_AUDIODEC_ERROR_API_FAIL;
+
+            if (!decoder->aac_initialized) {
+                unsigned long rate = ctrl->pInfo->aac.samplingRate;
+                unsigned char channels =
+                    (unsigned char)(ctrl->pInfo->aac.ch ? ctrl->pInfo->aac.ch : 2);
+
+                consumed = NeAACDecInit(decoder->aac, es, remaining, &rate, &channels);
+                if ((long)consumed < 0) {
+                    LOG("SceAudiodec: AAC init failed");
+                    return SCE_AUDIODEC_ERROR_API_FAIL;
+                }
+
+                decoder->aac_initialized = true;
+                es += consumed;
+                remaining -= (uint32_t)consumed;
+                ctrl->inputEsSize += (SceUInt32)consumed;
+                ctrl->pInfo->aac.samplingRate = (SceUInt32)rate;
+                ctrl->pInfo->aac.ch = channels;
+            }
+
+            if (remaining == 0)
+                return SCE_AUDIODEC_ERROR_API_FAIL;
+
+            samples = NULL;
+            for (uint32_t attempt = 0; attempt < 4 && remaining > 0; attempt++) {
+                samples = NeAACDecDecode(decoder->aac, &frame_info, es, remaining);
+                if (frame_info.bytesconsumed == 0)
+                    break;
+
+                ctrl->inputEsSize += (SceUInt32)frame_info.bytesconsumed;
+                es += frame_info.bytesconsumed;
+                remaining -= (uint32_t)frame_info.bytesconsumed;
+
+                if (frame_info.error > 0) {
+                    LOG("SceAudiodec: AAC decode error %u", frame_info.error);
+                    return SCE_AUDIODEC_ERROR_API_FAIL;
+                }
+                if (samples && frame_info.samples > 0)
+                    break;
+            }
+
+            if (!samples || frame_info.samples == 0) {
+                LOG("SceAudiodec: AAC produced no samples");
+                return SCE_AUDIODEC_ERROR_API_FAIL;
+            }
+
+            bytes = (size_t)frame_info.samples * sizeof(int16_t);
+            if (bytes > ctrl->maxPcmSize)
+                bytes = ctrl->maxPcmSize;
+            memcpy(pcm, samples, bytes);
+
+            ctrl->outputPcmSize += (SceUInt32)bytes;
+            ctrl->pInfo->aac.ch = frame_info.channels;
+            ctrl->pInfo->aac.samplingRate = frame_info.samplerate;
+            ctrl->pInfo->aac.isSbr = frame_info.sbr ? 1 : 0;
+            pcm += bytes;
         } else {
             return SCE_AUDIODEC_ERROR_INVALID_TYPE;
         }

@@ -145,6 +145,7 @@ target_include_directories(vita2native PRIVATE
     external/sqlite
     external/Vita3K/external/LibAtrac9/C/src
     external/vita-headers/include
+    external/faad2/include
     external/Vita3K/external/stb
     external/Vita3K/vita3k/renderer/include
     ${SDL2_INCLUDE_DIRS}
@@ -200,6 +201,7 @@ target_link_libraries(vita2native PRIVATE
     fmt-header-only
     miniz
     mlib
+    faad
     ${SDL2_LIBRARIES}
     pthread
     dl
@@ -212,6 +214,26 @@ target_link_options(vita2native PRIVATE -rdynamic)
 set_target_properties(vita2native PROPERTIES ENABLE_EXPORTS ON)
 
 include(GNUInstallDirs)
+
+# FAAD2 (GPLv2) provides the AAC decoder. It is bundled as a static library and
+# treated as third-party code for warning/sanitizer purposes.
+file(GLOB FAAD2_SOURCES external/faad2/libfaad/*.c)
+add_library(faad STATIC ${FAAD2_SOURCES})
+target_include_directories(faad PUBLIC external/faad2/include PRIVATE external/faad2/libfaad)
+target_compile_definitions(faad PRIVATE
+    APPLY_DRC
+    HAVE_INTTYPES_H=1
+    HAVE_MEMCPY=1
+    HAVE_STRING_H=1
+    HAVE_STRINGS_H=1
+    HAVE_SYS_STAT_H=1
+    HAVE_SYS_TYPES_H=1
+    STDC_HEADERS=1
+    PACKAGE_VERSION="2.11.1"
+)
+target_compile_options(faad PRIVATE -w)
+target_link_libraries(faad PUBLIC m)
+set_source_files_properties(${FAAD2_SOURCES} PROPERTIES COMPILE_OPTIONS "-fno-sanitize=undefined")
 install(TARGETS vita2native RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES packaging/vita2native.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 install(FILES packaging/x-vita-vpk.xml DESTINATION ${CMAKE_INSTALL_DATADIR}/mime/packages)
@@ -389,9 +411,9 @@ if(BUILD_TESTING)
     )
     target_include_directories(audiodec_smoke PRIVATE include source/modules
         external/vita-headers/include external/minimp3 external/Vita3K/external/LibAtrac9/C/src
-        external/mlib)
+        external/mlib external/faad2/include)
     target_compile_definitions(audiodec_smoke PRIVATE _GNU_SOURCE=1 _FILE_OFFSET_BITS=64)
-    target_link_libraries(audiodec_smoke PRIVATE pthread m)
+    target_link_libraries(audiodec_smoke PRIVATE pthread m faad)
     add_test(NAME audiodec_smoke COMMAND audiodec_smoke)
 
     add_executable(atrac_smoke

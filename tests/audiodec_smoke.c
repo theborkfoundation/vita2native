@@ -15,12 +15,99 @@
 
 #include "modules/SceAudiodec.h"
 
+#include "aac_sample.inc"
+
 int sceAudiodecInitLibrary(SceUInt32 codec_type, SceAudiodecInitParam *init_param);
 int sceAudiodecTermLibrary(SceUInt32 codec_type);
 int sceAudiodecCreateDecoder(SceAudiodecCtrl *ctrl, SceUInt32 codec_type);
 int sceAudiodecDeleteDecoder(SceAudiodecCtrl *ctrl);
 int sceAudiodecDecode(SceAudiodecCtrl *ctrl);
 int sceAudiodecGetContextSize(SceAudiodecCtrl *ctrl, SceUInt32 codec_type);
+int sceAudiodecClearContext(SceAudiodecCtrl *ctrl);
+
+/* Real ADTS AAC stream (0.25 s, 440 Hz sine, 44.1 kHz stereo). */
+static int test_aac(void)
+{
+    SceAudiodecInitParam init_param;
+    SceAudiodecInfo info;
+    SceAudiodecCtrl ctrl;
+    int16_t pcm[8192];
+    SceUInt32 first_frame;
+    uint32_t nonzero = 0;
+
+    memset(&init_param, 0, sizeof(init_param));
+    init_param.aac.size = sizeof(SceAudiodecInitStreamParam);
+    init_param.aac.totalStreams = 1;
+    if (sceAudiodecInitLibrary(SCE_AUDIODEC_TYPE_AAC, &init_param) != 0) {
+        puts("audiodec_smoke: AAC init library failed");
+        return 1;
+    }
+
+    memset(&info, 0, sizeof(info));
+    info.aac.size = sizeof(SceAudiodecInfoAac);
+    info.aac.isAdts = 1;
+    info.aac.ch = 2;
+    info.aac.samplingRate = 44100;
+
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.size = sizeof(ctrl);
+    ctrl.pInfo = &info;
+    if (sceAudiodecCreateDecoder(&ctrl, SCE_AUDIODEC_TYPE_AAC) != 0) {
+        puts("audiodec_smoke: AAC create decoder failed");
+        return 1;
+    }
+
+    memset(pcm, 0, sizeof(pcm));
+    ctrl.pEs = _tmp_test_aac;
+    ctrl.maxEsSize = _tmp_test_aac_len;
+    ctrl.pPcm = pcm;
+    ctrl.maxPcmSize = sizeof(pcm);
+    if (sceAudiodecDecode(&ctrl) != 0) {
+        puts("audiodec_smoke: AAC decode failed");
+        return 1;
+    }
+    if (ctrl.inputEsSize == 0 || ctrl.outputPcmSize == 0) {
+        printf("audiodec_smoke: AAC consumed %u bytes, produced %u bytes\n", ctrl.inputEsSize,
+               ctrl.outputPcmSize);
+        return 1;
+    }
+    if (info.aac.ch != 2 || info.aac.samplingRate != 44100) {
+        printf("audiodec_smoke: AAC info is %u ch, %u Hz\n", info.aac.ch, info.aac.samplingRate);
+        return 1;
+    }
+    for (uint32_t i = 0; i < ctrl.outputPcmSize / sizeof(int16_t); i++)
+        nonzero += pcm[i] != 0;
+    if (nonzero < 100) {
+        printf("audiodec_smoke: AAC PCM is nearly silent (%u samples)\n", nonzero);
+        return 1;
+    }
+
+    first_frame = ctrl.inputEsSize;
+    if (first_frame < _tmp_test_aac_len) {
+        ctrl.pEs += first_frame;
+        ctrl.maxEsSize -= first_frame;
+        if (sceAudiodecDecode(&ctrl) != 0 || ctrl.outputPcmSize == 0) {
+            puts("audiodec_smoke: second AAC frame failed");
+            return 1;
+        }
+    }
+
+    ctrl.pEs = _tmp_test_aac;
+    ctrl.maxEsSize = _tmp_test_aac_len;
+    if (sceAudiodecClearContext(&ctrl) != 0 || sceAudiodecDecode(&ctrl) != 0) {
+        puts("audiodec_smoke: AAC clear/restart failed");
+        return 1;
+    }
+
+    if (sceAudiodecDeleteDecoder(&ctrl) != 0 ||
+        sceAudiodecTermLibrary(SCE_AUDIODEC_TYPE_AAC) != 0) {
+        puts("audiodec_smoke: AAC teardown failed");
+        return 1;
+    }
+
+    puts("audiodec_smoke: AAC ok");
+    return 0;
+}
 
 static int test_mp3(const char *path)
 {
@@ -197,6 +284,9 @@ int main(int argc, char *argv[])
     }
 
     if (argc > 1 && test_mp3(argv[1]) != 0)
+        return 1;
+
+    if (test_aac() != 0)
         return 1;
 
     SceAudiodec_finish();
