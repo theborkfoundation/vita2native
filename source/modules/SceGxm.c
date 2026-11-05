@@ -3061,7 +3061,7 @@ EXPORT(SceGxm, 0x008402C6, int, sceGxmMapFragmentUsseMemory, void *base, SceSize
     return 0;
 }
 
-EXPORT(SceGxm, 0x80CCEDBB, int, sceGxmUnmapFragmentUsseMemor, void *base)
+EXPORT(SceGxm, 0x80CCEDBB, int, sceGxmUnmapFragmentUsseMemory, void *base)
 {
     (void)base;
     return 0;
@@ -3524,11 +3524,6 @@ EXPORT(SceGxm, 0xE8E139DD, int, sceGxmExecuteCommandList, SceGxmContext *context
     return 0;
 }
 
-EXPORT(SceGxm, 0x2A1BCDDB, int, sceGxmGetContextType, const SceGxmContext *context)
-{
-    return context ? 0 : SCE_GXM_ERROR_INVALID_POINTER;
-}
-
 EXPORT(SceGxm, 0xAD8C2EBA, int, sceGxmGetDeferredContextVdmBuffer,
        const SceGxmContext *context, void **buffer, unsigned int *size)
 {
@@ -3953,6 +3948,158 @@ EXPORT(SceGxm, 0xED3F78B8, int, sceGxmDrawPrecomputed, SceGxmContext *context,
 
     return gxm_draw_common(context, state->primitive, state->index_format, state->index_data,
                            state->index_count, 1);
+}
+
+EXPORT(SceGxm, 0x4709CF5A, int, sceGxmBeginSceneEx, SceGxmContext *context, unsigned int flags,
+       const SceGxmRenderTarget *renderTarget, const SceGxmValidRegion *validRegion,
+       SceGxmSyncObject *vertexSyncObject, SceGxmSyncObject *fragmentSyncObject,
+       const SceGxmColorSurface *colorSurface,
+       const SceGxmDepthStencilSurface *loadDepthStencilSurface,
+       const SceGxmDepthStencilSurface *storeDepthStencilSurface)
+{
+    (void)storeDepthStencilSurface;
+    return sceGxmBeginScene(context, flags, renderTarget, validRegion, vertexSyncObject,
+                            fragmentSyncObject, colorSurface, loadDepthStencilSurface);
+}
+
+EXPORT(SceGxm, 0x2A1BCDDB, int, sceGxmGetContextType, const SceGxmContext *context,
+       unsigned int *type)
+{
+    if (!context || !type)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    *type = 0; /* immediate context */
+    return 0;
+}
+
+EXPORT(SceGxm, 0xCE0B0A76, SceGxmPassType, sceGxmFragmentProgramGetPassType,
+       const SceGxmFragmentProgram *fragmentProgram)
+{
+    (void)fragmentProgram;
+    return SCE_GXM_PASS_TYPE_OPAQUE;
+}
+
+EXPORT(SceGxm, 0x5748367E, SceBool, sceGxmFragmentProgramIsEnabled,
+       const SceGxmFragmentProgram *fragmentProgram)
+{
+    return fragmentProgram && !fragmentProgram->mask_update;
+}
+
+EXPORT(SceGxm, 0xE11603B1, int, sceGxmProgramGetOutputRegisterFormat,
+       const SceGxmProgram *program, SceGxmParameterType *type, unsigned int *componentCount)
+{
+    const uint8_t *base;
+
+    if (!program || !type || !componentCount)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    if (!(program->program_flags & 1))
+        return SCE_GXM_ERROR_INVALID_VALUE;
+
+    base = (const uint8_t *)&program->varyings_offset + program->varyings_offset;
+    *type = (SceGxmParameterType)base[10];
+    *componentCount = base[11];
+    return 0;
+}
+
+EXPORT(SceGxm, 0xE23C838C, SceBool, sceGxmProgramIsEquivalent, const SceGxmProgram *programA,
+       const SceGxmProgram *programB)
+{
+    if (!programA || !programB)
+        return 0;
+    return programA->size == programB->size &&
+                   memcmp(programA, programB, programA->size) == 0
+               ? 1
+               : 0;
+}
+
+EXPORT(SceGxm, 0x6ABF3F76, int, sceGxmGetParameterBufferThreshold, unsigned int *size)
+{
+    if (!size)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    *size = 256 * 1024;
+    return 0;
+}
+
+EXPORT(SceGxm, 0x873B07C0, SceBool, sceGxmIsDebugVersion, void)
+{
+    return 0;
+}
+
+EXPORT(SceGxm, 0x12D18B3D, void, sceGxmSetWarningEnabled, SceBool enable)
+{
+    (void)enable;
+}
+
+EXPORT(SceGxm, 0xE05277D6, int, sceGxmVertexFence, SceGxmContext *context)
+{
+    (void)context;
+    if (g_gl)
+        g_gl->glFinish();
+    return 0;
+}
+
+EXPORT(SceGxm, 0x8BD94593, int, sceGxmWaitEvent, void)
+{
+    if (g_gl)
+        g_gl->glFinish();
+    return 0;
+}
+
+EXPORT(SceGxm, 0xE9E81073, int, sceGxmAddRazorGpuCaptureBuffer, void)
+{
+    return 0;
+}
+
+EXPORT(SceGxm, 0x0468E3F2, int, sceGxmRemoveRazorGpuCaptureBuffer, void)
+{
+    return 0;
+}
+
+/* Underscore-prefixed aliases some applications import. */
+
+EXPORT(SceGxm, 0xDBA33160, int, _sceGxmBeginScene, SceGxmContext *context, unsigned int flags,
+       const SceGxmRenderTarget *renderTarget, const SceGxmValidRegion *validRegion,
+       SceGxmSyncObject *vertexSyncObject, SceGxmSyncObject *fragmentSyncObject,
+       const SceGxmColorSurface *colorSurface, const SceGxmDepthStencilSurface *depthStencil)
+{
+    return sceGxmBeginScene(context, flags, renderTarget, validRegion, vertexSyncObject,
+                            fragmentSyncObject, colorSurface, depthStencil);
+}
+
+EXPORT(SceGxm, 0x51FE0899, int, _sceGxmMidSceneFlush, SceGxmContext *context, unsigned int flags,
+       SceGxmSyncObject *vertexSyncObject, const SceGxmNotification *vertexNotification)
+{
+    return sceGxmMidSceneFlush(context, flags, vertexSyncObject, vertexNotification);
+}
+
+EXPORT(SceGxm, 0x16C9D339, int, _sceGxmSetVertexTexture, SceGxmContext *context,
+       unsigned int textureIndex, const SceGxmTexture *texture)
+{
+    return sceGxmSetVertexTexture(context, textureIndex, texture);
+}
+
+EXPORT(SceGxm, 0x5A690B60, int, _sceGxmTextureSetWidth, SceGxmTexture *texture,
+       unsigned int width)
+{
+    return sceGxmTextureSetWidth(texture, width);
+}
+
+EXPORT(SceGxm, 0x1B20D5DF, int, _sceGxmTextureSetHeight, SceGxmTexture *texture,
+       unsigned int height)
+{
+    return sceGxmTextureSetHeight(texture, height);
+}
+
+EXPORT(SceGxm, 0x7FFFDD7A, const SceGxmProgramParameter *,
+       _sceGxmProgramFindParameterBySemantic, const SceGxmProgram *program,
+       SceGxmParameterSemantic semantic, unsigned int index)
+{
+    return sceGxmProgramFindParameterBySemantic(program, semantic, index);
+}
+
+EXPORT(SceGxm, 0xAAFD61D5, SceGxmParameterSemantic, _sceGxmProgramParameterGetSemantic,
+       const SceGxmProgramParameter *parameter)
+{
+    return sceGxmProgramParameterGetSemantic(parameter);
 }
 
 DECLARE_LIBRARY(SceGxm, 0xf76b66bd);
