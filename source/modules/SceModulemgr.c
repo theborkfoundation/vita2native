@@ -75,6 +75,8 @@ static VitaModuleInfo *module_alloc_slot(void)
 
 static void module_release_locked(VitaModuleInfo *module)
 {
+    if (module->loader.module_info)
+        module_unregister_guest_libraries(module->loader.module_info);
     if (module->jit.rx)
         jitClose(&module->jit);
     free(module->loader.data_addr);
@@ -136,7 +138,9 @@ static int module_start(VitaModuleInfo *module, SceSize args, void *argp, int *s
     if (!module->entry)
         return SCE_KERNEL_ERROR_MODULEMGR_NO_MOD_ENTRY;
 
+    LOG("Calling module_start for \"%s\" at %p", module->loader.name, module->entry);
     ret = ((int (*)(SceSize, void *))module->entry)(args, argp);
+    LOG("module_start for \"%s\" returned 0x%x", module->loader.name, ret);
     if (status)
         *status = ret;
 

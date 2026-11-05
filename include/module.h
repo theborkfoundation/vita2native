@@ -48,5 +48,10 @@ extern const library_t __stop_exported_libraries[];
     (((uintptr_t)lib->func_table_stop - (uintptr_t)lib->func_table_start) / sizeof(void *))
 
 const void *module_get_func_export(uint32_t lib_nid, uint32_t func_nid);
+void *module_get_var_export(uint32_t lib_nid, uint32_t var_nid);
+
+void module_register_guest_library(uint32_t library_nid, uint32_t num_funcs, uint32_t num_vars,
+                                   const uint32_t *nids, const void *const *entries, void *owner);
+void module_unregister_guest_libraries(void *owner);
 
 #endif

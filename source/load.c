@@ -489,12 +489,33 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
     }
     LOG("Module name: %s", mod_info->name);
     if (info) {
+        uint8_t *segment_base = (uint8_t *)segments[mod_info_idx].rw_addr;
+        uint8_t *loaded_info = segment_base + ((uint8_t *)mod_info -
+                                               (uint8_t *)segments[mod_info_idx].src_data);
+
+        info->module_info = loaded_info;
         strncpy(info->name, mod_info->name, sizeof(info->name) - 1);
         info->attributes = mod_info->attributes;
         if (mod_info->module_stop != 0 && mod_info->module_stop != 0xFFFFFFFFu)
             info->module_stop = (void *)(segments[mod_info_idx].rx_addr + mod_info->module_stop);
         else
             info->module_stop = NULL;
+
+        if (mod_info->export_top && mod_info->export_top != mod_info->export_end) {
+            sce_module_exports_raw *export = (void *)(segment_base + mod_info->export_top);
+            void *export_end = segment_base + mod_info->export_end;
+
+            while ((void *)export < export_end && export->size) {
+                LOG("  Exporting library 0x%08" PRIx32 ": %u funcs, %u vars (nids %p, entries %p)",
+                    export->library_nid, export->num_syms_funcs, export->num_syms_vars,
+                    (void *)export->nid_table, (void *)export->entry_table);
+                module_register_guest_library(
+                    export->library_nid, export->num_syms_funcs, export->num_syms_vars,
+                    (const uint32_t *)export->nid_table,
+                    (const void *const *)export->entry_table, loaded_info);
+                export = (void *)((uint8_t *)export + export->size);
+            }
+        }
     }
     LOG("  export table offset: 0x%" PRIx32, mod_info->export_top);
     LOG("  import table offset: 0x%" PRIx32, mod_info->import_top);
@@ -561,6 +582,7 @@ static int resolve_imports(uintptr_t rx_base, uintptr_t rw_base, sce_module_impo
         addr = module_get_func_export(lib_nid, nid);
 
         if (addr) {
+            LOG("  Resolved NID 0x%08" PRIx32 " to %p", nid, addr);
             stub[0] = arm_encode_movw(12, (uint16_t)(uintptr_t)addr);
             stub[1] = arm_encode_movt(12, (uint16_t)(((uintptr_t)addr) >> 16));
             stub[2] = arm_encode_bx(12);
@@ -575,8 +597,15 @@ static int resolve_imports(uintptr_t rx_base, uintptr_t rw_base, sce_module_impo
     for (uint32_t i = 0; i < IMP_GET_VARS_COUNT(import); i++) {
         nid = ((uint32_t *)CODE_RX_TO_RW_ADDR(rx_base, rw_base, IMP_GET_VARS_TABLE(import)))[i];
         LOG("  Trying to resolve variable NID 0x%08" PRIx32, nid);
-        /* TODO */
-        LOG("    Variable NID resolving currently not implemented!");
+
+        addr = module_get_var_export(lib_nid, nid);
+        if (addr) {
+            uint32_t *entry = (void *)CODE_RX_TO_RW_ADDR(
+                rx_base, rw_base, IMP_GET_VARS_ENTRIES(import));
+            entry[i] = (uint32_t)(uintptr_t)addr;
+        } else {
+            LOG("  Could not resolve variable NID 0x%08" PRIx32, nid);
+        }
     }
 
     return 0;

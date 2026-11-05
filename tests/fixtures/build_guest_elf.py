@@ -2558,6 +2558,251 @@ def build_module_host_elf():
     return assemble_elf(rx, rw, rela, MM_MODINFO)
 
 
+# --- Module exports fixture ------------------------------------------------
+
+ME_STUB_BASE = 0x180
+ME_LIB_NAME = 0x1E0
+ME_MODINFO = 0x200
+ME_IMPORT = 0x260
+ME_NIDS = 0x290
+ME_ENTRIES = 0x298
+ME_RX_SIZE = 0x2C0
+
+ME_LIB = b"SceLibKernel\0"
+ME_LIB_NID = 0xCAE9ACE6
+ME_FUNCS = [
+    0x2DCC4AFA,  # sceKernelLoadStartModule
+    0x1987920E,  # sceKernelUnloadModule
+]
+
+ME_RW_LIB_ID = 0x000
+ME_RW_IMP_ID = 0x004
+ME_RW_STATUS = 0x008
+ME_RW_LIB_PATH = 0x010
+ME_RW_IMP_PATH = 0x020
+ME_RW_SIZE = 0x040
+ME_LIB_PATH = b"app0:/lib.suprx\0"
+ME_IMP_PATH = b"app0:/imp.suprx\0"
+
+ME_LIB_MODINFO = 0x80
+ME_IMP_MODINFO = 0xC0
+ME_MODULE_RX_SIZE = 0x140
+
+
+def build_export_library():
+    """Module exporting one function (NID 0x11223344) that returns 0x77."""
+    rx = bytearray(ME_MODULE_RX_SIZE)
+    rx[0x00:0x08] = b"".join(struct.pack("<I", w) for w in (
+        arm_mov_imm(0, 0x2A),
+        0xE12FFF1E,
+    ))
+    rx[0x20:0x28] = b"".join(struct.pack("<I", w) for w in (
+        arm_mov_imm(0, 0x77),
+        0xE12FFF1E,
+    ))
+
+    struct.pack_into("<I", rx, 0x30, 0x99AABBCC)   # exported variable
+
+    export = bytearray(0x20)
+    struct.pack_into("<HHHHI", export, 0, 0x20, 1, 1, 1, 1)
+    struct.pack_into("<I", export, 16, 0x12345678)  # library NID
+    rx[0x40:0x60] = export
+    struct.pack_into("<I", rx, 0x60, 0x11223344)   # function NID
+    struct.pack_into("<I", rx, 0x64, 0x55667788)   # variable NID
+    rx[0x70:0x7B] = b"SceTestLib\0"
+
+    info = bytearray(MODULE_INFO_SIZE)
+    struct.pack_into("<HH", info, 0x00, 0x0000, 0x0101)
+    info[0x04:0x08] = b"lib\0"
+    info[0x1F] = 0x06
+    struct.pack_into("<I", info, 0x24, 0x40)  # export_top
+    struct.pack_into("<I", info, 0x28, 0x60)  # export_end
+    struct.pack_into("<I", info, 0x44, 0x00000000)
+    struct.pack_into("<I", info, 0x48, 0xFFFFFFFF)
+    rx[ME_LIB_MODINFO:ME_LIB_MODINFO + MODULE_INFO_SIZE] = info
+
+    rela = bytearray()
+    rela += encode_rela(0, 0, 0x40 + 20, 0x70)  # library_name
+    rela += encode_rela(0, 0, 0x40 + 24, 0x60)  # nid_table
+    rela += encode_rela(0, 0, 0x40 + 28, 0x68)  # entry_table
+    rela += encode_rela(0, 0, 0x68, 0x20)       # exported function
+    rela += encode_rela(0, 0, 0x6C, 0x30)       # exported variable
+    return assemble_elf(rx, bytearray(0x40), rela, ME_LIB_MODINFO)
+
+
+def build_import_module():
+    """Module importing SceTestLib:0x11223344 and checking its return value."""
+    rx = bytearray(ME_MODULE_RX_SIZE)
+    code = [
+        0xE92D4010,          # push {r4, lr}
+        arm_bl(0x04, 0x60),
+        0xE3500077,          # cmp r0, #0x77
+        0x13A04001,          # movne r4, #1
+        0x03A04000,          # moveq r4, #0
+        arm_movw(1, 0),
+        arm_movt(1, 0),
+        0xE5911000,          # ldr r1, [r1]
+        0xE5910000,          # ldr r0, [r1]
+        arm_movw(2, 0xBBCC),
+        arm_movt(2, 0x99AA),
+        0xE1500002,          # cmp r0, r2
+        0x13844002,          # orrne r4, r4, #2
+        0xE3540000,          # cmp r4, #0
+        0x03A0002A,          # moveq r0, #0x2a
+        0x13A00001,          # movne r0, #1
+        0xE8BD8010,          # pop {r4, pc}
+    ]
+    rx[0x00:len(code) * 4] = b"".join(struct.pack("<I", w) for w in code)
+
+    imp = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp, 0, IMPORT_SIZE, 1, 0, 1, 1, 0)
+    struct.pack_into("<I", imp, IMP_LIBRARY_NID, 0x12345678)
+    rx[0x70:0x70 + IMPORT_SIZE] = imp
+    rx[0x98:0xA2] = b"SceTestLib\0"
+    struct.pack_into("<I", rx, 0xA8, 0x11223344)
+    struct.pack_into("<I", rx, 0xB0, 0x55667788)
+
+    info = bytearray(MODULE_INFO_SIZE)
+    struct.pack_into("<HH", info, 0x00, 0x0000, 0x0101)
+    info[0x04:0x08] = b"imp\0"
+    info[0x1F] = 0x06
+    struct.pack_into("<I", info, 0x2C, 0x70)  # import_top
+    struct.pack_into("<I", info, 0x30, 0x70 + IMPORT_SIZE)
+    struct.pack_into("<I", info, 0x44, 0x00000000)
+    struct.pack_into("<I", info, 0x48, 0xFFFFFFFF)
+    rx[ME_IMP_MODINFO:ME_IMP_MODINFO + MODULE_INFO_SIZE] = info
+
+    rela = bytearray()
+    rela += encode_rela(0, 0, 0x70 + IMP_LIBRARY_NAME, 0x98)
+    rela += encode_rela(0, 0, 0x70 + IMP_FUNC_NID_TABLE, 0xA8)
+    rela += encode_rela(0, 0, 0x70 + IMP_FUNC_ENTRY_TABLE, 0xAC)
+    rela += encode_rela(0, 0, 0x70 + IMP_VAR_NID_TABLE, 0xB0)
+    rela += encode_rela(0, 0, 0x70 + IMP_VAR_ENTRY_TABLE, 0xB4)
+    rela += encode_rela(0, 0, 0xAC, 0x60)  # import stub
+    # movw/movt r1, <address of the imported variable slot>
+    rela += encode_rela(0, 0, 0x14, 0xB4, R_ARM_MOVW_ABS_NC)
+    rela += encode_rela(0, 0, 0x18, 0xB4, R_ARM_MOVT_ABS)
+    return assemble_elf(rx, bytearray(0x40), rela, 0xC0)
+
+
+def build_module_export_host_elf():
+    """Guest ELF that loads lib.suprx then imp.suprx and unloads both."""
+    code = []
+    rx_relocs = []
+
+    def emit(word):
+        code.append(word & 0xFFFFFFFF)
+
+    def movw_movt_rw(rd, offset):
+        base = len(code) * 4
+        emit(arm_movw(rd, 0))
+        emit(arm_movt(rd, 0))
+        rx_relocs.append(encode_rela(0, 1, base, offset, R_ARM_MOVW_ABS_NC))
+        rx_relocs.append(encode_rela(0, 1, base + 4, offset, R_ARM_MOVT_ABS))
+
+    def call(index):
+        emit(arm_bl(len(code) * 4, ME_STUB_BASE + index * 12))
+
+    def load_rw(rd, offset):
+        movw_movt_rw(rd, offset)
+        emit(0xE5900000 | (rd << 16) | (rd << 12))
+
+    def store_rw(rs, offset):
+        movw_movt_rw(12, offset)
+        emit(0xE58C0000 | (rs << 12))
+
+    def check(bit):
+        emit(0xE3500000)
+        emit(0x13844000 | arm_encode_imm(bit))
+
+    def check_nonzero(bit):
+        emit(0xE3500000)
+        emit(0x03844000 | arm_encode_imm(bit))
+
+    def check_word(offset, value, bit):
+        movw_movt_rw(1, offset)
+        emit(0xE5910000)
+        emit(arm_movw(2, value & 0xFFFF))
+        emit(arm_movt(2, (value >> 16) & 0xFFFF))
+        emit(0xE1500002)
+        emit(0x13844000 | arm_encode_imm(bit))
+
+    def load_start(path_offset, id_offset, bit):
+        movw_movt_rw(0, path_offset)
+        emit(arm_mov_imm(1, 0))
+        emit(arm_mov_imm(2, 0))
+        emit(arm_mov_imm(3, 0))
+        emit(0xE24DD008)
+        emit(arm_mov_imm(12, 0))
+        emit(0xE58DC000)
+        movw_movt_rw(12, ME_RW_STATUS)
+        emit(0xE58DC004)
+        call(0)
+        emit(0xE28DD008)
+        store_rw(0, id_offset)
+        check_nonzero(bit)
+        check_word(ME_RW_STATUS, 0x2A, bit << 1)
+
+    emit(0xE92D4010)
+    emit(arm_mov_imm(4, 0))
+
+    load_start(ME_RW_LIB_PATH, ME_RW_LIB_ID, 1)
+    load_start(ME_RW_IMP_PATH, ME_RW_IMP_ID, 4)
+
+    load_rw(0, ME_RW_IMP_ID)
+    emit(arm_mov_imm(1, 0))
+    emit(arm_mov_imm(2, 0))
+    call(1)
+    check(16)
+    load_rw(0, ME_RW_LIB_ID)
+    emit(arm_mov_imm(1, 0))
+    emit(arm_mov_imm(2, 0))
+    call(1)
+    check(32)
+
+    emit(0xE1A00004)
+    emit(0xE3500000)
+    emit(0x03A0002A)
+    emit(0xE8BD8010)
+
+    assert len(code) * 4 <= ME_STUB_BASE, f"module export fixture code overlaps stubs ({len(code) * 4:#x})"
+
+    rx = bytearray(ME_RX_SIZE)
+    rx[:len(code) * 4] = b"".join(struct.pack("<I", w) for w in code)
+    rx[ME_LIB_NAME:ME_LIB_NAME + len(ME_LIB)] = ME_LIB
+
+    info = bytearray(MODULE_INFO_SIZE)
+    struct.pack_into("<HH", info, 0x00, 0x0000, 0x0101)
+    info[0x04:0x04 + len(MODULE_NAME)] = MODULE_NAME
+    struct.pack_into("<I", info, 0x2C, ME_IMPORT)
+    struct.pack_into("<I", info, 0x30, ME_IMPORT + IMPORT_SIZE)
+    struct.pack_into("<I", info, 0x34, 0x12345678)
+    struct.pack_into("<I", info, 0x44, 0x00000000)
+    struct.pack_into("<I", info, 0x48, 0xFFFFFFFF)
+    struct.pack_into("<I", info, 0x5C, 0x03570011)
+    rx[ME_MODINFO:ME_MODINFO + MODULE_INFO_SIZE] = info
+
+    imp = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp, 0, IMPORT_SIZE, 1, 0, len(ME_FUNCS), 0, 0)
+    struct.pack_into("<I", imp, IMP_LIBRARY_NID, ME_LIB_NID)
+    rx[ME_IMPORT:ME_IMPORT + IMPORT_SIZE] = imp
+
+    for i, nid in enumerate(ME_FUNCS):
+        struct.pack_into("<I", rx, ME_NIDS + i * 4, nid)
+
+    rx_relocs.append(encode_rela(0, 0, ME_IMPORT + IMP_LIBRARY_NAME, ME_LIB_NAME))
+    rx_relocs.append(encode_rela(0, 0, ME_IMPORT + IMP_FUNC_NID_TABLE, ME_NIDS))
+    rx_relocs.append(encode_rela(0, 0, ME_IMPORT + IMP_FUNC_ENTRY_TABLE, ME_ENTRIES))
+    for i in range(len(ME_FUNCS)):
+        rx_relocs.append(encode_rela(0, 0, ME_ENTRIES + i * 4, ME_STUB_BASE + i * 12))
+
+    rw = bytearray(ME_RW_SIZE)
+    rw[ME_RW_LIB_PATH:ME_RW_LIB_PATH + len(ME_LIB_PATH)] = ME_LIB_PATH
+    rw[ME_RW_IMP_PATH:ME_RW_IMP_PATH + len(ME_IMP_PATH)] = ME_IMP_PATH
+    rela = bytearray(b"".join(rx_relocs))
+    return assemble_elf(rx, rw, rela, ME_MODINFO)
+
+
 # --- SceAppUtil fixture ----------------------------------------------------
 
 APPUTIL_STUB_BASE = 0x140
@@ -3233,6 +3478,15 @@ def main():
     module_path = os.path.join(out_dir, "mod.suprx")
     with open(module_path, "wb") as f:
         f.write(build_module_file())
+
+    module_export_host_path = os.path.join(out_dir, "guest_module_export.elf")
+    with open(module_export_host_path, "wb") as f:
+        f.write(build_module_export_host_elf())
+
+    with open(os.path.join(out_dir, "lib.suprx"), "wb") as f:
+        f.write(build_export_library())
+    with open(os.path.join(out_dir, "imp.suprx"), "wb") as f:
+        f.write(build_import_module())
     print(f"wrote {event_path}")
 
     if os.path.exists(os.path.join(shader_dir, "texture_v.gxp")) and os.path.exists(

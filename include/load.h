@@ -20,6 +20,7 @@ typedef struct {
     uint16_t attributes;
     void *entry;
     void *module_stop;
+    void *module_info;
     void *code_rx;
     void *code_rw;
     void *data_addr;
