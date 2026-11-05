@@ -12,6 +12,7 @@
 #include "log.h"
 #include "module.h"
 #include "modules/SceDisplay.h"
+#include "modules/common_dialog_overlay.h"
 #include "util.h"
 
 #define VITA_FB_WIDTH  960
@@ -228,6 +229,16 @@ EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayF
     g_vita_conf_fb = *pParam;
     egl_present = g_egl_present && !g_window_closed;
     pthread_mutex_unlock(&g_lock);
+
+    {
+        CommonDialogOverlay overlay;
+
+        if (SceCommonDialog_getOverlay(&overlay)) {
+            CommonDialogOverlay_render(&overlay, (uint32_t *)pParam->base, (int)pParam->width,
+                                       (int)pParam->height, (int)pParam->pitch);
+            SceCommonDialog_overlayPresented();
+        }
+    }
 
     if (egl_present) {
         host_gpu_present_framebuffer(g_gpu_device, pParam->base, (int)pParam->width,

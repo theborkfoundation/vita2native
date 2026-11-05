@@ -7,6 +7,7 @@
 #include "log.h"
 #include "module.h"
 #include "modules/SceDisplay.h"
+#include "modules/common_dialog_overlay.h"
 #include "util.h"
 
 static SceDisplayFrameBuf g_vita_conf_fb;
@@ -153,8 +154,16 @@ EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayF
     if (pParam)
         g_vita_conf_fb = *pParam;
 
-    if (pParam)
+    if (pParam) {
+        CommonDialogOverlay overlay;
+
+        if (SceCommonDialog_getOverlay(&overlay)) {
+            CommonDialogOverlay_render(&overlay, (uint32_t *)pParam->base, (int)pParam->width,
+                                       (int)pParam->height, (int)pParam->pitch);
+            SceCommonDialog_overlayPresented();
+        }
         dump_framebuffer(pParam);
+    }
     g_frame_count++;
 
     return 0;

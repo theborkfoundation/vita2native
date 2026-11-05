@@ -97,6 +97,7 @@ add_executable(vita2native
     source/modules/SceJpeg.c
     source/modules/SceAppUtil.c
     source/modules/SceCommonDialog.c
+    source/modules/common_dialog_overlay.c
     source/modules/SceKernelThreadMgr.c
     source/modules/SceKernelRuntime.c
     source/modules/SceKernelLocks.c
@@ -511,10 +512,28 @@ if(BUILD_TESTING)
     add_executable(dialog_smoke
         tests/dialog_smoke.c
         source/modules/SceCommonDialog.c
+        source/host/host_thread.c
     )
     target_include_directories(dialog_smoke PRIVATE include external/vita-headers/include)
     target_compile_definitions(dialog_smoke PRIVATE _GNU_SOURCE=1)
+    target_link_libraries(dialog_smoke PRIVATE pthread)
     add_test(NAME dialog_smoke COMMAND dialog_smoke)
+
+    add_executable(dialog_overlay_smoke
+        tests/dialog_overlay_smoke.c
+        source/module.c
+        source/modules/SceCommonDialog.c
+        source/modules/common_dialog_overlay.c
+        source/host/host_thread.c
+    )
+    target_include_directories(dialog_overlay_smoke PRIVATE
+        include
+        external/vita-headers/include
+        external/font8x8
+    )
+    target_compile_definitions(dialog_overlay_smoke PRIVATE _GNU_SOURCE=1)
+    target_link_libraries(dialog_overlay_smoke PRIVATE pthread)
+    add_test(NAME dialog_overlay_smoke COMMAND dialog_overlay_smoke)
 
     add_executable(touch_smoke
         tests/touch_smoke.c

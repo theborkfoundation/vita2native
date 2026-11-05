@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <psp2/common_dialog.h>
 #include <psp2/ime_dialog.h>
@@ -13,6 +14,7 @@
 #include <psp2/types.h>
 
 int sceCommonDialogIsRunning(void);
+int sceCommonDialogUpdate(const SceCommonDialogUpdateParam *param);
 SceInt32 sceImeDialogInit(const SceImeDialogParam *param);
 SceCommonDialogStatus sceImeDialogGetStatus(void);
 SceInt32 sceImeDialogGetResult(SceImeDialogResult *result);
@@ -42,6 +44,11 @@ int main(void)
     msg_param.mode = SCE_MSG_DIALOG_MODE_USER_MSG;
     CHECK(sceMsgDialogInit(&msg_param) == 0, "MsgDialogInit failed");
     CHECK(sceCommonDialogIsRunning() == 1, "the message dialog is not reported as running");
+    CHECK(sceMsgDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_RUNNING,
+          "the message dialog did not start running");
+    for (int i = 0; i < 4; i++)
+        sceCommonDialogUpdate(NULL);
+    usleep(1100000);
     CHECK(sceMsgDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_FINISHED,
           "the message dialog did not finish");
     memset(&msg_result, 0, sizeof(msg_result));
@@ -57,6 +64,11 @@ int main(void)
     ime_param.maxTextLength = 16;
     CHECK(sceImeDialogInit(&ime_param) == 0, "ImeDialogInit failed");
     CHECK(sceCommonDialogIsRunning() == 1, "the IME is not reported as running");
+    CHECK(sceImeDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_RUNNING,
+          "the IME did not start running");
+    for (int i = 0; i < 4; i++)
+        sceCommonDialogUpdate(NULL);
+    usleep(1100000);
     CHECK(sceImeDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_FINISHED,
           "the IME did not finish");
     CHECK(input_text[0] == 'h' && input_text[4] == 'o', "the initial text was not copied");
