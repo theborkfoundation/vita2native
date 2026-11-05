@@ -1,0 +1,162 @@
+/*
+ * Exercises the diagnostic SceNet surface added on top of the BSD sockets:
+ * socket introspection, statistics, emulation parameters, message vectors and
+ * the dump API.
+ */
+
+#include <arpa/inet.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+#include <psp2/types.h>
+#include <psp2/net/net.h>
+
+#include "module.h"
+
+int sceNetSocket(const char *name, int domain, int type, int protocol);
+int sceNetSocketClose(int s);
+int sceNetBind(int s, const SceNetSockaddr *addr, unsigned int addrlen);
+int sceNetGetsockname(int s, SceNetSockaddr *name, unsigned int *namelen);
+int sceNetSendmsg(int s, const SceNetMsghdr *msg, int flags);
+int sceNetRecvmsg(int s, SceNetMsghdr *msg, int flags);
+int sceNetGetSockInfo(int s, SceNetSockInfo *info, int n, int flags);
+int sceNetGetSockIdInfo(SceNetFdSet *fds, int sockinfo_flags, int flags);
+int sceNetGetStatisticsInfo(SceNetStatisticsInfo *info, int flags);
+int sceNetEmulationSet(SceNetEmulationParam *param, int flags);
+int sceNetEmulationGet(SceNetEmulationParam *param, int flags);
+int sceNetSetDnsInfo(SceNetDnsInfo *info, int flags);
+int sceNetShowIfconfig(void *buffer, int length);
+int sceNetShowRoute(void);
+int sceNetShowNetstat(void);
+int sceNetSocketAbort(int s, int flags);
+int sceNetDumpCreate(const char *name, int length, int flags);
+int sceNetDumpRead(int id, void *buffer, int length, int *flags);
+int sceNetDumpDestroy(int id);
+int sceNetDumpAbort(int id, int flags);
+
+#define CHECK(cond, message)                                                                       \
+    do {                                                                                           \
+        if (!(cond)) {                                                                             \
+            printf("net_smoke: %s (line %d)\n", message, __LINE__);                                \
+            return 1;                                                                              \
+        }                                                                                          \
+    } while (0)
+
+static void make_addr(SceNetSockaddr *addr, unsigned int port, unsigned int ip)
+{
+    uint16_t net_port = htons((uint16_t)port);
+    uint32_t net_ip = htonl(ip);
+
+    memset(addr, 0, sizeof(*addr));
+    addr->sa_len = sizeof(SceNetSockaddrIn);
+    addr->sa_family = SCE_NET_AF_INET;
+    memcpy(&addr->sa_data[0], &net_port, sizeof(net_port));
+    memcpy(&addr->sa_data[2], &net_ip, sizeof(net_ip));
+}
+
+int main(void)
+{
+    SceNetEmulationParam emulation;
+    SceNetStatisticsInfo statistics;
+    SceNetSockaddr local;
+    SceNetSockInfo info;
+    SceNetFdSet fdset;
+    SceNetDnsInfo dns;
+    SceNetMsghdr msg;
+    SceNetIovec iov[2];
+    int receiver, sender;
+    unsigned int addr_len;
+    const char *part1 = "hello ";
+    const char *part2 = "net";
+    char buf1[16] = { 0 };
+    char buf2[16] = { 0 };
+    int dump;
+    int ret;
+
+    receiver = sceNetSocket("receiver", SCE_NET_AF_INET, SCE_NET_SOCK_DGRAM, 0);
+    CHECK(receiver >= 0, "could not create the receiver socket");
+
+    make_addr(&local, 0, INADDR_LOOPBACK);
+    CHECK(sceNetBind(receiver, &local, sizeof(local)) == 0, "bind failed");
+
+    addr_len = sizeof(local);
+    memset(&local, 0, sizeof(local));
+    CHECK(sceNetGetsockname(receiver, &local, &addr_len) == 0, "getsockname failed");
+    CHECK(local.sa_family == SCE_NET_AF_INET, "getsockname returned the wrong family");
+
+    memset(&info, 0, sizeof(info));
+    CHECK(sceNetGetSockInfo(receiver, &info, 1, 0) == 1, "GetSockInfo did not report a socket");
+    CHECK(info.s == receiver, "GetSockInfo reported the wrong descriptor");
+    CHECK(info.socket_type == SCE_NET_SOCK_DGRAM, "GetSockInfo reported the wrong type");
+    CHECK(info.local_port != 0, "GetSockInfo did not report the bound port");
+    CHECK(info.flags & SCE_NET_SOCKINFO_F_SELF, "GetSockInfo did not mark the owner");
+
+    CHECK(sceNetGetSockInfo(-1, &info, 1, 0) == 1, "GetSockInfo enumeration failed");
+
+    memset(&fdset, 0, sizeof(fdset));
+    CHECK(sceNetGetSockIdInfo(&fdset, 0, 0) == 0, "GetSockIdInfo failed");
+    CHECK(fdset.bits[receiver / 32] & (1u << (receiver % 32)),
+          "GetSockIdInfo did not report the socket");
+
+    CHECK(sceNetGetStatisticsInfo(&statistics, 0) == 0, "GetStatisticsInfo failed");
+    CHECK(statistics.libnet_mem_free_size > 0, "statistics reported no memory");
+
+    memset(&emulation, 0, sizeof(emulation));
+    emulation.version = 1;
+    emulation.seed = 0x1234;
+    CHECK(sceNetEmulationSet(&emulation, 0) == 0, "EmulationSet failed");
+    memset(&emulation, 0, sizeof(emulation));
+    CHECK(sceNetEmulationGet(&emulation, 0) == 0, "EmulationGet failed");
+    CHECK(emulation.seed == 0x1234, "the emulation parameters did not round-trip");
+
+    memset(&dns, 0, sizeof(dns));
+    CHECK(sceNetSetDnsInfo(&dns, 0) == 0, "SetDnsInfo failed");
+    CHECK(sceNetShowIfconfig(NULL, 0) == 0, "ShowIfconfig failed");
+    CHECK(sceNetShowRoute() == 0, "ShowRoute failed");
+    CHECK(sceNetShowNetstat() == 0, "ShowNetstat failed");
+
+    sender = sceNetSocket("sender", SCE_NET_AF_INET, SCE_NET_SOCK_DGRAM, 0);
+    CHECK(sender >= 0, "could not create the sender socket");
+
+    iov[0].iov_base = (void *)part1;
+    iov[0].iov_len = (unsigned int)strlen(part1);
+    iov[1].iov_base = (void *)part2;
+    iov[1].iov_len = (unsigned int)strlen(part2);
+
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_name = &local;
+    msg.msg_namelen = sizeof(local);
+    msg.msg_iov = iov;
+    msg.msg_iovlen = 2;
+
+    ret = sceNetSendmsg(sender, &msg, 0);
+    CHECK(ret == (int)(strlen(part1) + strlen(part2)), "Sendmsg returned the wrong length");
+
+    iov[0].iov_base = buf1;
+    iov[0].iov_len = (unsigned int)strlen(part1);
+    iov[1].iov_base = buf2;
+    iov[1].iov_len = sizeof(buf2);
+
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_iov = iov;
+    msg.msg_iovlen = 2;
+
+    ret = sceNetRecvmsg(receiver, &msg, 0);
+    CHECK(ret == (int)(strlen(part1) + strlen(part2)), "Recvmsg returned the wrong length");
+    CHECK(memcmp(buf1, part1, strlen(part1)) == 0, "the first message vector was corrupted");
+    CHECK(memcmp(buf2, part2, strlen(part2)) == 0, "the second message vector was corrupted");
+
+    dump = sceNetDumpCreate("smoke", 64, 0);
+    CHECK(dump >= 0, "DumpCreate failed");
+    CHECK(sceNetDumpRead(dump, buf1, sizeof(buf1), NULL) == 0, "DumpRead returned data");
+    CHECK(sceNetDumpDestroy(dump) == 0, "DumpDestroy failed");
+    CHECK(sceNetDumpAbort(dump, 0) == 0, "DumpAbort failed");
+
+    CHECK(sceNetSocketAbort(sender, 0) == 0, "SocketAbort failed");
+    CHECK(sceNetSocketClose(sender) == 0, "close sender failed");
+    CHECK(sceNetSocketClose(receiver) == 0, "close receiver failed");
+
+    puts("net_smoke: ok");
+    return 0;
+}

@@ -289,3 +289,18 @@ EXPORT(SceSysmem, 0xD6CA56CA, int, sceKernelCloseVMDomain, void)
 {
     return 0;
 }
+
+/*
+ * Buddy-allocator and sub-budget introspection. The signatures are not public
+ * and titles only use them for diagnostics, so report the feature as invalid
+ * rather than writing an unknown output layout.
+ */
+EXPORT(SceSysmem, 0xEC636BCB, int, sceKernelAllocUnmapMemBlock, void)
+{
+    return SCE_KERNEL_ERROR_INVALID_ARGUMENT;
+}
+
+EXPORT(SceSysmem, 0x832B4A65, int, sceKernelGetSubbudgetInfo, void)
+{
+    return SCE_KERNEL_ERROR_INVALID_ARGUMENT;
+}

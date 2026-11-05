@@ -397,6 +397,15 @@ if(BUILD_TESTING)
     target_link_libraries(sqlite_smoke PRIVATE pthread m)
     add_test(NAME sqlite_smoke COMMAND sqlite_smoke)
 
+    add_executable(net_smoke
+        tests/net_smoke.c
+        source/modules/SceNet.c
+    )
+    target_include_directories(net_smoke PRIVATE include external/vita-headers/include)
+    target_compile_definitions(net_smoke PRIVATE _GNU_SOURCE=1)
+    target_link_libraries(net_smoke PRIVATE pthread m)
+    add_test(NAME net_smoke COMMAND net_smoke)
+
     add_executable(ngs_smoke
         tests/ngs_smoke.c
         source/modules/SceNgs.c

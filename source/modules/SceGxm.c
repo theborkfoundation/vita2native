@@ -5294,6 +5294,31 @@ EXPORT(SceGxmInternalForVsh, 0xA04F5FAC, int, sceGxmVshInitialize,
     return sceGxmInitialize(params);
 }
 
+/*
+ * Cross-process sync objects only exist between the shell and a title. There
+ * is no shell process on the host, so the VSH-side entry points report that
+ * the feature is unavailable instead of returning dangling handles.
+ */
+EXPORT(SceGxmInternalForVsh, 0x2A956594, int, sceGxmVshSyncObjectCreate, void)
+{
+    return SCE_GXM_ERROR_UNSUPPORTED;
+}
+
+EXPORT(SceGxmInternalForVsh, 0xAD3FE572, int, sceGxmVshSyncObjectOpen, void)
+{
+    return SCE_GXM_ERROR_UNSUPPORTED;
+}
+
+EXPORT(SceGxmInternalForVsh, 0xBEB4F93D, int, sceGxmVshSyncObjectClose, void)
+{
+    return SCE_GXM_ERROR_UNSUPPORTED;
+}
+
+EXPORT(SceGxmInternalForVsh, 0x9B8FC52F, int, sceGxmVshSyncObjectDestroy, void)
+{
+    return SCE_GXM_ERROR_UNSUPPORTED;
+}
+
 DECLARE_LIBRARY(SceGxm, 0xf76b66bd);
 DECLARE_LIBRARY(SceGxmInternalForVsh, 0xc98aeb79);
 

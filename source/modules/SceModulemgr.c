@@ -506,4 +506,19 @@ EXPORT(SceModulemgr, 0x6CED1F63, int, sceKernelInhibitLoadingModule, SceUInt16 m
     return 0;
 }
 
+/*
+ * The loader does not retain its export-library table after relocating a
+ * module, so there is nothing reliable to report here. Fail like the firmware
+ * does for an unknown library instead of fabricating a descriptor.
+ */
+EXPORT(SceModulemgr, 0xEAEB1312, int, sceKernelGetLibraryInfoByNID, SceUID modid,
+       SceNID libnid, SceKernelLibraryInfo *info)
+{
+    (void)modid;
+    (void)libnid;
+    (void)info;
+
+    return SCE_KERNEL_ERROR_MODULEMGR_NOENT;
+}
+
 DECLARE_LIBRARY(SceModulemgr, 0xeaed1616);

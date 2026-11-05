@@ -19,6 +19,7 @@
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #include "module.h"
@@ -637,4 +638,289 @@ EXPORT(SceNet, 0x92D3E767, int, sceNetEpollWaitCB, int eid, SceNetEpollEvent *ev
        int max_events, int timeout)
 {
     return sceNetEpollWait(eid, events, max_events, timeout);
+}
+
+/* ------------------------------------------------------- introspection */
+
+/*
+ * Fills one SceNetSockInfo from the host descriptor. `fd` is a host socket
+ * descriptor because sceNetSocket() returns it directly.
+ */
+static void fill_sock_info(int fd, SceNetSockInfo *info)
+{
+    struct sockaddr_in addr;
+    socklen_t addr_len;
+    int value;
+    socklen_t value_len;
+
+    memset(info, 0, sizeof(*info));
+    info->pid = 1;
+    info->s = fd;
+    info->flags = SCE_NET_SOCKINFO_F_SELF;
+
+    value_len = sizeof(value);
+    if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &value, &value_len) == 0)
+        info->socket_type = (char)value;
+
+    value_len = sizeof(value);
+    if (getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &value, &value_len) == 0 && value) {
+        info->state = SCE_NET_SOCKINFO_STATE_LISTEN;
+    } else {
+        info->state = SCE_NET_SOCKINFO_STATE_OPENED;
+    }
+
+    addr_len = sizeof(addr);
+    if (getsockname(fd, (struct sockaddr *)&addr, &addr_len) == 0 && addr.sin_family == AF_INET) {
+        memcpy(&info->local_adr, &addr.sin_addr, 4);
+        info->local_port = ntohs(addr.sin_port);
+    }
+
+    addr_len = sizeof(addr);
+    if (getpeername(fd, (struct sockaddr *)&addr, &addr_len) == 0 && addr.sin_family == AF_INET) {
+        memcpy(&info->remote_adr, &addr.sin_addr, 4);
+        info->remote_port = ntohs(addr.sin_port);
+        info->state = SCE_NET_SOCKINFO_STATE_ESTABLISHED;
+    }
+}
+
+EXPORT(SceNet, 0xB1AF6840, int, sceNetGetSockInfo, int s, SceNetSockInfo *info, int n, int flags)
+{
+    int count = 0;
+
+    (void)flags;
+
+    if (!info || n <= 0)
+        return -1;
+
+    if (s >= 0) {
+        fill_sock_info(s, &info[0]);
+        return 1;
+    }
+
+    for (int fd = 0; fd < 1024 && count < n; fd++) {
+        int type;
+        socklen_t type_len = sizeof(type);
+
+        if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &type_len) != 0)
+            continue;
+        fill_sock_info(fd, &info[count]);
+        count++;
+    }
+
+    return count;
+}
+
+EXPORT(SceNet, 0x138CF1D6, int, sceNetGetSockIdInfo, SceNetFdSet *fds, int sockinfo_flags,
+       int flags)
+{
+    (void)sockinfo_flags;
+    (void)flags;
+
+    if (!fds)
+        return -1;
+
+    memset(fds, 0, sizeof(*fds));
+    for (int fd = 0; fd < 1024; fd++) {
+        int type;
+        socklen_t type_len = sizeof(type);
+
+        if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &type_len) != 0)
+            continue;
+        fds->bits[fd / 32] |= 1u << (fd % 32);
+    }
+
+    return 0;
+}
+
+EXPORT(SceNet, 0xA86F8FE5, int, sceNetGetStatisticsInfo, SceNetStatisticsInfo *info, int flags)
+{
+    (void)flags;
+
+    if (!info)
+        return -1;
+
+    memset(info, 0, sizeof(*info));
+    info->kernel_mem_free_size = 0x100000;
+    info->kernel_mem_free_min = 0x100000;
+    info->libnet_mem_free_size = 0x100000;
+    info->libnet_mem_free_min = 0x100000;
+
+    return 0;
+}
+
+/* ---------------------------------------------------------- send/recvmsg */
+
+#define SCE_NET_MAX_IOV 16
+
+static int sce_msghdr_to_host(const SceNetMsghdr *msg, struct msghdr *host,
+                              struct iovec *iov, struct sockaddr_storage *addr,
+                              socklen_t *addr_len)
+{
+    if (!msg || msg->msg_iovlen < 0 || msg->msg_iovlen > SCE_NET_MAX_IOV)
+        return -1;
+
+    memset(host, 0, sizeof(*host));
+    memset(iov, 0, sizeof(*iov) * SCE_NET_MAX_IOV);
+
+    if (msg->msg_iov && msg->msg_iovlen > 0) {
+        for (int i = 0; i < msg->msg_iovlen; i++) {
+            iov[i].iov_base = msg->msg_iov[i].iov_base;
+            iov[i].iov_len = msg->msg_iov[i].iov_len;
+        }
+        host->msg_iov = iov;
+        host->msg_iovlen = (size_t)msg->msg_iovlen;
+    }
+
+    if (msg->msg_name && msg->msg_namelen >= sizeof(SceNetSockaddr)) {
+        if (sce_to_host_addr((const SceNetSockaddr *)msg->msg_name, addr, addr_len) < 0)
+            return -1;
+        host->msg_name = addr;
+        host->msg_namelen = *addr_len;
+    }
+
+    return 0;
+}
+
+EXPORT(SceNet, 0x99C579AE, int, sceNetSendmsg, int s, const SceNetMsghdr *msg, int flags)
+{
+    struct sockaddr_storage addr;
+    struct iovec iov[SCE_NET_MAX_IOV];
+    struct msghdr host;
+    socklen_t addr_len = 0;
+
+    if (sce_msghdr_to_host(msg, &host, iov, &addr, &addr_len) < 0)
+        return -1;
+
+    return (int)sendmsg(s, &host, sce_to_host_flags(flags));
+}
+
+EXPORT(SceNet, 0xDE94C6FE, int, sceNetRecvmsg, int s, SceNetMsghdr *msg, int flags)
+{
+    struct sockaddr_storage addr;
+    struct iovec iov[SCE_NET_MAX_IOV];
+    struct msghdr host;
+    socklen_t addr_len = 0;
+    int ret;
+
+    if (sce_msghdr_to_host(msg, &host, iov, &addr, &addr_len) < 0)
+        return -1;
+
+    ret = (int)recvmsg(s, &host, sce_to_host_flags(flags));
+    if (ret >= 0) {
+        if (host.msg_namelen > 0) {
+            SceNetSockaddr sce_addr;
+            unsigned int sce_len = 0;
+
+            host_to_sce_addr((const struct sockaddr *)&addr, &sce_addr, &sce_len);
+            if (msg->msg_name && msg->msg_namelen >= sizeof(sce_addr)) {
+                memcpy(msg->msg_name, &sce_addr, sizeof(sce_addr));
+                msg->msg_namelen = sce_len;
+            }
+        }
+        msg->msg_flags = host.msg_flags;
+    }
+
+    return ret;
+}
+
+/* --------------------------------------------------------- diagnostics */
+
+static SceNetEmulationParam g_net_emulation;
+
+EXPORT(SceNet, 0x561DFD03, int, sceNetEmulationSet, SceNetEmulationParam *param, int flags)
+{
+    (void)flags;
+
+    if (!param)
+        return -1;
+
+    g_net_emulation = *param;
+    g_net_emulation.result = 0;
+    return 0;
+}
+
+EXPORT(SceNet, 0xAE3F4AC6, int, sceNetEmulationGet, SceNetEmulationParam *param, int flags)
+{
+    (void)flags;
+
+    if (!param)
+        return -1;
+
+    *param = g_net_emulation;
+    param->result = 0;
+    return 0;
+}
+
+EXPORT(SceNet, 0x658B903B, int, sceNetShowIfconfig, void *buffer, int length)
+{
+    (void)buffer;
+    (void)length;
+    return 0;
+}
+
+EXPORT(SceNet, 0x6AB3B74B, int, sceNetShowRoute, void)
+{
+    return 0;
+}
+
+EXPORT(SceNet, 0x338EDC2E, int, sceNetShowNetstat, void)
+{
+    return 0;
+}
+
+EXPORT(SceNet, 0xD62EF218, int, sceNetSetDnsInfo, SceNetDnsInfo *info, int flags)
+{
+    (void)info;
+    (void)flags;
+
+    /* The host resolver is used, so the Vita DNS override is accepted and
+     * ignored. */
+    return 0;
+}
+
+EXPORT(SceNet, 0x891C1B9B, int, sceNetSocketAbort, int s, int flags)
+{
+    (void)flags;
+
+    shutdown(s, SHUT_RDWR);
+    return 0;
+}
+
+/* --------------------------------------------------------------- dumps */
+
+static int g_next_dump_id = 1;
+
+EXPORT(SceNet, 0xAFF9FA4D, int, sceNetDumpCreate, const char *name, int length, int flags)
+{
+    (void)name;
+    (void)length;
+    (void)flags;
+
+    return g_next_dump_id++;
+}
+
+EXPORT(SceNet, 0x82DDCF63, int, sceNetDumpDestroy, int id)
+{
+    (void)id;
+    return 0;
+}
+
+EXPORT(SceNet, 0x3B24E75F, int, sceNetDumpAbort, int id, int flags)
+{
+    (void)id;
+    (void)flags;
+    return 0;
+}
+
+EXPORT(SceNet, 0x04042925, int, sceNetDumpRead, int id, void *buffer, int length, int *flags)
+{
+    (void)id;
+    (void)buffer;
+    (void)length;
+
+    if (flags)
+        *flags = 0;
+
+    /* No captures are recorded, so there is never a packet to return. */
+    return 0;
 }

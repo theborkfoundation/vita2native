@@ -377,6 +377,68 @@ EXPORT(SceDisplay, 0x9686859E, int, sceDisplayGetVcountInternal, int display)
     return sceDisplayGetVcount();
 }
 
+/* Internal/compat aliases used by the shell and media applications. */
+EXPORT(SceDisplayUser, 0x89F86A1E, int, sceDisplaySetFrameBufInternal, int buffer_index, int unk,
+       const SceDisplayFrameBuf *pParam, SceDisplaySetBufSync sync)
+{
+    (void)unk;
+    if (buffer_index != 0)
+        return 0;
+    return sceDisplaySetFrameBuf(pParam, sync);
+}
+
+EXPORT(SceDisplay, 0x7A8CB78E, int, _sceDisplaySetFrameBufInternal, int buffer_index, int unk,
+       const SceDisplayFrameBuf *pParam, SceDisplaySetBufSync sync)
+{
+    (void)unk;
+    if (buffer_index != 0)
+        return 0;
+    return sceDisplaySetFrameBuf(pParam, sync);
+}
+
+EXPORT(SceDisplayUser, 0x8C36B628, int, sceDisplaySetFrameBufForCompat,
+       const SceDisplayFrameBuf *pParam, SceDisplaySetBufSync sync)
+{
+    return sceDisplaySetFrameBuf(pParam, sync);
+}
+
+EXPORT(SceDisplay, 0x45BCB941, int, _sceDisplaySetFrameBufForCompat,
+       const SceDisplayFrameBuf *pParam, SceDisplaySetBufSync sync)
+{
+    return sceDisplaySetFrameBuf(pParam, sync);
+}
+
+EXPORT(SceDisplayUser, 0x5213F74B, int, sceDisplayGetFrameBufInternal, SceDisplayFrameBuf *pParam,
+       SceDisplaySetBufSync sync)
+{
+    return sceDisplayGetFrameBuf(pParam, sync);
+}
+
+EXPORT(SceDisplay, 0x86A8E436, int, _sceDisplayGetFrameBufInternal, SceDisplayFrameBuf *pParam,
+       SceDisplaySetBufSync sync)
+{
+    return sceDisplayGetFrameBuf(pParam, sync);
+}
+
+static int display_get_maximum_resolution(int *width, int *height)
+{
+    return sceDisplayGetMaximumFrameBufResolution(width, height);
+}
+
+EXPORT_FUNC(SceDisplayUser, 0x8848ADDD, display_get_maximum_resolution)
+
+EXPORT(SceDisplayUser, 0x0BFB78C6, int, sceDisplayGetResolutionInfoInternal, void *info)
+{
+    (void)info;
+    return 0;
+}
+
+EXPORT(SceDisplay, 0xFEFEB240, int, _sceDisplayGetResolutionInfoInternal, void *info)
+{
+    (void)info;
+    return 0;
+}
+
 DECLARE_LIBRARY(SceDisplay, 0x5ed8f994);
 DECLARE_LIBRARY(SceDisplayUser, 0x4faacd11);
 

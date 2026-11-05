@@ -241,3 +241,49 @@ EXPORT(SceCtrl, 0xDBCAA0C9, int, sceCtrlSetActuator, int port, const SceCtrlActu
     return 0;
 }
 
+/*
+ * Analog-stick calibration queries. These only affect diagnostic tools; the
+ * host pad backend applies no dead zone of its own.
+ */
+static int g_analog_stick_check_mode;
+
+EXPORT(SceCtrl, 0xB2C98244, int, sceCtrlSetAnalogStickCheckMode, int port, int mode)
+{
+    (void)port;
+    g_analog_stick_check_mode = mode;
+    return 0;
+}
+
+EXPORT(SceCtrl, 0x35BCD3BB, int, sceCtrlGetAnalogStickCheckMode, int port, int *mode)
+{
+    (void)port;
+    if (mode)
+        *mode = g_analog_stick_check_mode;
+    return 0;
+}
+
+EXPORT(SceCtrl, 0xFB12A0A7, int, sceCtrlSetAnalogStickCheckTarget, int port, int x, int y)
+{
+    (void)port;
+    (void)x;
+    (void)y;
+    return 0;
+}
+
+EXPORT(SceCtrl, 0xD01DE63A, int, sceCtrlGetAnalogStickCheckTarget, int port, int *x, int *y)
+{
+    (void)port;
+    if (x)
+        *x = 0;
+    if (y)
+        *y = 0;
+    return 0;
+}
+
+EXPORT(SceCtrl, 0xA2A56685, int, sceCtrlGetProcessStatus, int *status)
+{
+    if (status)
+        *status = 0;
+    return 0;
+}
+

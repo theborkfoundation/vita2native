@@ -49,4 +49,40 @@ EXPORT(SceSharedFb, 0x819954FB, int, sceSharedFbGetInfo, SceUID fb_id, SceShared
     return SCE_APPMGR_ERROR_INVALID;
 }
 
+/* VSH-only entry points; the host has no shared framebuffer. */
+EXPORT(SceSharedFb, 0xD6C643B5, int, sceSharedFbCreate, void)
+{
+    return SCE_APPMGR_ERROR_INVALID;
+}
+
+EXPORT(SceSharedFb, 0xBE5A1A81, int, sceSharedFbDelete, void)
+{
+    return SCE_APPMGR_ERROR_INVALID;
+}
+
+EXPORT(SceSharedFb, 0x61FEEDFA, int, sceSharedFbGetRenderingInfo, void)
+{
+    return SCE_APPMGR_ERROR_INVALID;
+}
+
+EXPORT(SceSharedFb, 0xAC49FC1D, int, sceSharedFbGetShellRenderPort, void)
+{
+    return SCE_APPMGR_ERROR_INVALID;
+}
+
+EXPORT(SceSharedFb, 0x3889ACF8, int, sceSharedFbUpdateProcess, void)
+{
+    return 0;
+}
+
+EXPORT(SceSharedFb, 0xF9754AD9, int, sceSharedFbUpdateProcessBegin, void)
+{
+    return 0;
+}
+
+EXPORT(SceSharedFb, 0x565A9AB6, int, sceSharedFbUpdateProcessEnd, void)
+{
+    return 0;
+}
+
 DECLARE_LIBRARY(SceSharedFb, 0x32a0442e);

@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -415,6 +416,23 @@ EXPORT(SceAppUtilCache, 0x0AA56143, int, sceAppUtilCacheMount, void)
 
 EXPORT(SceAppUtilCache, 0x72D26BF4, int, sceAppUtilCacheUmount, void)
 {
+    return 0;
+}
+
+EXPORT(SceAppUtilCache, 0x1171B736, int, sceAppUtilCacheGetDevInfo, const char *dev,
+       uint64_t *max_size, uint64_t *free_size)
+{
+    struct statvfs vfs;
+    char path[PATH_MAX];
+
+    if (!dev || host_fs_resolve_path(dev, path, sizeof(path)) < 0 || statvfs(path, &vfs) != 0)
+        return SCE_APPUTIL_ERROR_PARAMETER;
+
+    if (max_size)
+        *max_size = (uint64_t)vfs.f_blocks * vfs.f_frsize;
+    if (free_size)
+        *free_size = (uint64_t)vfs.f_bavail * vfs.f_frsize;
+
     return 0;
 }
 
