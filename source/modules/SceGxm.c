@@ -2691,11 +2691,26 @@ static uint32_t gxm_color_format_bytes(SceGxmColorFormat format)
     }
 }
 
+static uint32_t gxm_spread_bits(uint32_t value)
+{
+    value &= 0x0000ffffu;
+    value = (value | (value << 8)) & 0x00ff00ffu;
+    value = (value | (value << 4)) & 0x0f0f0f0fu;
+    value = (value | (value << 2)) & 0x33333333u;
+    value = (value | (value << 1)) & 0x55555555u;
+    return value;
+}
+
+static uint32_t gxm_morton2(uint32_t x, uint32_t y)
+{
+    return gxm_spread_bits(x) | (gxm_spread_bits(y) << 1);
+}
+
 /*
  * Byte offset of a colour surface pixel. Tiled surfaces use the same 32x32
- * row-major tile layout as SCE_GXM_TEXTURE_TILED, so a surface written here
- * can be sampled back through a tiled texture. Swizzled colour surfaces are
- * still treated as linear.
+ * row-major tile layout as SCE_GXM_TEXTURE_TILED, and square power-of-two
+ * swizzled surfaces use the Morton order of SCE_GXM_TEXTURE_SWIZZLED, so a
+ * surface written here can be sampled back through the matching texture.
  */
 static size_t gxm_color_pixel_offset(const SceGxmColorSurfaceInner *surface, uint32_t x,
                                      uint32_t y, uint32_t bytes_per_pixel)
@@ -2709,6 +2724,11 @@ static size_t gxm_color_pixel_offset(const SceGxmColorSurfaceInner *surface, uin
 
         return (size_t)index * bytes_per_pixel;
     }
+
+    if (surface->surfaceType == SCE_GXM_COLOR_SURFACE_SWIZZLED &&
+        surface->width == surface->height &&
+        (surface->width & (surface->width - 1)) == 0)
+        return (size_t)gxm_morton2(x, y) * bytes_per_pixel;
 
     return ((size_t)y * stride + x) * bytes_per_pixel;
 }

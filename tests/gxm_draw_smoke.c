@@ -697,6 +697,45 @@ int main(int argc, char **argv)
         printf("tiled colour surface: ok\n");
     }
 
+    /* 6b2: swizzled colour surface round-trips through a swizzled texture. */
+    {
+        SceGxmColorSurface swizzled_surface;
+        SceGxmTexture swizzled_texture;
+        uint8_t *swizzled_pixels = low_alloc(WIDTH * HEIGHT * 4);
+
+        assert(swizzled_pixels);
+        assert(sceGxmColorSurfaceInit(&swizzled_surface, SCE_GXM_COLOR_FORMAT_A8B8G8R8,
+                                      SCE_GXM_COLOR_SURFACE_SWIZZLED,
+                                      SCE_GXM_COLOR_SURFACE_SCALE_NONE,
+                                      SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, WIDTH, HEIGHT, WIDTH,
+                                      swizzled_pixels) == 0);
+
+        set_solid_color(solid_pixels, 5, 200, 77, 255);
+        begin_frame_with_surface(&scene, &swizzled_surface);
+        draw_quad(&scene, &solid_texture);
+        end_frame(&scene);
+
+        assert(sceGxmTextureInitSwizzled(&swizzled_texture, swizzled_pixels,
+                                         SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, WIDTH, HEIGHT,
+                                         0) == 0);
+        sceGxmTextureSetMinFilter(&swizzled_texture, SCE_GXM_TEXTURE_FILTER_POINT);
+        sceGxmTextureSetMagFilter(&swizzled_texture, SCE_GXM_TEXTURE_FILTER_POINT);
+        sceGxmTextureSetUAddrMode(&swizzled_texture, SCE_GXM_TEXTURE_ADDR_CLAMP);
+        sceGxmTextureSetVAddrMode(&swizzled_texture, SCE_GXM_TEXTURE_ADDR_CLAMP);
+
+        begin_frame(&scene);
+        draw_quad(&scene, &swizzled_texture);
+        end_frame(&scene);
+
+        if (!pixel_is(scene.pixels, WIDTH / 2, HEIGHT / 2, 5, 200, 77, 255)) {
+            const uint8_t *p = (const uint8_t *)&scene.pixels[(HEIGHT / 2) * WIDTH + WIDTH / 2];
+            fprintf(stderr, "swizzled surface round-trip gave %02x %02x %02x %02x\n", p[0], p[1],
+                    p[2], p[3]);
+            goto done;
+        }
+        printf("swizzled colour surface: ok\n");
+    }
+
     /* 6c: 4x multisampled render target resolves into the colour surface. */
     {
         SceGxmRenderTarget *msaa_target = NULL;
