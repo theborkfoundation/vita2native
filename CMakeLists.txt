@@ -95,6 +95,7 @@ add_executable(vita2native
     source/modules/SceKernelThreadMgr.c
     source/modules/SceKernelRuntime.c
     source/modules/SceKernelLocks.c
+    source/modules/SceKernelTimer.c
     source/modules/SceKernelSync.c
     source/modules/SceLibKernel.c
     source/modules/SceIoAsync.c

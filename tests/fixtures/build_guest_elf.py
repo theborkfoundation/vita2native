@@ -1413,6 +1413,197 @@ def build_kernel_locks_elf():
     return assemble_elf(rx, rw, rela, LK_MODINFO)
 
 
+# --- SceKernel timer fixture -----------------------------------------------
+
+TM_STUB_BASE = 0x200
+TM_LIB1_NAME = 0x280
+TM_LIB2_NAME = 0x290
+TM_MODINFO = 0x2A0
+TM_IMPORT1 = 0x300
+TM_IMPORT2 = 0x324
+TM_NIDS1 = 0x350
+TM_ENTRIES1 = 0x370
+TM_NIDS2 = 0x390
+TM_ENTRIES2 = 0x3B0
+TM_RX_SIZE = 0x3D0
+
+TM_LIB1 = b"SceLibKernel\0"
+TM_LIB2 = b"SceThreadmgr\0"
+TM_LIB1_NID = 0xCAE9ACE6
+TM_LIB2_NID = 0x859A24B1
+
+TM_KERNEL_FUNCS = [
+    0x2255B2A5,  # sceKernelCreateTimer
+    0x621D293B,  # sceKernelSetTimerEvent
+    0x75B1EB3E,  # sceKernelGetTimerEventRemainingTime
+    0x9CCF768C,  # sceKernelCancelTimer
+]
+
+TM_THREADMGR_FUNCS = [
+    0x48091E0C,  # sceKernelStartTimer
+    0x869E9F20,  # sceKernelStopTimer
+    0x273B4A4D,  # sceKernelSetTimerTimeWide
+    0x3EFD3165,  # sceKernelGetTimerTimeWide
+    0x5DBC1960,  # sceKernelGetTimerBaseWide
+    0xAB1E42C4,  # sceKernelDeleteTimer
+]
+
+TM_RW_UID = 0x000
+TM_RW_INTERVAL = 0x008
+TM_RW_REMAINING = 0x010
+TM_RW_NAME = 0x020
+TM_RW_SIZE = 0x040
+
+
+def build_kernel_timer_elf():
+    """Guest ELF for timer create/start/set/get/event/cancel/delete."""
+    code = []
+    rx_relocs = []
+
+    def emit(word):
+        code.append(word & 0xFFFFFFFF)
+
+    def movw_movt_rw(rd, offset):
+        base = len(code) * 4
+        emit(arm_movw(rd, 0))
+        emit(arm_movt(rd, 0))
+        rx_relocs.append(encode_rela(0, 1, base, offset, R_ARM_MOVW_ABS_NC))
+        rx_relocs.append(encode_rela(0, 1, base + 4, offset, R_ARM_MOVT_ABS))
+
+    def call(index):
+        emit(arm_bl(len(code) * 4, TM_STUB_BASE + index * 12))
+
+    def load_rw(rd, offset):
+        movw_movt_rw(rd, offset)
+        emit(0xE5900000 | (rd << 16) | (rd << 12))
+
+    def check(bit):
+        emit(0xE3500000)             # cmp r0, #0
+        emit(0x13844000 | arm_encode_imm(bit))  # orrne r4, r4, #bit
+
+    def check_nonzero(bit):
+        emit(0xE3500000)             # cmp r0, #0
+        emit(0x03844000 | arm_encode_imm(bit))  # orreq r4, r4, #bit
+
+    emit(0xE92D4010)                 # push {r4, lr}
+    emit(arm_mov_imm(4, 0))          # mov r4, #0
+
+    # timer = sceKernelCreateTimer("tmr", 0, NULL)
+    movw_movt_rw(0, TM_RW_NAME)
+    emit(arm_mov_imm(1, 0))
+    emit(arm_mov_imm(2, 0))
+    call(0)
+    movw_movt_rw(1, TM_RW_UID)
+    emit(0xE5810000)
+    check_nonzero(1)
+
+    # start, set time 5000 us, get time >= 5000
+    load_rw(0, TM_RW_UID)
+    call(4)
+    check(2)
+    load_rw(0, TM_RW_UID)
+    emit(arm_mov_imm(1, 0))          # padding
+    emit(arm_movw(2, 5000))
+    emit(arm_mov_imm(3, 0))
+    call(6)
+    check(4)
+    load_rw(0, TM_RW_UID)
+    call(7)
+    emit(arm_movw(1, 5000))
+    emit(0xE1500001)                 # cmp r0, r1
+    emit(0x33844000 | arm_encode_imm(8))  # orrlo r4, r4, #8
+
+    # set a 1000 us repeating event and check remaining <= 1000
+    load_rw(0, TM_RW_UID)
+    emit(arm_mov_imm(1, 0))
+    movw_movt_rw(2, TM_RW_INTERVAL)
+    emit(arm_mov_imm(3, 1))
+    call(1)
+    check(16)
+    load_rw(0, TM_RW_UID)
+    movw_movt_rw(1, TM_RW_REMAINING)
+    call(2)
+    check(32)
+    load_rw(0, TM_RW_REMAINING)
+    emit(arm_movw(1, 1000))
+    emit(0xE1500001)                 # cmp r0, r1
+    emit(0x83844000 | arm_encode_imm(64))  # orrhi r4, r4, #64
+
+    # stop, base time >= 5000, cancel, delete
+    load_rw(0, TM_RW_UID)
+    call(5)
+    check(128)
+    load_rw(0, TM_RW_UID)
+    call(8)
+    emit(arm_movw(1, 5000))
+    emit(0xE1500001)
+    emit(0x33844000 | arm_encode_imm(256))
+    load_rw(0, TM_RW_UID)
+    emit(arm_mov_imm(1, 0))
+    call(3)
+    check(512)
+    load_rw(0, TM_RW_UID)
+    call(9)
+    check(1024)
+
+    emit(0xE1A00004)                 # mov r0, r4
+    emit(0xE3500000)
+    emit(0x03A0002A)                 # moveq r0, #42
+    emit(0xE8BD8010)                 # pop {r4, pc}
+
+    assert len(code) * 4 <= TM_STUB_BASE, "timer fixture code overlaps the stubs"
+
+    rx = bytearray(TM_RX_SIZE)
+    rx[:len(code) * 4] = b"".join(struct.pack("<I", w) for w in code)
+    rx[TM_LIB1_NAME:TM_LIB1_NAME + len(TM_LIB1)] = TM_LIB1
+    rx[TM_LIB2_NAME:TM_LIB2_NAME + len(TM_LIB2)] = TM_LIB2
+
+    info = bytearray(MODULE_INFO_SIZE)
+    struct.pack_into("<HH", info, 0x00, 0x0000, 0x0101)
+    info[0x04:0x04 + len(MODULE_NAME)] = MODULE_NAME
+    struct.pack_into("<I", info, 0x2C, TM_IMPORT1)
+    struct.pack_into("<I", info, 0x30, TM_IMPORT2 + IMPORT_SIZE)
+    struct.pack_into("<I", info, 0x34, 0x12345678)
+    struct.pack_into("<I", info, 0x44, 0x00000000)
+    struct.pack_into("<I", info, 0x48, 0xFFFFFFFF)
+    struct.pack_into("<I", info, 0x5C, 0x03570011)
+    rx[TM_MODINFO:TM_MODINFO + MODULE_INFO_SIZE] = info
+
+    imp1 = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp1, 0, IMPORT_SIZE, 1, 0, len(TM_KERNEL_FUNCS), 0, 0)
+    struct.pack_into("<I", imp1, IMP_LIBRARY_NID, TM_LIB1_NID)
+    rx[TM_IMPORT1:TM_IMPORT1 + IMPORT_SIZE] = imp1
+
+    imp2 = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp2, 0, IMPORT_SIZE, 1, 0, len(TM_THREADMGR_FUNCS), 0, 0)
+    struct.pack_into("<I", imp2, IMP_LIBRARY_NID, TM_LIB2_NID)
+    rx[TM_IMPORT2:TM_IMPORT2 + IMPORT_SIZE] = imp2
+
+    for i, nid in enumerate(TM_KERNEL_FUNCS):
+        struct.pack_into("<I", rx, TM_NIDS1 + i * 4, nid)
+    for i, nid in enumerate(TM_THREADMGR_FUNCS):
+        struct.pack_into("<I", rx, TM_NIDS2 + i * 4, nid)
+
+    rx_relocs.append(encode_rela(0, 0, TM_IMPORT1 + IMP_LIBRARY_NAME, TM_LIB1_NAME))
+    rx_relocs.append(encode_rela(0, 0, TM_IMPORT1 + IMP_FUNC_NID_TABLE, TM_NIDS1))
+    rx_relocs.append(encode_rela(0, 0, TM_IMPORT1 + IMP_FUNC_ENTRY_TABLE, TM_ENTRIES1))
+    rx_relocs.append(encode_rela(0, 0, TM_IMPORT2 + IMP_LIBRARY_NAME, TM_LIB2_NAME))
+    rx_relocs.append(encode_rela(0, 0, TM_IMPORT2 + IMP_FUNC_NID_TABLE, TM_NIDS2))
+    rx_relocs.append(encode_rela(0, 0, TM_IMPORT2 + IMP_FUNC_ENTRY_TABLE, TM_ENTRIES2))
+
+    for i in range(len(TM_KERNEL_FUNCS)):
+        rx_relocs.append(encode_rela(0, 0, TM_ENTRIES1 + i * 4, TM_STUB_BASE + i * 12))
+    for i in range(len(TM_THREADMGR_FUNCS)):
+        rx_relocs.append(encode_rela(0, 0, TM_ENTRIES2 + i * 4,
+                                     TM_STUB_BASE + (len(TM_KERNEL_FUNCS) + i) * 12))
+
+    rw = bytearray(TM_RW_SIZE)
+    rw[TM_RW_NAME:TM_RW_NAME + 4] = b"tmr\0"
+    struct.pack_into("<Q", rw, TM_RW_INTERVAL, 1000)
+    rela = bytearray(b"".join(rx_relocs))
+    return assemble_elf(rx, rw, rela, TM_MODINFO)
+
+
 # --- SceAppUtil fixture ----------------------------------------------------
 
 APPUTIL_STUB_BASE = 0x140
@@ -2062,6 +2253,11 @@ def main():
     with open(locks_path, "wb") as f:
         f.write(build_kernel_locks_elf())
     print(f"wrote {locks_path}")
+
+    timer_path = os.path.join(out_dir, "guest_kernel_timer.elf")
+    with open(timer_path, "wb") as f:
+        f.write(build_kernel_timer_elf())
+    print(f"wrote {timer_path}")
 
     if os.path.exists(os.path.join(shader_dir, "texture_v.gxp")) and os.path.exists(
             os.path.join(shader_dir, "texture_f.gxp")):
