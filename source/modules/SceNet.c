@@ -16,6 +16,7 @@
 #include <psp2/net/net.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -532,4 +533,108 @@ EXPORT(SceNet, 0xFEC1166D, int, sceNetClearDnsCache, int flags)
     (void)flags;
 
     return 0;
+}
+
+/* --------------------------------------------------------------- epoll */
+
+static uint32_t epoll_to_sce_events(uint32_t host_events)
+{
+    uint32_t events = 0;
+
+    if (host_events & EPOLLIN)
+        events |= SCE_NET_EPOLLIN;
+    if (host_events & EPOLLOUT)
+        events |= SCE_NET_EPOLLOUT;
+    if (host_events & EPOLLERR)
+        events |= SCE_NET_EPOLLERR;
+    if (host_events & EPOLLHUP)
+        events |= SCE_NET_EPOLLHUP;
+
+    return events;
+}
+
+static uint32_t epoll_to_host_events(uint32_t sce_events)
+{
+    uint32_t events = 0;
+
+    if (sce_events & SCE_NET_EPOLLIN)
+        events |= EPOLLIN;
+    if (sce_events & SCE_NET_EPOLLOUT)
+        events |= EPOLLOUT;
+    if (sce_events & SCE_NET_EPOLLERR)
+        events |= EPOLLERR;
+    if (sce_events & SCE_NET_EPOLLHUP)
+        events |= EPOLLHUP;
+
+    return events;
+}
+
+EXPORT(SceNet, 0xF9D102AE, int, sceNetEpollCreate, const char *name, int flags)
+{
+    int fd;
+
+    (void)name;
+    (void)flags;
+
+    fd = epoll_create1(0);
+    return fd < 0 ? -1 : fd;
+}
+
+EXPORT(SceNet, 0x7915CAF3, int, sceNetEpollDestroy, int eid)
+{
+    return close(eid) < 0 ? -1 : 0;
+}
+
+EXPORT(SceNet, 0x93FCC4E8, int, sceNetEpollAbort, int eid, int flags)
+{
+    (void)eid;
+    (void)flags;
+
+    return 0;
+}
+
+EXPORT(SceNet, 0x4C8764AC, int, sceNetEpollControl, int eid, int op, int id,
+       SceNetEpollEvent *event)
+{
+    struct epoll_event host_event;
+
+    memset(&host_event, 0, sizeof(host_event));
+    if (event) {
+        host_event.events = epoll_to_host_events(event->events);
+        host_event.data.u64 = event->data.u64;
+    }
+
+    return epoll_ctl(eid, op, id, &host_event) < 0 ? -1 : 0;
+}
+
+EXPORT(SceNet, 0x45CE337D, int, sceNetEpollWait, int eid, SceNetEpollEvent *events,
+       int max_events, int timeout)
+{
+    struct epoll_event host_events[32];
+    int host_timeout;
+    int count;
+
+    if (!events || max_events <= 0)
+        return -1;
+    if (max_events > (int)(sizeof(host_events) / sizeof(host_events[0])))
+        max_events = (int)(sizeof(host_events) / sizeof(host_events[0]));
+
+    host_timeout = timeout < 0 ? -1 : (timeout + 999) / 1000;
+    count = epoll_wait(eid, host_events, max_events, host_timeout);
+    if (count < 0)
+        return -1;
+
+    for (int i = 0; i < count; i++) {
+        memset(&events[i], 0, sizeof(events[i]));
+        events[i].events = epoll_to_sce_events(host_events[i].events);
+        events[i].data.u64 = host_events[i].data.u64;
+    }
+
+    return count;
+}
+
+EXPORT(SceNet, 0x92D3E767, int, sceNetEpollWaitCB, int eid, SceNetEpollEvent *events,
+       int max_events, int timeout)
+{
+    return sceNetEpollWait(eid, events, max_events, timeout);
 }
