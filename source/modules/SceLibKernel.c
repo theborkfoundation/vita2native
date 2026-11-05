@@ -543,3 +543,68 @@ int SceLibKernel_get_process_exit_res(void)
 {
     return atomic_load(&g_process_exit_res);
 }
+
+EXPORT(SceLibKernel, 0x52315AD7, SceSSize, sceIoPread, SceUID fd, void *buf, SceSize nbyte,
+       SceOff offset)
+{
+    VitaOpenedFile *vfile = get_opened_file_for_fd(fd);
+    long saved;
+    size_t read;
+
+    if (!vfile)
+        return SCE_ERROR_ERRNO_EBADF;
+
+    saved = ftell(vfile->fp);
+    if (fseek(vfile->fp, (long)offset, SEEK_SET) != 0)
+        return SCE_ERROR_ERRNO_EBADF;
+
+    read = fread(buf, 1, nbyte, vfile->fp);
+    if (saved >= 0)
+        fseek(vfile->fp, saved, SEEK_SET);
+
+    return (SceSSize)read;
+}
+
+EXPORT(SceLibKernel, 0x8FFFF5A8, SceSSize, sceIoPwrite, SceUID fd, const void *buf, SceSize nbyte,
+       SceOff offset)
+{
+    VitaOpenedFile *vfile = get_opened_file_for_fd(fd);
+    long saved;
+    size_t written;
+
+    if (!vfile)
+        return SCE_ERROR_ERRNO_EBADF;
+
+    saved = ftell(vfile->fp);
+    if (fseek(vfile->fp, (long)offset, SEEK_SET) != 0)
+        return SCE_ERROR_ERRNO_EBADF;
+
+    written = fwrite(buf, 1, nbyte, vfile->fp);
+    fflush(vfile->fp);
+    if (saved >= 0)
+        fseek(vfile->fp, saved, SEEK_SET);
+
+    return (SceSSize)written;
+}
+
+EXPORT(SceLibKernel, 0x54ABACFA, int, sceIoIoctl, SceUID fd, unsigned int cmd, void *indata,
+       int inlen, void *outdata, int outlen)
+{
+    (void)fd;
+    (void)cmd;
+    (void)indata;
+    (void)inlen;
+
+    if (outdata && outlen > 0)
+        memset(outdata, 0, (size_t)outlen);
+
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0x98ACED6D, int, sceIoSync, const char *device, unsigned int unk)
+{
+    (void)device;
+    (void)unk;
+
+    return 0;
+}
