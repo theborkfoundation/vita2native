@@ -68,8 +68,14 @@ add_executable(vita2native
     ${VITA2NATIVE_CTRL_SOURCE}
     ${VITA2NATIVE_DISPLAY_SOURCE}
     source/modules/SceGxm.c
+    source/modules/SceAppMgr.c
+    source/modules/SceCommonDialog.c
     source/modules/SceKernelThreadMgr.c
     source/modules/SceLibKernel.c
+    source/modules/SceNet.c
+    source/modules/SceRtc.c
+    source/modules/SceSharedFb.c
+    source/modules/SceSysmodule.c
     source/modules/SceSysmem.c
     source/modules/SceTouch_linux.c
 )

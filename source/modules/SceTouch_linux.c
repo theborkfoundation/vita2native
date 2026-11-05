@@ -47,6 +47,17 @@ EXPORT(SceTouch, 0x10A2CA25, int, sceTouchGetPanelInfo, SceUInt32 port,
     }
 }
 
+EXPORT(SceTouch, 0x1B9C5D14, int, sceTouchSetSamplingState, SceUInt32 port,
+       SceTouchSamplingState state)
+{
+    (void)port;
+    (void)state;
+
+    /* Sampling only affects the speed at which the panel is polled; there is
+       no panel here. */
+    return 0;
+}
+
 DECLARE_LIBRARY(SceTouch, 0x3e4f4a81);
 
 int SceTouch_init(void)

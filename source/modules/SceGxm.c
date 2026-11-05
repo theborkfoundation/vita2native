@@ -161,6 +161,7 @@ typedef struct SceGxmContext {
     const SceGxmPrecomputedVertexState *precomputed_vertex;
     const SceGxmPrecomputedFragmentState *precomputed_fragment;
 
+    bool owns_memory;
     bool deferred;
     bool command_list_active;
     GxmCommand *cmd_head;
@@ -1309,11 +1310,26 @@ EXPORT(SceGxm, 0xE84CE5B4, int, sceGxmCreateContext, const SceGxmContextParams *
 {
     SceGxmContext *ctx;
 
-    if (!params || !context || !params->hostMem || params->hostMemSize < sizeof(SceGxmContext))
-        return SCE_GXM_ERROR_INVALID_VALUE;
+    if (!params || !context)
+        return SCE_GXM_ERROR_INVALID_POINTER;
 
-    ctx = params->hostMem;
-    memset(ctx, 0, sizeof(*ctx));
+    if (params->hostMem && params->hostMemSize >= sizeof(SceGxmContext)) {
+        ctx = params->hostMem;
+        memset(ctx, 0, sizeof(*ctx));
+    } else {
+        /*
+         * Applications size hostMem from the SDK's SceGxmContext, which is much
+         * smaller than this implementation's. Use host memory when the guest
+         * buffer fits, otherwise allocate the translation-layer state.
+         */
+        LOG("SceGxm: context hostMem too small (0x%x < 0x%zx), allocating",
+            params->hostMemSize, sizeof(SceGxmContext));
+        ctx = calloc(1, sizeof(*ctx));
+        if (!ctx)
+            return SCE_GXM_ERROR_OUT_OF_MEMORY;
+        ctx->owns_memory = true;
+    }
+
     ctx->params = *params;
     gxm_context_init_defaults(ctx, false);
 
@@ -1326,6 +1342,8 @@ EXPORT(SceGxm, 0xE84CE5B4, int, sceGxmCreateContext, const SceGxmContextParams *
 oom:
     free(ctx->vertex_uniform_arena);
     free(ctx->fragment_uniform_arena);
+    if (ctx->owns_memory)
+        free(ctx);
     return SCE_GXM_ERROR_OUT_OF_MEMORY;
 }
 
@@ -1361,6 +1379,8 @@ EXPORT(SceGxm, 0xEDDC5FB2, int, sceGxmDestroyContext, SceGxmContext *context)
     gxm_command_free(context->cmd_head);
     context->cmd_head = NULL;
     context->cmd_tail = NULL;
+    if (context->owns_memory)
+        free(context);
     return 0;
 }
 
@@ -4470,17 +4490,25 @@ EXPORT(SceGxm, 0x249D5B00, int, sceGxmCreateDeferredContext,
 {
     SceGxmContext *ctx;
 
-    if (!params || !context || !params->hostMem)
+    if (!params || !context)
         return SCE_GXM_ERROR_INVALID_POINTER;
-    if (params->hostMemSize < sizeof(SceGxmContext))
-        return SCE_GXM_ERROR_INVALID_VALUE;
 
-    ctx = params->hostMem;
-    memset(ctx, 0, sizeof(*ctx));
+    if (params->hostMem && params->hostMemSize >= sizeof(SceGxmContext)) {
+        ctx = params->hostMem;
+        memset(ctx, 0, sizeof(*ctx));
+    } else {
+        ctx = calloc(1, sizeof(*ctx));
+        if (!ctx)
+            return SCE_GXM_ERROR_OUT_OF_MEMORY;
+        ctx->owns_memory = true;
+    }
+
     gxm_context_init_defaults(ctx, true);
     if (!ctx->vertex_uniform_arena || !ctx->fragment_uniform_arena) {
         free(ctx->vertex_uniform_arena);
         free(ctx->fragment_uniform_arena);
+        if (ctx->owns_memory)
+            free(ctx);
         return SCE_GXM_ERROR_OUT_OF_MEMORY;
     }
 
@@ -4510,6 +4538,8 @@ EXPORT(SceGxm, 0xD6A2FF2F, int, sceGxmDestroyDeferredContext, SceGxmContext *con
     context->vertex_uniform_arena = NULL;
     context->fragment_uniform_arena = NULL;
     context->deferred = false;
+    if (context->owns_memory)
+        free(context);
     return 0;
 }
 
@@ -5187,7 +5217,16 @@ EXPORT(SceGxm, 0xAAFD61D5, SceGxmParameterSemantic, _sceGxmProgramParameterGetSe
     return sceGxmProgramParameterGetSemantic(parameter);
 }
 
+/* Used by the system-app (live-area) path. There is no VSH process here, so
+   this is the same initialisation as the regular entry point. */
+EXPORT(SceGxmInternalForVsh, 0xA04F5FAC, int, sceGxmVshInitialize,
+       const SceGxmInitializeParams *params)
+{
+    return sceGxmInitialize(params);
+}
+
 DECLARE_LIBRARY(SceGxm, 0xf76b66bd);
+DECLARE_LIBRARY(SceGxmInternalForVsh, 0xc98aeb79);
 
 int SceGxm_init(HostGpuDevice device)
 {

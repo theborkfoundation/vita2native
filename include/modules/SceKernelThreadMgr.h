@@ -13,6 +13,10 @@ typedef struct {
     void *argp;
     int return_status;
     void **vita_tls;
+    int init_priority;
+    int current_priority;
+    SceSize stack_size;
+    SceUInt attr;
 } VitaThreadInfo;
 
 int SceKernelThreadMgr_init(void);

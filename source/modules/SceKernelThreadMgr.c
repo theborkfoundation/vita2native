@@ -1,7 +1,15 @@
 #include <m-dict.h>
+#include <psp2/io/fcntl.h>
+#include <psp2/io/stat.h>
 #include <psp2/kernel/error.h>
+#include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/threadmgr/msgpipe.h>
+#include <psp2/kernel/threadmgr/mutex.h>
+#include <pthread.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/time.h>
 
 #include "host.h"
 #include "log.h"
@@ -29,6 +37,31 @@ static SceUID g_main_thread_uid;
 DICT_DEF2(vita_thread_info_dict, SceUID, M_DEFAULT_OPLIST, VitaThreadInfo *, M_POD_OPLIST)
 static vita_thread_info_dict_t g_vita_thread_infos;
 static RwLock g_vita_thread_infos_lock;
+
+typedef struct {
+    SceUID uid;
+    char name[32];
+    pthread_mutex_t mutex;
+} VitaMutexInfo;
+
+typedef struct {
+    SceUID uid;
+    char name[32];
+    uint8_t *buffer;
+    uint32_t capacity;
+    uint32_t used;
+    uint32_t head;
+    uint32_t tail;
+    Mutex lock;
+    CondVar not_empty;
+    CondVar not_full;
+} VitaMsgPipeInfo;
+
+DICT_DEF2(vita_mutex_info_dict, SceUID, M_DEFAULT_OPLIST, VitaMutexInfo *, M_POD_OPLIST)
+DICT_DEF2(vita_msgpipe_info_dict, SceUID, M_DEFAULT_OPLIST, VitaMsgPipeInfo *, M_POD_OPLIST)
+static vita_mutex_info_dict_t g_vita_mutex_infos;
+static vita_msgpipe_info_dict_t g_vita_msgpipe_infos;
+static RwLock g_vita_sync_objects_lock;
 
 static inline int vita_priority_to_host_priority(int priority)
 {
@@ -98,6 +131,9 @@ static SceUID create_thread(const char *name, SceKernelThreadEntry entry, int in
     ti->uid = SceSysmem_get_next_uid();
     strncpy(ti->name, name, sizeof(ti->name) - 1);
     ti->entry = entry;
+    ti->init_priority = initPriority;
+    ti->current_priority = initPriority;
+    ti->stack_size = stackSize;
     ti->vita_tls = malloc(SCE_KERNEL_TLS_SIZE);
 
     res = threadCreate(&ti->thread, thread_entry_wrapper, ti, NULL, stackSize, priority, -2);
@@ -277,9 +313,338 @@ EXPORT(SceThreadmgr, 0xBACA6891, void *, sceKernelGetThreadTLSAddr, SceUID thid,
     return NULL;
 }
 
+/* Serialization objects. */
+
+static VitaMutexInfo *get_mutex_info(SceUID uid)
+{
+    VitaMutexInfo *info;
+
+    rwlockReadLock(&g_vita_sync_objects_lock);
+    info = *vita_mutex_info_dict_get(g_vita_mutex_infos, uid);
+    rwlockReadUnlock(&g_vita_sync_objects_lock);
+
+    return info;
+}
+
+static VitaMsgPipeInfo *get_msgpipe_info(SceUID uid)
+{
+    VitaMsgPipeInfo *info;
+
+    rwlockReadLock(&g_vita_sync_objects_lock);
+    info = *vita_msgpipe_info_dict_get(g_vita_msgpipe_infos, uid);
+    rwlockReadUnlock(&g_vita_sync_objects_lock);
+
+    return info;
+}
+
+EXPORT(SceLibKernel, 0xED53334A, SceUID, sceKernelCreateMutex, const char *name, SceUInt attr,
+       int initCount, SceKernelMutexOptParam *option)
+{
+    pthread_mutexattr_t mutex_attr;
+    VitaMutexInfo *info = calloc(1, sizeof(*info));
+
+    (void)attr;
+    (void)option;
+
+    if (!info)
+        return SCE_KERNEL_ERROR_NO_MEMORY;
+
+    info->uid = SceSysmem_get_next_uid();
+    if (name)
+        strncpy(info->name, name, sizeof(info->name) - 1);
+
+    pthread_mutexattr_init(&mutex_attr);
+    pthread_mutexattr_settype(&mutex_attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&info->mutex, &mutex_attr);
+    pthread_mutexattr_destroy(&mutex_attr);
+
+    for (int i = 0; i < initCount; i++)
+        pthread_mutex_lock(&info->mutex);
+
+    rwlockWriteLock(&g_vita_sync_objects_lock);
+    vita_mutex_info_dict_set_at(g_vita_mutex_infos, info->uid, info);
+    rwlockWriteUnlock(&g_vita_sync_objects_lock);
+
+    return info->uid;
+}
+
+EXPORT(SceThreadmgr, 0xCB78710D, int, sceKernelDeleteMutex, SceUID mutexid)
+{
+    VitaMutexInfo *info = get_mutex_info(mutexid);
+
+    if (!info)
+        return SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID;
+
+    rwlockWriteLock(&g_vita_sync_objects_lock);
+    vita_mutex_info_dict_erase(g_vita_mutex_infos, mutexid);
+    rwlockWriteUnlock(&g_vita_sync_objects_lock);
+
+    pthread_mutex_destroy(&info->mutex);
+    free(info);
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0x1D8D7945, int, sceKernelLockMutex, SceUID mutexid, int lockCount,
+       unsigned int *timeout)
+{
+    VitaMutexInfo *info = get_mutex_info(mutexid);
+
+    (void)timeout;
+    if (!info)
+        return SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID;
+    if (lockCount < 0)
+        return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
+
+    for (int i = 0; i < lockCount; i++)
+        pthread_mutex_lock(&info->mutex);
+
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0x2BDAA524, int, sceKernelLockMutexCB, SceUID mutexid, int lockCount,
+       unsigned int *timeout)
+{
+    return sceKernelLockMutex(mutexid, lockCount, timeout);
+}
+
+EXPORT(SceLibKernel, 0x72FC1F54, int, sceKernelTryLockMutex, SceUID mutexid, int lockCount)
+{
+    VitaMutexInfo *info = get_mutex_info(mutexid);
+
+    if (!info)
+        return SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID;
+
+    for (int i = 0; i < lockCount; i++) {
+        if (pthread_mutex_trylock(&info->mutex) != 0)
+            return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
+    }
+
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0x1A372EC8, int, sceKernelUnlockMutex, SceUID mutexid, int unlockCount)
+{
+    VitaMutexInfo *info = get_mutex_info(mutexid);
+
+    if (!info)
+        return SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID;
+    if (unlockCount < 0)
+        return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
+
+    for (int i = 0; i < unlockCount; i++)
+        pthread_mutex_unlock(&info->mutex);
+
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0x0A10C1C8, SceUID, sceKernelCreateMsgPipe, const char *name, int type,
+       int attr, unsigned int bufSize, void *option)
+{
+    VitaMsgPipeInfo *info = calloc(1, sizeof(*info));
+
+    (void)type;
+    (void)attr;
+    (void)option;
+
+    if (!info)
+        return SCE_KERNEL_ERROR_NO_MEMORY;
+
+    info->uid = SceSysmem_get_next_uid();
+    if (name)
+        strncpy(info->name, name, sizeof(info->name) - 1);
+    info->buffer = malloc(bufSize ? bufSize : 1);
+    info->capacity = bufSize;
+    if (!info->buffer) {
+        free(info);
+        return SCE_KERNEL_ERROR_NO_MEMORY;
+    }
+
+    mutexInit(&info->lock);
+    condvarInit(&info->not_empty);
+    condvarInit(&info->not_full);
+
+    rwlockWriteLock(&g_vita_sync_objects_lock);
+    vita_msgpipe_info_dict_set_at(g_vita_msgpipe_infos, info->uid, info);
+    rwlockWriteUnlock(&g_vita_sync_objects_lock);
+
+    return info->uid;
+}
+
+EXPORT(SceThreadmgr, 0xE78BCCF7, int, sceKernelDeleteMsgPipe, SceUID uid)
+{
+    VitaMsgPipeInfo *info = get_msgpipe_info(uid);
+
+    if (!info)
+        return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
+
+    rwlockWriteLock(&g_vita_sync_objects_lock);
+    vita_msgpipe_info_dict_erase(g_vita_msgpipe_infos, uid);
+    rwlockWriteUnlock(&g_vita_sync_objects_lock);
+
+    mutexDestroy(&info->lock);
+    condvarDestroy(&info->not_empty);
+    condvarDestroy(&info->not_full);
+    free(info->buffer);
+    free(info);
+    return 0;
+}
+
+static int msgpipe_send(VitaMsgPipeInfo *info, const void *message, unsigned int size,
+                        unsigned int *result)
+{
+    const uint8_t *src = message;
+
+    if (size > info->capacity)
+        return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
+
+    mutexLock(&info->lock);
+    while (info->capacity - info->used < size)
+        condvarWait(&info->not_full, &info->lock);
+
+    for (unsigned int i = 0; i < size; i++) {
+        info->buffer[(info->head + i) % info->capacity] = src[i];
+    }
+    info->head = (info->head + size) % info->capacity;
+    info->used += size;
+
+    if (result)
+        *result = size;
+
+    condvarWakeAll(&info->not_empty);
+    mutexUnlock(&info->lock);
+    return 0;
+}
+
+static int msgpipe_receive(VitaMsgPipeInfo *info, void *message, unsigned int size,
+                           unsigned int *result)
+{
+    uint8_t *dst = message;
+    unsigned int count;
+
+    mutexLock(&info->lock);
+    while (!info->used)
+        condvarWait(&info->not_empty, &info->lock);
+
+    count = info->used < size ? info->used : size;
+    for (unsigned int i = 0; i < count; i++)
+        dst[i] = info->buffer[(info->tail + i) % info->capacity];
+
+    info->tail = (info->tail + count) % info->capacity;
+    info->used -= count;
+
+    if (result)
+        *result = count;
+
+    condvarWakeAll(&info->not_full);
+    mutexUnlock(&info->lock);
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0x0CA71EA2, int, sceKernelSendMsgPipe, SceUID uid, void *message,
+       unsigned int size, int unk1, void *unk2, unsigned int *timeout)
+{
+    VitaMsgPipeInfo *info = get_msgpipe_info(uid);
+
+    (void)unk1;
+    (void)timeout;
+    if (!info)
+        return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
+
+    return msgpipe_send(info, message, size, unk2);
+}
+
+EXPORT(SceLibKernel, 0x4E81DD5C, int, sceKernelReceiveMsgPipe, SceUID uid, void *message,
+       unsigned int size, int unk1, void *unk2, unsigned int *timeout)
+{
+    VitaMsgPipeInfo *info = get_msgpipe_info(uid);
+
+    (void)unk1;
+    (void)timeout;
+    if (!info)
+        return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
+
+    return msgpipe_receive(info, message, size, unk2);
+}
+
+EXPORT(SceLibKernel, 0x6E903AB2, int, sceIoChstatByFd, SceUID fd, const SceIoStat *stat,
+       unsigned int bits)
+{
+    (void)fd;
+    (void)stat;
+    (void)bits;
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0x04B30CB2, int, sceIoDevctl, const char *dev, unsigned int cmd,
+       void *indata, int inlen, void *outdata, int outlen)
+{
+    (void)dev;
+    (void)cmd;
+    (void)indata;
+    (void)inlen;
+
+    if (outdata && outlen > 0)
+        memset(outdata, 0, (size_t)outlen);
+
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0x8D9C5461, int, sceKernelGetThreadInfo, SceUID thid,
+       SceKernelThreadInfo *info)
+{
+    VitaThreadInfo *ti = get_thread_info_for_uid(thid);
+
+    if (!ti)
+        return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
+    if (!info)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    memset(info, 0, sizeof(*info));
+    info->size = sizeof(*info);
+    info->processId = 1;
+    strncpy(info->name, ti->name, sizeof(info->name) - 1);
+    info->attr = ti->attr;
+    info->status = 0x2; /* running */
+    info->entry = ti->entry;
+    info->stackSize = (SceInt32)ti->stack_size;
+    info->initPriority = ti->init_priority;
+    info->currentPriority = ti->current_priority;
+
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0x9DCB4B7A, SceUID, sceKernelGetProcessId, void)
+{
+    return 1;
+}
+
+EXPORT(SceLibKernel, 0xE9F973B1, SceUInt32, sceKernelGetProcessTimeLow, void)
+{
+    return (SceUInt32)(host_monotonic_ns() / 1000ull);
+}
+
+EXPORT(SceProcessmgr, 0x4B879059, int, sceKernelLibcGettimeofday, SceKernelTimeval *tv,
+       SceKernelTimezone *tz)
+{
+    struct timeval host_time;
+
+    if (!tv)
+        return -1;
+
+    gettimeofday(&host_time, NULL);
+    tv->sec = (SceInt32)host_time.tv_sec;
+    tv->usec = (SceInt32)host_time.tv_usec;
+
+    if (tz)
+        tz->value = 0;
+
+    return 0;
+}
+
 /* SceLibKernel declared in SceLibKernel.c */
 DECLARE_LIBRARY(SceThreadmgr, 0x859a24b1);
 DECLARE_LIBRARY(SceThreadmgrCoredumpTime, 0x5E8D0E22);
+DECLARE_LIBRARY(SceProcessmgr, 0x2dd91812);
 
 int SceKernelThreadMgr_init(void)
 {
@@ -289,6 +654,9 @@ int SceKernelThreadMgr_init(void)
 
     vita_thread_info_dict_init(g_vita_thread_infos);
     rwlockInit(&g_vita_thread_infos_lock);
+    vita_mutex_info_dict_init(g_vita_mutex_infos);
+    vita_msgpipe_info_dict_init(g_vita_msgpipe_infos);
+    rwlockInit(&g_vita_sync_objects_lock);
 
     return 0;
 }
@@ -297,6 +665,8 @@ int SceKernelThreadMgr_finish(void)
 {
     threadTlsFree(g_vita_thread_info_tls_slot_id);
     vita_thread_info_dict_clear(g_vita_thread_infos);
+    vita_mutex_info_dict_clear(g_vita_mutex_infos);
+    vita_msgpipe_info_dict_clear(g_vita_msgpipe_infos);
 
     return 0;
 }

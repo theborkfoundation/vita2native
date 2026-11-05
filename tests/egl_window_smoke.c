@@ -114,8 +114,70 @@ static uint32_t x11_pixel(const XImagePrefix *image, int x, int y)
     return 0;
 }
 
-int main(void)
+static void put_u16(unsigned char *p, unsigned value)
 {
+    p[0] = (unsigned char)value;
+    p[1] = (unsigned char)(value >> 8);
+}
+
+static void put_u32(unsigned char *p, uint32_t value)
+{
+    p[0] = (unsigned char)value;
+    p[1] = (unsigned char)(value >> 8);
+    p[2] = (unsigned char)(value >> 16);
+    p[3] = (unsigned char)(value >> 24);
+}
+
+/* Dumps the X11 window contents as a 24-bit BMP for visual inspection. */
+static bool write_bmp(const char *path, const XImagePrefix *image, int width, int height)
+{
+    unsigned char header[54];
+    const int row_size = (width * 3 + 3) & ~3;
+    unsigned char *row;
+    FILE *file;
+
+    file = fopen(path, "wb");
+    if (!file)
+        return false;
+
+    memset(header, 0, sizeof(header));
+    header[0] = 'B';
+    header[1] = 'M';
+    put_u32(header + 2, 54u + (uint32_t)(row_size * height));
+    put_u32(header + 10, 54);
+    put_u32(header + 14, 40);
+    put_u32(header + 18, (uint32_t)width);
+    put_u32(header + 22, (uint32_t)height);
+    put_u16(header + 26, 1);
+    put_u16(header + 28, 24);
+    put_u32(header + 34, (uint32_t)(row_size * height));
+    fwrite(header, 1, sizeof(header), file);
+
+    row = calloc(1, (size_t)row_size);
+    if (!row) {
+        fclose(file);
+        return false;
+    }
+
+    for (int y = height - 1; y >= 0; y--) {
+        for (int x = 0; x < width; x++) {
+            uint32_t pixel = x11_pixel(image, x, y);
+
+            row[x * 3 + 0] = (unsigned char)extract_component(pixel, image->blue_mask);
+            row[x * 3 + 1] = (unsigned char)extract_component(pixel, image->green_mask);
+            row[x * 3 + 2] = (unsigned char)extract_component(pixel, image->red_mask);
+        }
+        fwrite(row, 1, (size_t)row_size, file);
+    }
+
+    free(row);
+    fclose(file);
+    return true;
+}
+
+int main(int argc, char **argv)
+{
+    const char *dump_path = argc > 1 ? argv[1] : NULL;
     X11Api x11;
     void *display;
     int screen;
@@ -214,6 +276,9 @@ int main(void)
         host_gpu_destroy(device);
         goto done;
     }
+
+    if (dump_path && write_bmp(dump_path, image, WINDOW_WIDTH, WINDOW_HEIGHT))
+        printf("wrote %s\n", dump_path);
 
     /* The corners are inside the letterbox bars and must be black. */
     red = extract_component(x11_pixel(image, 4, 4), image->red_mask);
