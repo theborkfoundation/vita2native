@@ -13,17 +13,66 @@
 
 int sceCtrlPeekBufferPositive(int port, SceCtrlData *pad_data, int count);
 
+static SceCtrlPadInputMode g_sampling_mode = SCE_CTRL_MODE_DIGITAL;
+static SceCtrlPadInputMode g_sampling_mode_ext = SCE_CTRL_MODE_DIGITAL;
+
 EXPORT(SceCtrl, 0xA497B150, int, sceCtrlSetSamplingMode, SceCtrlPadInputMode mode)
 {
-    (void)mode;
+    g_sampling_mode = mode;
 
     return 0;
 }
 
 EXPORT(SceCtrl, 0xB1DC4378, int, sceCtrlSetSamplingModeExt, SceCtrlPadInputMode mode)
 {
-    (void)mode;
+    g_sampling_mode_ext = mode;
 
+    return 0;
+}
+
+EXPORT(SceCtrl, 0xEC752AAF, int, sceCtrlGetSamplingMode, SceCtrlPadInputMode *mode)
+{
+    if (!mode)
+        return -1;
+
+    *mode = g_sampling_mode;
+
+    return 0;
+}
+
+EXPORT(SceCtrl, 0xBD27F830, int, sceCtrlGetSamplingModeExt, SceCtrlPadInputMode *mode)
+{
+    if (!mode)
+        return -1;
+
+    *mode = g_sampling_mode_ext;
+
+    return 0;
+}
+
+EXPORT(SceCtrl, 0x7E110E90, int, sceCtrlResetLightBar, void)
+{
+    return 0;
+}
+
+EXPORT(SceCtrl, 0xDA11D433, int, sceCtrlSetLightBar, int port, SceUInt8 r, SceUInt8 g,
+       SceUInt8 b)
+{
+    (void)port;
+    (void)r;
+    (void)g;
+    (void)b;
+
+    return 0;
+}
+
+EXPORT(SceCtrl, 0x1FFFD965, int, sceCtrlIsMultiControllerSupported, void)
+{
+    return 0;
+}
+
+EXPORT(SceCtrl, 0x16D26DC7, int, sceCtrlDisconnect, void)
+{
     return 0;
 }
 
