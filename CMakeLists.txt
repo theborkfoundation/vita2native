@@ -104,6 +104,7 @@ add_executable(vita2native
     source/modules/SceIoAsync.c
     source/modules/SceLibClib.c
     source/modules/SceNet.c
+    source/minimp3_impl.c
     source/modules/SceNgs.c
     source/modules/ScePower.c
     source/modules/SceRtc.c
@@ -118,6 +119,7 @@ target_include_directories(vita2native PRIVATE
     include
     source/host
     external/khronos/include
+    external/minimp3
     external/Vita3K/external/LibAtrac9/C/src
     external/vita-headers/include
     external/Vita3K/vita3k/renderer/include
@@ -250,6 +252,7 @@ if(BUILD_TESTING)
     add_executable(audiodec_smoke
         tests/audiodec_smoke.c
         source/modules/SceAudiodec.c
+        source/minimp3_impl.c
         source/log.c
         source/netlog.c
         source/host/host_thread.c
@@ -268,7 +271,8 @@ if(BUILD_TESTING)
         external/Vita3K/external/LibAtrac9/C/src/utility.c
     )
     target_include_directories(audiodec_smoke PRIVATE include source/modules
-        external/vita-headers/include external/Vita3K/external/LibAtrac9/C/src external/mlib)
+        external/vita-headers/include external/minimp3 external/Vita3K/external/LibAtrac9/C/src
+        external/mlib)
     target_compile_definitions(audiodec_smoke PRIVATE _GNU_SOURCE=1 _FILE_OFFSET_BITS=64)
     target_link_libraries(audiodec_smoke PRIVATE pthread m)
     add_test(NAME audiodec_smoke COMMAND audiodec_smoke)

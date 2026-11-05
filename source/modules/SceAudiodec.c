@@ -15,6 +15,7 @@
 
 #include "libatrac9.h"
 #include "log.h"
+#include "minimp3.h"
 #include "module.h"
 #include "modules/SceLibKernel.h"
 
@@ -24,6 +25,7 @@ typedef struct {
     SceUID uid;
     SceAudiodecType type;
     void *at9;
+    mp3dec_t mp3;
     Atrac9CodecInfo codec;
     uint32_t frame_samples;
 } AudioDecoder;
@@ -31,7 +33,9 @@ typedef struct {
 DICT_DEF2(vita_audiodec_dict, SceUID, M_DEFAULT_OPLIST, AudioDecoder *, M_POD_OPLIST)
 static vita_audiodec_dict_t g_decoders;
 static bool g_at9_initialized;
+static bool g_mp3_initialized;
 static uint32_t g_at9_channels;
+static uint32_t g_mp3_streams;
 static SceUID g_next_handle;
 
 static AudioDecoder *audiodec_lookup(SceUID uid)
@@ -57,9 +61,16 @@ EXPORT(SceAudiodecUser, 0x445C2CEF, int, sceAudiodecInitLibrary, SceUInt32 codec
         g_at9_initialized = true;
         return 0;
     case SCE_AUDIODEC_TYPE_MP3:
+        if (g_mp3_initialized)
+            return SCE_AUDIODEC_ERROR_ALREADY_INITIALIZED;
+        if (init_param->mp3.totalStreams == 0 ||
+            init_param->mp3.totalStreams > SCE_AUDIODEC_MP3_MAX_STREAMS)
+            return SCE_AUDIODEC_ERROR_INVALID_INIT_PARAM;
+        g_mp3_streams = init_param->mp3.totalStreams;
+        g_mp3_initialized = true;
+        return 0;
     case SCE_AUDIODEC_TYPE_AAC:
     case SCE_AUDIODEC_TYPE_CELP:
-        /* Only ATRAC9 has a decoder on this host. */
         return SCE_AUDIODEC_ERROR_INVALID_TYPE;
     default:
         return SCE_AUDIODEC_ERROR_INVALID_TYPE;
@@ -70,7 +81,10 @@ EXPORT(SceAudiodecUser, 0x45719B9D, int, sceAudiodecTermLibrary, SceUInt32 codec
 {
     (void)codec_type;
 
-    g_at9_initialized = false;
+    if (codec_type == SCE_AUDIODEC_TYPE_AT9)
+        g_at9_initialized = false;
+    if (codec_type == SCE_AUDIODEC_TYPE_MP3)
+        g_mp3_initialized = false;
     return 0;
 }
 
@@ -155,6 +169,46 @@ static int create_at9_decoder(SceAudiodecCtrl *ctrl)
     return 0;
 }
 
+static int create_mp3_decoder(SceAudiodecCtrl *ctrl)
+{
+    AudioDecoder *decoder;
+    SceUInt32 channels;
+    SceUID uid;
+
+    if (!g_mp3_initialized)
+        return SCE_AUDIODEC_ERROR_NOT_INITIALIZED;
+    if (!ctrl || !ctrl->pInfo)
+        return SCE_AUDIODEC_ERROR_INVALID_PTR;
+
+    channels = ctrl->pInfo->mp3.ch;
+    if (channels == 0)
+        channels = 2;
+    if (channels > SCE_AUDIODEC_MP3_MAX_CH_IN_DECODER)
+        return SCE_AUDIODEC_MP3_ERROR_INVALID_CH;
+
+    decoder = calloc(1, sizeof(*decoder));
+    if (!decoder)
+        return SCE_AUDIODEC_ERROR_OUT_OF_MEMORY;
+
+    mp3dec_init(&decoder->mp3);
+    decoder->type = SCE_AUDIODEC_TYPE_MP3;
+    decoder->frame_samples = SCE_AUDIODEC_MP3_MAX_SAMPLES;
+    decoder->uid = ++g_next_handle;
+
+    ctrl->pInfo->mp3.size = sizeof(SceAudiodecInfoMp3);
+    ctrl->pInfo->mp3.ch = channels;
+    ctrl->maxEsSize = SCE_AUDIODEC_MP3_MAX_ES_SIZE;
+    ctrl->maxPcmSize = SCE_AUDIODEC_MP3_MAX_SAMPLES * channels * sizeof(int16_t);
+    ctrl->wordLength = 16;
+    ctrl->handle = (SceInt32)decoder->uid;
+
+    uid = decoder->uid;
+    vita_audiodec_dict_set_at(g_decoders, uid, decoder);
+
+    LOG("SceAudiodec: MP3 decoder: %u channel(s), %u stream(s)", channels, g_mp3_streams);
+    return 0;
+}
+
 EXPORT(SceAudiodecUser, 0x4DFD3AAA, int, sceAudiodecCreateDecoder, SceAudiodecCtrl *ctrl,
        SceUInt32 codec_type)
 {
@@ -164,6 +218,8 @@ EXPORT(SceAudiodecUser, 0x4DFD3AAA, int, sceAudiodecCreateDecoder, SceAudiodecCt
     switch (codec_type) {
     case SCE_AUDIODEC_TYPE_AT9:
         return create_at9_decoder(ctrl);
+    case SCE_AUDIODEC_TYPE_MP3:
+        return create_mp3_decoder(ctrl);
     default:
         return SCE_AUDIODEC_ERROR_INVALID_TYPE;
     }
@@ -196,7 +252,8 @@ EXPORT(SceAudiodecUser, 0xE7A24E16, int, sceAudiodecDeleteDecoder, SceAudiodecCt
         return SCE_AUDIODEC_ERROR_INVALID_HANDLE;
 
     vita_audiodec_dict_erase(g_decoders, (SceUID)ctrl->handle);
-    Atrac9ReleaseHandle(decoder->at9);
+    if (decoder->type == SCE_AUDIODEC_TYPE_AT9)
+        Atrac9ReleaseHandle(decoder->at9);
     free(decoder);
     ctrl->handle = 0;
 
@@ -229,7 +286,8 @@ EXPORT(SceAudiodecUser, 0xF72F9B64, int, sceAudiodecClearContext, SceAudiodecCtr
     if (!decoder)
         return SCE_AUDIODEC_ERROR_NOT_HANDLE_IN_USE;
 
-    /* LibAtrac9 keeps no cross-frame state we can reset without rebuilding. */
+    if (decoder->type == SCE_AUDIODEC_TYPE_MP3)
+        mp3dec_init(&decoder->mp3);
     return 0;
 }
 
@@ -255,23 +313,51 @@ static int audiodec_decode_frames(SceAudiodecCtrl *ctrl, SceUInt32 frame_count)
     pcm = ctrl->pPcm;
 
     for (SceUInt32 i = 0; i < frame_count; i++) {
-        int bytes_used = 0;
-        int result;
+        if (decoder->type == SCE_AUDIODEC_TYPE_AT9) {
+            int bytes_used = 0;
+            uint32_t pcm_bytes = decoder->frame_samples *
+                                 (uint32_t)decoder->codec.channels * (uint32_t)sizeof(int16_t);
 
-        if (decoder->type != SCE_AUDIODEC_TYPE_AT9)
+            if (Atrac9Decode(decoder->at9, es, (short *)pcm, &bytes_used) != 0)
+                return SCE_AUDIODEC_ERROR_API_FAIL;
+
+            ctrl->inputEsSize += (SceUInt32)bytes_used;
+            ctrl->outputPcmSize += pcm_bytes;
+            es += bytes_used;
+            pcm += pcm_bytes;
+        } else if (decoder->type == SCE_AUDIODEC_TYPE_MP3) {
+            mp3dec_frame_info_t frame_info;
+            uint32_t remaining = ctrl->maxEsSize;
+            int samples = 0;
+
+            while (remaining >= 4) {
+                int consumed;
+
+                samples = mp3dec_decode_frame(&decoder->mp3, es, (int)remaining,
+                                              (short *)pcm, &frame_info);
+                consumed = frame_info.frame_bytes;
+                if (consumed <= 0)
+                    return SCE_AUDIODEC_ERROR_API_FAIL;
+
+                es += consumed;
+                remaining -= (uint32_t)consumed;
+                ctrl->inputEsSize += (SceUInt32)consumed;
+                if (samples > 0)
+                    break;
+            }
+
+            if (samples <= 0)
+                return SCE_AUDIODEC_ERROR_API_FAIL;
+
+            if (ctrl->pInfo->mp3.ch == 0)
+                ctrl->pInfo->mp3.ch = (SceUInt32)frame_info.channels;
+            ctrl->outputPcmSize +=
+                (SceUInt32)samples * (SceUInt32)frame_info.channels * (SceUInt32)sizeof(int16_t);
+            pcm += (SceUInt32)samples * (SceUInt32)frame_info.channels *
+                   (SceUInt32)sizeof(int16_t);
+        } else {
             return SCE_AUDIODEC_ERROR_INVALID_TYPE;
-
-        result = Atrac9Decode(decoder->at9, es, (short *)pcm, &bytes_used);
-        if (result != 0)
-            return SCE_AUDIODEC_ERROR_API_FAIL;
-
-        ctrl->inputEsSize += (SceUInt32)bytes_used;
-        ctrl->outputPcmSize += decoder->frame_samples *
-                               (SceUInt32)decoder->codec.channels * (SceUInt32)sizeof(int16_t);
-
-        es += bytes_used;
-        pcm += decoder->frame_samples * (SceUInt32)decoder->codec.channels *
-               (SceUInt32)sizeof(int16_t);
+        }
     }
 
     return 0;
@@ -330,7 +416,9 @@ int SceAudiodec_init(void)
 {
     vita_audiodec_dict_init(g_decoders);
     g_at9_initialized = false;
+    g_mp3_initialized = false;
     g_at9_channels = 0;
+    g_mp3_streams = 0;
     g_next_handle = 0;
     return 0;
 }
