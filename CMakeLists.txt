@@ -345,6 +345,15 @@ if(BUILD_TESTING)
     target_link_libraries(pgf_smoke PRIVATE m)
     add_test(NAME pgf_smoke COMMAND pgf_smoke)
 
+    add_executable(appmgr_smoke
+        tests/appmgr_smoke.c
+        source/modules/SceAppMgr.c
+        source/host/host_fs.c
+    )
+    target_include_directories(appmgr_smoke PRIVATE include external/vita-headers/include)
+    target_compile_definitions(appmgr_smoke PRIVATE _GNU_SOURCE=1)
+    add_test(NAME appmgr_smoke COMMAND appmgr_smoke)
+
     add_executable(ngs_smoke
         tests/ngs_smoke.c
         source/modules/SceNgs.c
