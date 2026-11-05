@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=vita2native
+Comment=Run PlayStation Vita executables on Linux
+Exec=vita2native %f
+Terminal=true
+Categories=System;Emulator;
+MimeType=application/x-vita-vpk;

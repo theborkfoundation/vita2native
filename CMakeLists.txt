@@ -202,6 +202,12 @@ target_link_libraries(vita2native PRIVATE
 target_link_options(vita2native PRIVATE -rdynamic)
 set_target_properties(vita2native PROPERTIES ENABLE_EXPORTS ON)
 
+include(GNUInstallDirs)
+install(TARGETS vita2native RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES packaging/vita2native.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+install(FILES packaging/x-vita-vpk.xml DESTINATION ${CMAKE_INSTALL_DATADIR}/mime/packages)
+install(FILES README.md licenses/COPYING.txt DESTINATION ${CMAKE_INSTALL_DOCDIR})
+
 # Do not use --gc-sections here: the export registry relies on
 # __start_/__stop_ symbols for linker sections, and lld may garbage-collect
 # them unless -z nostart-stop-gc is used.
