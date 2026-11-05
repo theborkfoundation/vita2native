@@ -243,6 +243,11 @@ EXPORT(SceLibKernel, 0x8AF15B5F, int, sceKernelGetSystemTime, SceKernelSysClock 
     return 0;
 }
 
+EXPORT(SceThreadmgr, 0xB70EBAE9, int, _sceKernelGetSystemTime, SceKernelSysClock *clock)
+{
+    return sceKernelGetSystemTime(clock);
+}
+
 EXPORT(SceThreadmgr, 0xF4EE4FA9, SceInt64, sceKernelGetSystemTimeWide, void)
 {
     return (SceInt64)runtime_now_us();
