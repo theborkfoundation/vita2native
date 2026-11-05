@@ -11,6 +11,7 @@
 
 #include <psp2/types.h>
 #include <psp2/net/net.h>
+#include <psp2/net/netctl.h>
 
 #include "module.h"
 
@@ -35,6 +36,27 @@ int sceNetDumpRead(int id, void *buffer, int length, int *flags);
 int sceNetDumpDestroy(int id);
 int sceNetDumpAbort(int id, int flags);
 
+int sceNetCtlInit(void);
+void sceNetCtlTerm(void);
+int sceNetCtlInetGetState(int *state);
+int sceNetCtlInetGetInfo(int code, SceNetCtlInfo *info);
+int sceNetCtlGetNatInfo(SceNetCtlNatInfo *natinfo);
+int sceNetCtlGetIfStat(int device, void *ifstat);
+int sceNetCtlGetPhoneMaxDownloadableSize(int64_t *size);
+int sceNetCtlInetRegisterCallback(SceNetCtlCallback callback, void *arg, int *callback_id);
+int sceNetCtlInetUnregisterCallback(int callback_id);
+int sceNetCtlAdhocGetState(int *state);
+int sceNetCtlAdhocGetInAddr(SceNetInAddr *inaddr);
+
+typedef struct {
+    SceSize size;
+    SceUInt32 total_sec;
+    SceUInt64 tx_bytes;
+    SceUInt64 rx_bytes;
+    SceUInt32 reset_tick[2];
+    SceUInt32 reserved[8];
+} TestIfStat;
+
 #define CHECK(cond, message)                                                                       \
     do {                                                                                           \
         if (!(cond)) {                                                                             \
@@ -53,6 +75,13 @@ static void make_addr(SceNetSockaddr *addr, unsigned int port, unsigned int ip)
     addr->sa_family = SCE_NET_AF_INET;
     memcpy(&addr->sa_data[0], &net_port, sizeof(net_port));
     memcpy(&addr->sa_data[2], &net_ip, sizeof(net_ip));
+}
+
+static void *net_smoke_callback(int event_type, void *arg)
+{
+    (void)event_type;
+    (void)arg;
+    return NULL;
 }
 
 int main(void)
@@ -156,6 +185,55 @@ int main(void)
     CHECK(sceNetSocketAbort(sender, 0) == 0, "SocketAbort failed");
     CHECK(sceNetSocketClose(sender) == 0, "close sender failed");
     CHECK(sceNetSocketClose(receiver) == 0, "close receiver failed");
+
+    /* --- SceNetCtl ---------------------------------------------------- */
+    {
+        SceNetCtlInfo netctl_info;
+        SceNetCtlNatInfo nat_info;
+        SceNetInAddr adhoc_addr;
+        TestIfStat ifstat;
+        int state = -1;
+        int callback_id = 0;
+        int64_t max_size = 0;
+
+        CHECK(sceNetCtlInit() == 0, "NetCtlInit failed");
+        CHECK(sceNetCtlInetGetState(&state) == 0, "InetGetState failed");
+        CHECK(state == SCE_NETCTL_STATE_CONNECTED || state == SCE_NETCTL_STATE_DISCONNECTED,
+              "InetGetState returned an unknown state");
+
+        memset(&netctl_info, 0, sizeof(netctl_info));
+        CHECK(sceNetCtlInetGetInfo(SCE_NETCTL_INFO_GET_IP_ADDRESS, &netctl_info) == 0 ||
+                  state == SCE_NETCTL_STATE_DISCONNECTED,
+              "InetGetInfo failed");
+        if (state == SCE_NETCTL_STATE_CONNECTED)
+            CHECK(netctl_info.ip_address[0] != '\0', "the connected interface has no address");
+
+        memset(&nat_info, 0, sizeof(nat_info));
+        CHECK(sceNetCtlGetNatInfo(&nat_info) == 0, "GetNatInfo failed");
+        CHECK(nat_info.size == sizeof(nat_info), "GetNatInfo did not set the size");
+
+        memset(&ifstat, 0, sizeof(ifstat));
+        CHECK(sceNetCtlGetIfStat(0, &ifstat) == 0, "GetIfStat failed");
+        CHECK(ifstat.size == sizeof(ifstat), "GetIfStat did not set the size");
+
+        CHECK(sceNetCtlGetPhoneMaxDownloadableSize(&max_size) == 0, "GetPhoneMax failed");
+        CHECK(max_size == INT64_MAX, "the downloadable size is not unlimited");
+
+        CHECK(sceNetCtlInetRegisterCallback(NULL, NULL, &callback_id) < 0,
+              "a null NetCtl callback was accepted");
+        CHECK(sceNetCtlInetRegisterCallback((SceNetCtlCallback)net_smoke_callback, NULL,
+                                           &callback_id) == 0,
+              "NetCtl callback registration failed");
+        CHECK(sceNetCtlInetUnregisterCallback(callback_id) == 0,
+              "NetCtl callback unregistration failed");
+
+        CHECK(sceNetCtlAdhocGetState(&state) == 0 && state == SCE_NETCTL_STATE_DISCONNECTED,
+              "adhoc is not disconnected");
+        memset(&adhoc_addr, 0xff, sizeof(adhoc_addr));
+        CHECK(sceNetCtlAdhocGetInAddr(&adhoc_addr) == 0, "AdhocGetInAddr failed");
+        CHECK(adhoc_addr.s_addr == 0, "adhoc returned an address");
+        sceNetCtlTerm();
+    }
 
     puts("net_smoke: ok");
     return 0;

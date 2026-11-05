@@ -137,6 +137,22 @@ EXPORT(SceAppMgrUser, 0xE6774ABC, int, sceAppMgrLoadExec, const char *app_path,
     return SCE_APPMGR_ERROR_INVALID;
 }
 
+/* Only one application exists, so BGM arbitration is a no-op. */
+EXPORT(SceAppMgr, 0xAFCEAB96, int, sceAppMgrAcquireBgmPort, void)
+{
+    return 0;
+}
+
+EXPORT(SceAppMgr, 0xF3717E37, int, sceAppMgrReleaseBgmPort, void)
+{
+    return 0;
+}
+
+EXPORT(SceAppMgr, 0x3EF143BF, int, sceAppMgrDestroyOtherApp, void)
+{
+    return 0;
+}
+
 static int64_t appmgr_unimplemented(void)
 {
     return (int64_t)(int32_t)SCE_APPMGR_ERROR_INVALID;
@@ -145,3 +161,4 @@ static int64_t appmgr_unimplemented(void)
 #include "SceAppMgr_stubs.inc"
 
 DECLARE_LIBRARY(SceAppMgrUser, 0xa6605d6f);
+DECLARE_LIBRARY(SceAppMgr, 0x8af17416);

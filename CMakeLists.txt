@@ -89,6 +89,7 @@ add_executable(vita2native
     source/modules/SceAudio.c
     source/modules/SceGxm.c
     source/modules/SceAppMgr.c
+    source/modules/SceCamera.c
     source/modules/SceAtrac.c
     source/modules/SceAudiodec.c
     source/modules/SceAppUtil.c
@@ -104,12 +105,18 @@ add_executable(vita2native
     source/modules/SceLibKernel.c
     source/modules/SceLibKernelAeabi.c
     source/modules/SceFios2.c
+    source/modules/SceHttp.c
+    source/modules/SceSsl.c
+    source/modules/SceNpDrm.c
     source/modules/ScePgf.c
     source/modules/SceProcessmgr.c
+    source/modules/SceRegistryMgr.c
+    source/modules/SceVshBridge.c
     source/modules/SceSqlite.c
     source/modules/SceIoAsync.c
     source/modules/SceLibClib.c
     source/modules/SceNet.c
+    source/modules/SceNetCtl.c
     source/minimp3_impl.c
     source/modules/SceNgs.c
     source/modules/ScePower.c
@@ -405,6 +412,8 @@ if(BUILD_TESTING)
     add_executable(net_smoke
         tests/net_smoke.c
         source/modules/SceNet.c
+        source/modules/SceNetCtl.c
+        source/host/host_thread.c
     )
     target_include_directories(net_smoke PRIVATE include external/vita-headers/include)
     target_compile_definitions(net_smoke PRIVATE _GNU_SOURCE=1)
@@ -438,6 +447,16 @@ if(BUILD_TESTING)
     target_compile_definitions(touch_smoke PRIVATE _GNU_SOURCE=1)
     target_link_libraries(touch_smoke PRIVATE pthread m)
     add_test(NAME touch_smoke COMMAND touch_smoke)
+
+    add_executable(http_smoke
+        tests/http_smoke.c
+        source/modules/SceHttp.c
+        source/modules/SceSsl.c
+    )
+    target_include_directories(http_smoke PRIVATE include external/vita-headers/include)
+    target_compile_definitions(http_smoke PRIVATE _GNU_SOURCE=1)
+    target_link_libraries(http_smoke PRIVATE pthread dl m)
+    add_test(NAME http_smoke COMMAND http_smoke)
 
     add_executable(ngs_smoke
         tests/ngs_smoke.c
