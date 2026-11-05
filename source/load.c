@@ -508,11 +508,12 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
             while ((void *)export < export_end && export->size) {
                 LOG("  Exporting library 0x%08" PRIx32 ": %u funcs, %u vars (nids %p, entries %p)",
                     export->library_nid, export->num_syms_funcs, export->num_syms_vars,
-                    (void *)export->nid_table, (void *)export->entry_table);
+                    (void *)(uintptr_t)export->nid_table,
+                    (void *)(uintptr_t)export->entry_table);
                 module_register_guest_library(
                     export->library_nid, export->num_syms_funcs, export->num_syms_vars,
-                    (const uint32_t *)export->nid_table,
-                    (const void *const *)export->entry_table, loaded_info);
+                    (const uint32_t *)(uintptr_t)export->nid_table,
+                    (const void *const *)(uintptr_t)export->entry_table, loaded_info);
                 export = (void *)((uint8_t *)export + export->size);
             }
         }
@@ -559,6 +560,8 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
     return 0;
 
 err_free_data:
+    if (info && info->module_info)
+        module_unregister_guest_libraries(info->module_info);
     free((void *)data_addr);
 err_jit_close:
     jitClose(jit);
