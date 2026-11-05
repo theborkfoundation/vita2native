@@ -1018,6 +1018,61 @@ int main(int argc, char **argv)
         printf("MSAA surface scale modes: ok\n");
     }
 
+    /* 6g: tiled depth surface round-trips through the tiled element order. */
+    {
+        memset(scene.depth_values, 0, (size_t)WIDTH * HEIGHT * sizeof(float));
+        assert(sceGxmDepthStencilSurfaceInit(&scene.depth_surface, SCE_GXM_DEPTH_STENCIL_FORMAT_DF32,
+                                             SCE_GXM_DEPTH_STENCIL_SURFACE_TILED, WIDTH,
+                                             scene.depth_values, NULL) == 0);
+        if (((scene.depth_surface.zlsControl >>
+              SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_TYPE_FORMAT_OFFSET) &
+             SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_TYPE_MASK) !=
+            ((uint32_t)SCE_GXM_DEPTH_STENCIL_SURFACE_TILED >> 12)) {
+            fprintf(stderr, "tiled depth surface type was not reported\n");
+            goto done;
+        }
+
+        sceGxmDepthStencilSurfaceSetForceStoreMode(&scene.depth_surface,
+                                                   SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED);
+        sceGxmDepthStencilSurfaceSetForceLoadMode(&scene.depth_surface,
+                                                  SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_DISABLED);
+
+        set_solid_color(solid_pixels, 255, 0, 0, 255);
+        begin_frame(&scene);
+        draw_quad_at_z(&scene, &solid_texture, 0.25f);
+        set_solid_color(solid_pixels, 0, 255, 0, 255);
+        draw_quad_at_z(&scene, &solid_texture, 0.75f);
+        end_frame(&scene);
+
+        if (!pixel_is(scene.pixels, WIDTH / 2, HEIGHT / 2, 255, 0, 0, 255)) {
+            fprintf(stderr, "tiled depth test kept the far fragment\n");
+            goto done;
+        }
+        if (!(scene.depth_values[0] > 0.60f && scene.depth_values[0] < 0.65f) ||
+            !(scene.depth_values[WIDTH * HEIGHT - 1] > 0.60f &&
+              scene.depth_values[WIDTH * HEIGHT - 1] < 0.65f)) {
+            fprintf(stderr, "tiled depth store returned %f / %f\n", scene.depth_values[0],
+                    scene.depth_values[WIDTH * HEIGHT - 1]);
+            goto done;
+        }
+
+        sceGxmDepthStencilSurfaceSetForceLoadMode(&scene.depth_surface,
+                                                  SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED);
+        set_solid_color(solid_pixels, 0, 0, 255, 255);
+        begin_frame(&scene);
+        draw_quad_at_z(&scene, &solid_texture, 0.75f);
+        end_frame(&scene);
+
+        if (!pixel_is(scene.pixels, WIDTH / 2, HEIGHT / 2, 255, 0, 0, 255)) {
+            fprintf(stderr, "tiled depth force load did not reject the far fragment\n");
+            goto done;
+        }
+
+        sceGxmDepthStencilSurfaceSetForceLoadMode(&scene.depth_surface,
+                                                  SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_DISABLED);
+        printf("tiled depth surface: ok\n");
+    }
+
     /* 7: a deferred context records a draw that the immediate context replays. */
     {
         SceGxmDeferredContextParams deferred_params;

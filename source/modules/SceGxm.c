@@ -2509,10 +2509,31 @@ static uint32_t gxm_depth_to_u24(float value)
 }
 
 /*
+ * Element offset in a depth/stencil surface. Tiled surfaces use the same
+ * 32x32 tile order as tiled colour surfaces and textures. The guest never
+ * inspects this layout directly; load and store only have to agree with each
+ * other, which they do as long as both use this helper.
+ */
+static size_t gxm_ds_element_offset(const SceGxmDepthStencilSurface *surface, uint32_t x,
+                                    uint32_t y, uint32_t stride, uint32_t element_bytes)
+{
+    uint32_t type = (surface->zlsControl >> SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_TYPE_FORMAT_OFFSET) &
+                    SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_TYPE_MASK;
+
+    if (type == ((uint32_t)SCE_GXM_DEPTH_STENCIL_SURFACE_TILED >> 12)) {
+        uint32_t tiles_per_row = (stride + 31) >> 5;
+        uint32_t tile = (x >> 5) + tiles_per_row * (y >> 5);
+        uint32_t index = (tile << 10) | (x & 31) | ((y & 31) << 5);
+
+        return (size_t)index * element_bytes;
+    }
+
+    return ((size_t)y * stride + x) * element_bytes;
+}
+
+/*
  * Uploads the guest depth/stencil surface into the render target's GL depth
- * texture. Only called when the surface asks for a force load. Tiled surfaces
- * are currently interpreted as linear (the tile order is undocumented and
- * emulators ignore the backing store entirely).
+ * texture. Only called when the surface asks for a force load.
  */
 static bool gxm_ds_load_surface(SceGxmRenderTarget *rt,
                                 const SceGxmDepthStencilSurface *surface)
@@ -2562,19 +2583,23 @@ static bool gxm_ds_load_surface(SceGxmRenderTarget *rt,
             uint32_t s8 = bg_stencil;
 
             if (layout.packed) {
-                uint32_t value = ((const uint32_t *)depth_data)[(size_t)y * stride + x];
+                uint32_t value = *(const uint32_t *)(depth_data +
+                                                     gxm_ds_element_offset(surface, x, y, stride, 4));
                 d24 = value >> 8;
                 s8 = value & 0xFFu;
             } else {
                 if (layout.depth_bits == 32 && depth_data) {
-                    float value = ((const float *)depth_data)[(size_t)y * stride + x];
+                    float value = *(const float *)(depth_data +
+                                                   gxm_ds_element_offset(surface, x, y, stride, 4));
                     d24 = gxm_depth_to_u24(value);
                 } else if (layout.depth_bits == 16 && depth_data) {
-                    uint32_t value = ((const uint16_t *)depth_data)[(size_t)y * stride + x];
+                    uint32_t value = *(const uint16_t *)(depth_data +
+                                                         gxm_ds_element_offset(surface, x, y,
+                                                                               stride, 2));
                     d24 = (uint32_t)(((uint64_t)value * 0xFFFFFFu + 0x7FFFu) / 0xFFFFu);
                 }
                 if (layout.has_stencil && stencil_data)
-                    s8 = stencil_data[(size_t)y * stride + x];
+                    s8 = stencil_data[gxm_ds_element_offset(surface, x, y, stride, 1)];
             }
 
             packed[(size_t)y * width + x] = (d24 << 8) | s8;
@@ -2676,7 +2701,9 @@ static void gxm_ds_store_surface(SceGxmRenderTarget *rt,
 
         for (uint32_t x = 0; x < width; x++) {
             size_t src = (size_t)src_y * width + x;
-            size_t dst = (size_t)y * stride + x;
+            size_t depth_offset = gxm_ds_element_offset(surface, x, y, stride, 4);
+            size_t depth16_offset = gxm_ds_element_offset(surface, x, y, stride, 2);
+            size_t stencil_offset = gxm_ds_element_offset(surface, x, y, stride, 1);
             float depth = 1.0f;
             uint32_t d24;
             uint8_t s8 = (uint8_t)(surface->backgroundControl &
@@ -2692,17 +2719,17 @@ static void gxm_ds_store_surface(SceGxmRenderTarget *rt,
             }
 
             if (layout.packed) {
-                ((uint32_t *)depth_data)[dst] = (d24 << 8) | s8;
+                *(uint32_t *)(depth_data + depth_offset) = (d24 << 8) | s8;
             } else {
                 if (depth_data && have_depth) {
                     if (layout.depth_bits == 32)
-                        ((float *)depth_data)[dst] = depth;
+                        *(float *)(depth_data + depth_offset) = depth;
                     else if (layout.depth_bits == 16)
-                        ((uint16_t *)depth_data)[dst] =
+                        *(uint16_t *)(depth_data + depth16_offset) =
                             (uint16_t)(depth * 65535.0f + 0.5f);
                 }
                 if (stencil_data && have_stencil && layout.has_stencil)
-                    stencil_data[dst] = s8;
+                    stencil_data[stencil_offset] = s8;
             }
         }
     }
