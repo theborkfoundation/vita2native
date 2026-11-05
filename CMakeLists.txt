@@ -58,6 +58,8 @@ add_executable(vita2native
     external/sqlite/sqlite3.c
     source/gxm_texture.c
     source/gxm_texture_pvrtc.cpp
+    source/stb_image_impl.c
+    source/stb_image_write_impl.c
     external/Vita3K/vita3k/renderer/src/texture/pvrt-dec.cpp
     source/load.c
     source/log.c
@@ -92,6 +94,7 @@ add_executable(vita2native
     source/modules/SceCamera.c
     source/modules/SceAtrac.c
     source/modules/SceAudiodec.c
+    source/modules/SceJpeg.c
     source/modules/SceAppUtil.c
     source/modules/SceCommonDialog.c
     source/modules/SceKernelThreadMgr.c
@@ -141,6 +144,7 @@ target_include_directories(vita2native PRIVATE
     external/sqlite
     external/Vita3K/external/LibAtrac9/C/src
     external/vita-headers/include
+    external/Vita3K/external/stb
     external/Vita3K/vita3k/renderer/include
     ${SDL2_INCLUDE_DIRS}
 )
@@ -216,6 +220,15 @@ install(FILES README.md licenses/COPYING.txt DESTINATION ${CMAKE_INSTALL_DOCDIR}
 # __start_/__stop_ symbols for linker sections, and lld may garbage-collect
 # them unless -z nostart-stop-gc is used.
 
+# stb_image_write shifts a signed accumulator into the sign bit (well-defined
+# on the target compilers in release builds, but Zig's debug instrumentation
+# traps it). Treat the vendored stb translation units as third-party code.
+set_source_files_properties(
+    source/stb_image_impl.c
+    source/stb_image_write_impl.c
+    PROPERTIES COMPILE_OPTIONS "-fno-sanitize=undefined"
+)
+
 include(CTest)
 if(BUILD_TESTING)
     add_executable(host_smoke
@@ -259,6 +272,22 @@ if(BUILD_TESTING)
     target_compile_definitions(extra_imports_smoke PRIVATE _GNU_SOURCE=1)
     target_link_libraries(extra_imports_smoke PRIVATE pthread)
     add_test(NAME extra_imports_smoke COMMAND extra_imports_smoke)
+
+    add_executable(jpeg_smoke
+        tests/jpeg_smoke.c
+        source/module.c
+        source/modules/SceJpeg.c
+        source/stb_image_impl.c
+        source/stb_image_write_impl.c
+    )
+    target_include_directories(jpeg_smoke PRIVATE
+        include
+        external/vita-headers/include
+        external/Vita3K/external/stb
+    )
+    target_compile_definitions(jpeg_smoke PRIVATE _GNU_SOURCE=1)
+    target_link_libraries(jpeg_smoke PRIVATE pthread m)
+    add_test(NAME jpeg_smoke COMMAND jpeg_smoke)
 
     add_executable(gfx_smoke
         tests/gfx_smoke.c
