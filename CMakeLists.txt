@@ -101,6 +101,7 @@ add_executable(vita2native
     source/modules/SceMotion.c
     source/modules/SceKernelSync.c
     source/modules/SceLibKernel.c
+    source/modules/SceLibKernelAeabi.c
     source/modules/SceFios2.c
     source/modules/ScePgf.c
     source/modules/SceSqlite.c
@@ -353,6 +354,14 @@ if(BUILD_TESTING)
     target_include_directories(appmgr_smoke PRIVATE include external/vita-headers/include)
     target_compile_definitions(appmgr_smoke PRIVATE _GNU_SOURCE=1)
     add_test(NAME appmgr_smoke COMMAND appmgr_smoke)
+
+    add_executable(aeabi_smoke
+        tests/aeabi_smoke.c
+        source/modules/SceLibKernelAeabi.c
+    )
+    target_include_directories(aeabi_smoke PRIVATE include)
+    target_compile_definitions(aeabi_smoke PRIVATE _GNU_SOURCE=1)
+    add_test(NAME aeabi_smoke COMMAND aeabi_smoke)
 
     add_executable(ngs_smoke
         tests/ngs_smoke.c

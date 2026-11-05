@@ -34,16 +34,34 @@
         return expected;                                                                           \
     }
 
-#define ATOMIC_ADD_UNLESS(nid, name, T)                                                            \
-    EXPORT(SceLibKernel, nid, SceBool, name, T *store, T value, T cmpv)                            \
+/*
+ * Vita semantics: add value, but clamp the result to limit. Returns whether
+ * the limit was reached. 8/16-bit values are summed at 32 bits.
+ */
+#define ATOMIC_ADD_UNLESS_NARROW(nid, name, T)                                                     \
+    EXPORT(SceLibKernel, nid, SceBool, name, T *store, T value, T limit)                           \
     {                                                                                              \
-        T expected = __atomic_load_n(store, __ATOMIC_SEQ_CST);                                     \
-        while (expected != cmpv) {                                                                 \
-            if (__atomic_compare_exchange_n(store, &expected, (T)(expected + value), 0,            \
-                                            __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))                   \
-                return 1;                                                                          \
+        T old = __atomic_load_n(store, __ATOMIC_SEQ_CST);                                          \
+        for (;;) {                                                                                 \
+            int32_t sum = (int32_t)((uint32_t)(int32_t)old + (uint32_t)(int32_t)value);            \
+            T next = sum >= (int32_t)limit ? limit : (T)sum;                                       \
+            if (__atomic_compare_exchange_n(store, &old, next, 0, __ATOMIC_SEQ_CST,                \
+                                            __ATOMIC_SEQ_CST))                                     \
+                return sum >= (int32_t)limit;                                                      \
         }                                                                                          \
-        return 0;                                                                                  \
+    }
+
+#define ATOMIC_ADD_UNLESS_WIDE(nid, name, T)                                                       \
+    EXPORT(SceLibKernel, nid, SceBool, name, T *store, T value, T limit)                           \
+    {                                                                                              \
+        T old = __atomic_load_n(store, __ATOMIC_SEQ_CST);                                          \
+        for (;;) {                                                                                 \
+            int64_t sum = (int64_t)((uint64_t)(int64_t)old + (uint64_t)(int64_t)value);            \
+            T next = sum >= (int64_t)limit ? limit : (T)sum;                                       \
+            if (__atomic_compare_exchange_n(store, &old, next, 0, __ATOMIC_SEQ_CST,                \
+                                            __ATOMIC_SEQ_CST))                                     \
+                return sum >= (int64_t)limit;                                                      \
+        }                                                                                          \
     }
 
 #define ATOMIC_ADD_FETCH(nid, name, T)                                                             \
@@ -130,26 +148,39 @@
         __atomic_and_fetch(store, (T)~value, __ATOMIC_SEQ_CST);                                    \
     }
 
-#define ATOMIC_DEC_IF_POSITIVE(nid, name, T)                                                       \
+/* Returns the old value. 8/16-bit variants also decrement zero (Vita quirk). */
+#define ATOMIC_DEC_IF_POSITIVE_NARROW(nid, name, T)                                                \
     EXPORT(SceLibKernel, nid, T, name, T *store)                                                   \
     {                                                                                              \
-        T expected = __atomic_load_n(store, __ATOMIC_SEQ_CST);                                     \
-        while (expected > 0) {                                                                     \
-            if (__atomic_compare_exchange_n(store, &expected, (T)(expected - 1), 0,                \
-                                            __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))                   \
-                return (T)(expected - 1);                                                          \
+        T old = __atomic_load_n(store, __ATOMIC_SEQ_CST);                                          \
+        while (old >= 0) {                                                                         \
+            if (__atomic_compare_exchange_n(store, &old, (T)(old - 1), 0, __ATOMIC_SEQ_CST,        \
+                                            __ATOMIC_SEQ_CST))                                     \
+                break;                                                                             \
         }                                                                                          \
-        return expected;                                                                           \
+        return old;                                                                                \
+    }
+
+#define ATOMIC_DEC_IF_POSITIVE_WIDE(nid, name, T)                                                  \
+    EXPORT(SceLibKernel, nid, T, name, T *store)                                                   \
+    {                                                                                              \
+        T old = __atomic_load_n(store, __ATOMIC_SEQ_CST);                                          \
+        while (old > 0) {                                                                          \
+            if (__atomic_compare_exchange_n(store, &old, (T)(old - 1), 0, __ATOMIC_SEQ_CST,        \
+                                            __ATOMIC_SEQ_CST))                                     \
+                break;                                                                             \
+        }                                                                                          \
+        return old;                                                                                \
     }
 
 ATOMIC_ADD_FETCH(0x495C52EC, sceKernelAtomicAddAndGet16, int16_t)
 ATOMIC_ADD_FETCH(0x2E84A93B, sceKernelAtomicAddAndGet32, int32_t)
 ATOMIC_ADD_FETCH(0xB6CE9B9A, sceKernelAtomicAddAndGet64, int64_t)
 ATOMIC_ADD_FETCH(0x8F7BD940, sceKernelAtomicAddAndGet8, int8_t)
-ATOMIC_ADD_UNLESS(0x1CF4AA4B, sceKernelAtomicAddUnless16, int16_t)
-ATOMIC_ADD_UNLESS(0x4B33FD3C, sceKernelAtomicAddUnless32, int32_t)
-ATOMIC_ADD_UNLESS(0xFFCE7438, sceKernelAtomicAddUnless64, int64_t)
-ATOMIC_ADD_UNLESS(0x7FD94393, sceKernelAtomicAddUnless8, int8_t)
+ATOMIC_ADD_UNLESS_NARROW(0x1CF4AA4B, sceKernelAtomicAddUnless16, int16_t)
+ATOMIC_ADD_UNLESS_NARROW(0x4B33FD3C, sceKernelAtomicAddUnless32, int32_t)
+ATOMIC_ADD_UNLESS_WIDE(0xFFCE7438, sceKernelAtomicAddUnless64, int64_t)
+ATOMIC_ADD_UNLESS_NARROW(0x7FD94393, sceKernelAtomicAddUnless8, int8_t)
 ATOMIC_AND_FETCH(0xF9890F7E, sceKernelAtomicAndAndGet16, int16_t)
 ATOMIC_AND_FETCH(0x6709D30C, sceKernelAtomicAndAndGet32, int32_t)
 ATOMIC_AND_FETCH(0xAED2B370, sceKernelAtomicAndAndGet64, int64_t)
@@ -166,10 +197,10 @@ ATOMIC_CAS(0xE8C01236, sceKernelAtomicCompareAndSet16, int16_t)
 ATOMIC_CAS(0x1124A1D4, sceKernelAtomicCompareAndSet32, int32_t)
 ATOMIC_CAS(0x1EBDFCCD, sceKernelAtomicCompareAndSet64, int64_t)
 ATOMIC_CAS(0x327DB4C0, sceKernelAtomicCompareAndSet8, int8_t)
-ATOMIC_DEC_IF_POSITIVE(0x323718FB, sceKernelAtomicDecIfPositive16, int16_t)
-ATOMIC_DEC_IF_POSITIVE(0xCA3294F1, sceKernelAtomicDecIfPositive32, int32_t)
-ATOMIC_DEC_IF_POSITIVE(0x8BE2A007, sceKernelAtomicDecIfPositive64, int64_t)
-ATOMIC_DEC_IF_POSITIVE(0x9DABE6C3, sceKernelAtomicDecIfPositive8, int8_t)
+ATOMIC_DEC_IF_POSITIVE_NARROW(0x323718FB, sceKernelAtomicDecIfPositive16, int16_t)
+ATOMIC_DEC_IF_POSITIVE_WIDE(0xCA3294F1, sceKernelAtomicDecIfPositive32, int32_t)
+ATOMIC_DEC_IF_POSITIVE_WIDE(0x8BE2A007, sceKernelAtomicDecIfPositive64, int64_t)
+ATOMIC_DEC_IF_POSITIVE_NARROW(0x9DABE6C3, sceKernelAtomicDecIfPositive8, int8_t)
 ATOMIC_FETCH_ADD(0x5674DB0C, sceKernelAtomicGetAndAdd16, int16_t)
 ATOMIC_FETCH_ADD(0x2611CB0B, sceKernelAtomicGetAndAdd32, int32_t)
 ATOMIC_FETCH_ADD(0x63DAF37D, sceKernelAtomicGetAndAdd64, int64_t)
