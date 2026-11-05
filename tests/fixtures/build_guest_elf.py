@@ -45,6 +45,7 @@ EXIT_PROCESS_NID = 0x7595D9AA
 MKDIR_NID = 0x9670D39F
 SCEGXM_NID = 0xF76B66BD
 SCEAUDIO_NID = 0x438BB957
+SCEAPPUTIL_NID = 0x48E01D74
 GXM_INITIALIZE_NID = 0xB0F1E4EC
 
 # Layout of the RX segment.
@@ -562,6 +563,133 @@ def build_audio_elf():
     return assemble_elf(rx, rw, rela, AUDIO_MODINFO)
 
 
+# --- SceAppUtil fixture ----------------------------------------------------
+
+APPUTIL_STUB_BASE = 0x140
+APPUTIL_LIB_NAME = 0x190
+APPUTIL_MODINFO = 0x1A0
+APPUTIL_IMPORT = 0x200
+APPUTIL_NIDS = 0x228
+APPUTIL_ENTRIES = 0x240
+APPUTIL_RX_SIZE = 0x258
+
+APPUTIL_LIB = b"SceAppUtil\0"
+
+APPUTIL_FUNCS = [
+    0xDAFFE671,  # sceAppUtilInit
+    0x7E8FE96A,  # sceAppUtilSaveDataSlotCreate
+    0x93F0D89F,  # sceAppUtilSaveDataSlotGetParam
+    0x266A7646,  # sceAppUtilSaveDataSlotDelete
+    0xB220B00B,  # sceAppUtilShutdown
+]
+
+APPUTIL_RW_INIT = 0x000
+APPUTIL_RW_BOOT = 0x040
+APPUTIL_RW_SLOT = 0x070
+APPUTIL_RW_OUT = 0x3C0
+APPUTIL_RW_SIZE = 0x710
+
+
+def build_apputil_elf():
+    """Guest ELF that drives the save-data slot lifecycle through imports."""
+    code = []
+    rx_relocs = []
+
+    def emit(word):
+        code.append(word & 0xFFFFFFFF)
+
+    def movw_movt_rw(rd, offset):
+        base = len(code) * 4
+        emit(arm_movw(rd, 0))
+        emit(arm_movt(rd, 0))
+        rx_relocs.append(encode_rela(0, 1, base, offset, R_ARM_MOVW_ABS_NC))
+        rx_relocs.append(encode_rela(0, 1, base + 4, offset, R_ARM_MOVT_ABS))
+
+    def call(index):
+        emit(arm_bl(len(code) * 4, APPUTIL_STUB_BASE + index * 12))
+
+    def check(bit):
+        emit(0xE3500000)             # cmp r0, #0
+        emit(0x13844000 | bit)       # orrne r4, r4, #bit
+
+    emit(0xE92D4010)                 # push {r4, lr}
+    emit(arm_mov_imm(4, 0))          # mov r4, #0
+
+    # sceAppUtilInit(init, boot)
+    movw_movt_rw(0, APPUTIL_RW_INIT)
+    movw_movt_rw(1, APPUTIL_RW_BOOT)
+    call(0)
+    check(1)
+
+    # sceAppUtilSaveDataSlotCreate(0, param, NULL)
+    emit(arm_mov_imm(0, 0))
+    movw_movt_rw(1, APPUTIL_RW_SLOT)
+    emit(arm_mov_imm(2, 0))
+    call(1)
+    check(2)
+
+    # sceAppUtilSaveDataSlotGetParam(0, out, NULL)
+    emit(arm_mov_imm(0, 0))
+    movw_movt_rw(1, APPUTIL_RW_OUT)
+    emit(arm_mov_imm(2, 0))
+    call(2)
+    check(4)
+
+    # sceAppUtilSaveDataSlotDelete(0, NULL)
+    emit(arm_mov_imm(0, 0))
+    emit(arm_mov_imm(1, 0))
+    call(3)
+    check(8)
+
+    # sceAppUtilShutdown()
+    call(4)
+    check(16)
+
+    emit(0xE1A00004)                 # mov r0, r4
+    emit(0xE3500000)                 # cmp r0, #0
+    emit(0x03A0002A)                 # moveq r0, #42
+    emit(0xE8BD8010)                 # pop {r4, pc}
+
+    assert len(code) * 4 <= APPUTIL_STUB_BASE, "apputil fixture code overlaps the stubs"
+
+    rx = bytearray(APPUTIL_RX_SIZE)
+    rx[:len(code) * 4] = b"".join(struct.pack("<I", w) for w in code)
+
+    rx[APPUTIL_LIB_NAME:APPUTIL_LIB_NAME + len(APPUTIL_LIB)] = APPUTIL_LIB
+
+    info = bytearray(MODULE_INFO_SIZE)
+    struct.pack_into("<HH", info, 0x00, 0x0000, 0x0101)
+    info[0x04:0x04 + len(MODULE_NAME)] = MODULE_NAME
+    struct.pack_into("<I", info, 0x2C, APPUTIL_IMPORT)
+    struct.pack_into("<I", info, 0x30, APPUTIL_IMPORT + IMPORT_SIZE)
+    struct.pack_into("<I", info, 0x34, 0x12345678)
+    struct.pack_into("<I", info, 0x44, 0x00000000)
+    struct.pack_into("<I", info, 0x48, 0xFFFFFFFF)
+    struct.pack_into("<I", info, 0x5C, 0x03570011)
+    rx[APPUTIL_MODINFO:APPUTIL_MODINFO + MODULE_INFO_SIZE] = info
+
+    imp = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp, 0, IMPORT_SIZE, 1, 0, len(APPUTIL_FUNCS), 0, 0)
+    struct.pack_into("<I", imp, IMP_LIBRARY_NID, SCEAPPUTIL_NID)
+    rx[APPUTIL_IMPORT:APPUTIL_IMPORT + IMPORT_SIZE] = imp
+
+    for i, nid in enumerate(APPUTIL_FUNCS):
+        struct.pack_into("<I", rx, APPUTIL_NIDS + i * 4, nid)
+
+    rx_relocs.append(encode_rela(0, 0, APPUTIL_IMPORT + IMP_LIBRARY_NAME, APPUTIL_LIB_NAME))
+    rx_relocs.append(encode_rela(0, 0, APPUTIL_IMPORT + IMP_FUNC_NID_TABLE, APPUTIL_NIDS))
+    rx_relocs.append(encode_rela(0, 0, APPUTIL_IMPORT + IMP_FUNC_ENTRY_TABLE, APPUTIL_ENTRIES))
+    for i in range(len(APPUTIL_FUNCS)):
+        rx_relocs.append(encode_rela(0, 0, APPUTIL_ENTRIES + i * 4,
+                                     APPUTIL_STUB_BASE + i * 12))
+
+    rw = bytearray(APPUTIL_RW_SIZE)
+    struct.pack_into("<i", rw, APPUTIL_RW_SLOT + 8, 0x1234)  # userParam
+
+    rela = bytearray(b"".join(rx_relocs))
+    return assemble_elf(rx, rw, rela, APPUTIL_MODINFO)
+
+
 def assemble_elf(rx, rw, rela, entry_offset):
     phoff = 52
     rx_off = 0x100
@@ -1059,6 +1187,11 @@ def main():
     with open(audio_path, "wb") as f:
         f.write(build_audio_elf())
     print(f"wrote {audio_path}")
+
+    apputil_path = os.path.join(out_dir, "guest_apputil.elf")
+    with open(apputil_path, "wb") as f:
+        f.write(build_apputil_elf())
+    print(f"wrote {apputil_path}")
 
     if os.path.exists(os.path.join(shader_dir, "texture_v.gxp")) and os.path.exists(
             os.path.join(shader_dir, "texture_f.gxp")):
