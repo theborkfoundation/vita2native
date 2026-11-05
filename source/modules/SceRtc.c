@@ -7,6 +7,8 @@
  */
 
 #include <psp2/rtc.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -397,3 +399,246 @@ EXPORT(SceRtcUser, 0x0A05E201, int, sceRtcConvertLocalTimeToUtc, const SceRtcTic
 }
 
 DECLARE_LIBRARY(SceRtcUser, 0x6704d3c6);
+
+/* ------------------------------------------------------- formatting/parsing */
+
+static void format_utc(char *out, size_t size, const struct tm *tm, int tz_minutes)
+{
+    int offset = tz_minutes;
+    int hours = offset / 60;
+    int minutes = offset % 60;
+
+    snprintf(out, size, "%04d-%02d-%02dT%02d:%02d:%02d%c%02d:%02d", tm->tm_year + 1900,
+             tm->tm_mon + 1, tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec,
+             offset < 0 ? '-' : '+', abs(hours), abs(minutes));
+}
+
+EXPORT(SceRtcUser, 0x147F2138, int, sceRtcFormatRFC2822, char *out, const SceRtcTick *utc,
+       int tz_minutes)
+{
+    SceDateTime dt;
+    int status;
+
+    if (!out || !utc)
+        return SCE_RTC_ERROR_INVALID_POINTER;
+
+    status = tick_to_date_time((SceInt64)utc->tick, &dt);
+    if (status < 0)
+        return status;
+
+    snprintf(out, 64, "%s, %02d %s %04d %02d:%02d:%02d %+05d", "Mon", dt.day, "Jan", dt.year,
+             dt.hour, dt.minute, dt.second, tz_minutes);
+    return 0;
+}
+
+EXPORT(SceRtcUser, 0xCCEA2B54, int, sceRtcFormatRFC3339, char *out, const SceRtcTick *utc,
+       int tz_minutes)
+{
+    SceDateTime dt;
+    struct tm tm;
+    int status;
+
+    if (!out || !utc)
+        return SCE_RTC_ERROR_INVALID_POINTER;
+
+    status = tick_to_date_time((SceInt64)utc->tick, &dt);
+    if (status < 0)
+        return status;
+
+    date_time_to_tm(&dt, &tm);
+    format_utc(out, 64, &tm, tz_minutes);
+    return 0;
+}
+
+EXPORT(SceRtcUser, 0x42CA8EB5, int, sceRtcFormatRFC2822LocalTime, char *out,
+       const SceRtcTick *utc)
+{
+    SceDateTime dt;
+    struct tm tm;
+    time_t seconds;
+    int status;
+
+    if (!out || !utc)
+        return SCE_RTC_ERROR_INVALID_POINTER;
+
+    status = tick_to_date_time((SceInt64)utc->tick, &dt);
+    if (status < 0)
+        return status;
+
+    date_time_to_tm(&dt, &tm);
+    seconds = timegm(&tm);
+    localtime_r(&seconds, &tm);
+    strftime(out, 64, "%a, %d %b %Y %H:%M:%S %z", &tm);
+
+    return 0;
+}
+
+EXPORT(SceRtcUser, 0x742250A9, int, sceRtcFormatRFC3339LocalTime, char *out,
+       const SceRtcTick *utc)
+{
+    SceDateTime dt;
+    struct tm tm;
+    time_t seconds;
+    int status;
+
+    if (!out || !utc)
+        return SCE_RTC_ERROR_INVALID_POINTER;
+
+    status = tick_to_date_time((SceInt64)utc->tick, &dt);
+    if (status < 0)
+        return status;
+
+    date_time_to_tm(&dt, &tm);
+    seconds = timegm(&tm);
+    localtime_r(&seconds, &tm);
+    {
+        struct tm local = tm;
+        long offset = tm.tm_gmtoff;
+
+        format_utc(out, 64, &local, (int)(offset / 60));
+    }
+
+    return 0;
+}
+
+EXPORT(SceRtcUser, 0x2D18AEEC, int, sceRtcParseRFC3339, SceRtcTick *utc, const char *text)
+{
+    int year, month, day, hour, minute, second;
+    struct tm tm;
+    time_t seconds;
+
+    if (!utc || !text)
+        return SCE_RTC_ERROR_INVALID_POINTER;
+
+    if (sscanf(text, "%d-%d-%dT%d:%d:%d", &year, &month, &day, &hour, &minute, &second) != 6)
+        return SCE_RTC_ERROR_BAD_PARSE;
+
+    memset(&tm, 0, sizeof(tm));
+    tm.tm_year = year - 1900;
+    tm.tm_mon = month - 1;
+    tm.tm_mday = day;
+    tm.tm_hour = hour;
+    tm.tm_min = minute;
+    tm.tm_sec = second;
+
+    seconds = timegm(&tm);
+    utc->tick = (SceUInt64)((SceInt64)seconds * VITA_TICKS_PER_SECOND + VITA_EPOCH_OFFSET);
+
+    return 0;
+}
+
+EXPORT(SceRtcUser, 0x2347CE12, int, sceRtcParseDateTime, SceRtcTick *utc, const char *text)
+{
+    return sceRtcParseRFC3339(utc, text);
+}
+
+EXPORT(SceRtcUser, 0xB5C4E95F, int, sceRtcGetDayOfYear, int year, int month, int day)
+{
+    int total = day;
+
+    for (int m = 1; m < month; m++)
+        total += days_in_month(year, m);
+
+    return total;
+}
+
+EXPORT(SceRtcUser, 0x92ABEBAF, int, sceRtcGetDosTime, const SceDateTime *date_time,
+       unsigned int *dos_time)
+{
+    if (!date_time || !dos_time)
+        return SCE_RTC_ERROR_INVALID_POINTER;
+
+    *dos_time = ((unsigned int)(date_time->year - 1980) << 25) |
+                ((unsigned int)date_time->month << 21) | ((unsigned int)date_time->day << 16) |
+                ((unsigned int)date_time->hour << 11) | ((unsigned int)date_time->minute << 5) |
+                ((unsigned int)date_time->second >> 1);
+
+    return 0;
+}
+
+EXPORT(SceRtcUser, 0xF8B22B07, int, sceRtcSetDosTime, SceDateTime *date_time,
+       unsigned int dos_time)
+{
+    if (!date_time)
+        return SCE_RTC_ERROR_INVALID_POINTER;
+
+    date_time->year = (unsigned short)((dos_time >> 25) + 1980);
+    date_time->month = (unsigned short)((dos_time >> 21) & 0xF);
+    date_time->day = (unsigned short)((dos_time >> 16) & 0x1F);
+    date_time->hour = (unsigned short)((dos_time >> 11) & 0x1F);
+    date_time->minute = (unsigned short)((dos_time >> 5) & 0x3F);
+    date_time->second = (unsigned short)((dos_time & 0x1F) * 2);
+    date_time->microsecond = 0;
+
+    return 0;
+}
+
+/* 100 ns ticks between 1601-01-01 and 1970-01-01. */
+#define WIN32_EPOCH_OFFSET 116444736000000000ULL
+
+EXPORT(SceRtcUser, 0x8A95E119, int, sceRtcGetWin32FileTime, const SceDateTime *date_time,
+       SceUInt64 *file_time)
+{
+    time_t seconds;
+
+    if (!date_time || !file_time)
+        return SCE_RTC_ERROR_INVALID_POINTER;
+
+    sceRtcGetTime_t(date_time, &seconds);
+    *file_time = WIN32_EPOCH_OFFSET + (SceUInt64)seconds * 10000000ull +
+                 (SceUInt64)date_time->microsecond * 10ull;
+
+    return 0;
+}
+
+EXPORT(SceRtcUser, 0xA79A8846, int, sceRtcSetWin32FileTime, SceDateTime *date_time,
+       SceUInt64 file_time)
+{
+    struct tm tm;
+    time_t seconds;
+
+    if (!date_time)
+        return SCE_RTC_ERROR_INVALID_POINTER;
+    if (file_time < WIN32_EPOCH_OFFSET)
+        return SCE_RTC_ERROR_INVALID_VALUE;
+
+    file_time -= WIN32_EPOCH_OFFSET;
+    seconds = (time_t)(file_time / 10000000ull);
+    if (!gmtime_r(&seconds, &tm))
+        return SCE_RTC_ERROR_INVALID_VALUE;
+
+    tm_to_date_time(&tm, date_time);
+    date_time->microsecond = (unsigned int)((file_time % 10000000ull) / 10ull);
+
+    return 0;
+}
+
+EXPORT(SceRtcUser, 0x5612AF12, int, sceRtcGetCurrentAdNetworkTick, SceRtcTick *tick)
+{
+    return sceRtcGetCurrentTick(tick);
+}
+
+EXPORT(SceRtcUser, 0x4ED6BA6C, int, sceRtcGetCurrentDebugNetworkTick, SceRtcTick *tick)
+{
+    return sceRtcGetCurrentTick(tick);
+}
+
+EXPORT(SceRtcUser, 0xBB92534F, int, sceRtcGetCurrentGpsTick, SceRtcTick *tick)
+{
+    return sceRtcGetCurrentTick(tick);
+}
+
+EXPORT(SceRtcUser, 0xA086AE18, int, sceRtcGetCurrentRetainedNetworkTick, SceRtcTick *tick)
+{
+    return sceRtcGetCurrentTick(tick);
+}
+
+EXPORT(SceRtcUser, 0x8148E95C, int, sceRtcGetLastAdjustedTick, SceRtcTick *tick)
+{
+    return sceRtcGetCurrentTick(tick);
+}
+
+EXPORT(SceRtcUser, 0xA8C16615, int, sceRtcGetLastReincarnatedTick, SceRtcTick *tick)
+{
+    return sceRtcGetCurrentTick(tick);
+}
