@@ -63,7 +63,7 @@ int main(void)
         puts("pgf_smoke: get font info failed");
         return 1;
     }
-    if (info.BPP != 8 || info.maxGlyphWidth != 16 || info.maxGlyphHeight != 16 ||
+    if (info.BPP != 8 || info.maxGlyphWidth != 12 || info.maxGlyphHeight != 16 ||
         info.fontStyle.fontV != 8.0f || info.fontStyle.fontVRes != 80.0f) {
         printf("pgf_smoke: wrong font info (bpp %u, %dx%d, v %.1f/%.1f)\n", info.BPP,
                info.maxGlyphWidth, info.maxGlyphHeight, info.fontStyle.fontV,
@@ -76,14 +76,14 @@ int main(void)
         puts("pgf_smoke: get char info failed");
         return 1;
     }
-    if (char_info.bitmapWidth != 16 || char_info.bitmapHeight != 16 ||
-        char_info.bitmapTop != 16 || char_info.sfp26AdvanceH != (16 << 6)) {
+    if (char_info.bitmapWidth != 12 || char_info.bitmapHeight != 16 ||
+        char_info.bitmapTop != 16 || char_info.sfp26AdvanceH != (12 << 6)) {
         printf("pgf_smoke: wrong char info (%ux%u top %u adv %d)\n", char_info.bitmapWidth,
                char_info.bitmapHeight, char_info.bitmapTop, char_info.sfp26AdvanceH);
         return 1;
     }
 
-    if (sceFontGetCharImageRect(font, 'A', &image_rect) != 0 || image_rect.width != 16 ||
+    if (sceFontGetCharImageRect(font, 'A', &image_rect) != 0 || image_rect.width != 12 ||
         image_rect.height != 16) {
         puts("pgf_smoke: wrong image rect");
         return 1;

@@ -1,5 +1,6 @@
-#include <m-dict.h>
 #include <errno.h>
+#include <m-dict.h>
+#include <psp2/io/fcntl.h>
 #include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/error.h>
@@ -1446,20 +1447,6 @@ EXPORT(SceLibKernel, 0x6E903AB2, int, sceIoChstatByFd, SceUID fd, const SceIoSta
     (void)fd;
     (void)stat;
     (void)bits;
-    return 0;
-}
-
-EXPORT(SceLibKernel, 0x04B30CB2, int, sceIoDevctl, const char *dev, unsigned int cmd,
-       void *indata, int inlen, void *outdata, int outlen)
-{
-    (void)dev;
-    (void)cmd;
-    (void)indata;
-    (void)inlen;
-
-    if (outdata && outlen > 0)
-        memset(outdata, 0, (size_t)outlen);
-
     return 0;
 }
 

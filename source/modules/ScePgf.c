@@ -4,7 +4,7 @@
  * There is no public specification for the system PGF font container, and the
  * files are not redistributable. This implementation instead exposes a
  * synthetic font with real metrics and glyph bitmaps from the public-domain
- * 8x8 VGA font (scaled 2x). Titles that only need the SceFont API to render
+ * 8x8 VGA font scaled to 12x16. Titles that only need the SceFont API to render
  * text (VitaShell, most homebrew) work unchanged; the glyphs are readable
  * ASCII. Non-ASCII code points map to '?'.
  */
@@ -23,8 +23,10 @@
 #define FONT_LIB_MAGIC 0x464C4942u /* "FLIB" */
 #define FONT_MAGIC     0x464F4E54u /* "FONT" */
 
-#define GLYPH_BITMAP_SIZE 16
-#define GLYPH_ADVANCE     (GLYPH_BITMAP_SIZE << 6) /* 26.6 fixed point */
+#define GLYPH_WIDTH       12
+#define GLYPH_HEIGHT      16
+#define GLYPH_ADVANCE_W   (GLYPH_WIDTH << 6)  /* 26.6 fixed point */
+#define GLYPH_ADVANCE_H   (GLYPH_HEIGHT << 6) /* 26.6 fixed point */
 #define FONT_DPI          220.0f
 
 typedef struct {
@@ -247,30 +249,30 @@ EXPORT(ScePgf, 0xF9414FA2, int, sceFontGetFontInfo, SceFontHandle font_handle,
 
     memset(font_info, 0, sizeof(*font_info));
 
-    font_info->maxGlyphWidthI = GLYPH_ADVANCE;
-    font_info->maxGlyphHeightI = GLYPH_ADVANCE;
-    font_info->maxGlyphAscenderI = GLYPH_ADVANCE;
+    font_info->maxGlyphWidthI = GLYPH_ADVANCE_W;
+    font_info->maxGlyphHeightI = GLYPH_ADVANCE_H;
+    font_info->maxGlyphAscenderI = GLYPH_ADVANCE_H;
     font_info->maxGlyphDescenderI = 0;
     font_info->maxGlyphLeftXI = 0;
-    font_info->maxGlyphBaseYI = GLYPH_ADVANCE;
+    font_info->maxGlyphBaseYI = GLYPH_ADVANCE_H;
     font_info->minGlyphCenterXI = 0;
-    font_info->maxGlyphTopYI = GLYPH_ADVANCE;
-    font_info->maxGlyphAdvanceXI = GLYPH_ADVANCE;
+    font_info->maxGlyphTopYI = GLYPH_ADVANCE_H;
+    font_info->maxGlyphAdvanceXI = GLYPH_ADVANCE_W;
     font_info->maxGlyphAdvanceYI = 0;
 
-    font_info->maxGlyphWidthF = (float)GLYPH_BITMAP_SIZE;
-    font_info->maxGlyphHeightF = (float)GLYPH_BITMAP_SIZE;
-    font_info->maxGlyphAscenderF = (float)GLYPH_BITMAP_SIZE;
+    font_info->maxGlyphWidthF = (float)GLYPH_WIDTH;
+    font_info->maxGlyphHeightF = (float)GLYPH_HEIGHT;
+    font_info->maxGlyphAscenderF = (float)GLYPH_HEIGHT;
     font_info->maxGlyphDescenderF = 0.0f;
     font_info->maxGlyphLeftXF = 0.0f;
-    font_info->maxGlyphBaseYF = (float)GLYPH_BITMAP_SIZE;
+    font_info->maxGlyphBaseYF = (float)GLYPH_HEIGHT;
     font_info->minGlyphCenterXF = 0.0f;
-    font_info->maxGlyphTopYF = (float)GLYPH_BITMAP_SIZE;
-    font_info->maxGlyphAdvanceXF = (float)GLYPH_BITMAP_SIZE;
+    font_info->maxGlyphTopYF = (float)GLYPH_HEIGHT;
+    font_info->maxGlyphAdvanceXF = (float)GLYPH_WIDTH;
     font_info->maxGlyphAdvanceYF = 0.0f;
 
-    font_info->maxGlyphWidth = GLYPH_BITMAP_SIZE;
-    font_info->maxGlyphHeight = GLYPH_BITMAP_SIZE;
+    font_info->maxGlyphWidth = GLYPH_WIDTH;
+    font_info->maxGlyphHeight = GLYPH_HEIGHT;
     fill_style(&font_info->fontStyle, font->lib->hres, font->lib->vres);
     font_info->BPP = 8;
 
@@ -288,20 +290,20 @@ EXPORT(ScePgf, 0x6FD1BA65, int, sceFontGetCharInfo, SceFontHandle font_handle,
         return SCE_FONT_ERROR_INVALID_PARAMETER;
 
     memset(char_info, 0, sizeof(*char_info));
-    char_info->bitmapWidth = GLYPH_BITMAP_SIZE;
-    char_info->bitmapHeight = GLYPH_BITMAP_SIZE;
+    char_info->bitmapWidth = GLYPH_WIDTH;
+    char_info->bitmapHeight = GLYPH_HEIGHT;
     char_info->bitmapLeft = 0;
-    char_info->bitmapTop = GLYPH_BITMAP_SIZE;
+    char_info->bitmapTop = GLYPH_HEIGHT;
 
-    char_info->sfp26Width = GLYPH_ADVANCE;
-    char_info->sfp26Height = GLYPH_ADVANCE;
-    char_info->sfp26Ascender = GLYPH_ADVANCE;
+    char_info->sfp26Width = GLYPH_ADVANCE_W;
+    char_info->sfp26Height = GLYPH_ADVANCE_H;
+    char_info->sfp26Ascender = GLYPH_ADVANCE_H;
     char_info->sfp26Descender = 0;
     char_info->sfp26BearingHX = 0;
     char_info->sfp26BearingHY = 0;
     char_info->sfp26BearingVX = 0;
     char_info->sfp26BearingVY = 0;
-    char_info->sfp26AdvanceH = GLYPH_ADVANCE;
+    char_info->sfp26AdvanceH = GLYPH_ADVANCE_W;
     char_info->sfp26AdvanceV = 0;
 
     (void)char_code;
@@ -320,8 +322,8 @@ EXPORT(ScePgf, 0x70C86B3E, int, sceFontGetCharImageRect, SceFontHandle font_hand
     if (!char_rect)
         return SCE_FONT_ERROR_INVALID_PARAMETER;
 
-    char_rect->width = GLYPH_BITMAP_SIZE;
-    char_rect->height = GLYPH_BITMAP_SIZE;
+    char_rect->width = GLYPH_WIDTH;
+    char_rect->height = GLYPH_HEIGHT;
     return 0;
 }
 
@@ -341,16 +343,16 @@ static void draw_glyph(unsigned int char_code, SceFontGlyphImage *image)
     origin_x = image->xPos64 >> 6;
     origin_y = image->yPos64 >> 6;
 
-    for (unsigned int y = 0; y < GLYPH_BITMAP_SIZE; y++) {
+    for (unsigned int y = 0; y < GLYPH_HEIGHT; y++) {
         int dst_y = origin_y + (int)y;
 
         if (dst_y < 0 || dst_y >= (int)image->bufHeight)
             continue;
 
-        for (unsigned int x = 0; x < GLYPH_BITMAP_SIZE; x++) {
+        for (unsigned int x = 0; x < GLYPH_WIDTH; x++) {
             int dst_x = origin_x + (int)x;
-            unsigned int src_x = x >> 1;
-            unsigned int src_y = y >> 1;
+            unsigned int src_x = (x * 8) / GLYPH_WIDTH;
+            unsigned int src_y = (y * 8) / GLYPH_HEIGHT;
             int on;
 
             if (dst_x < 0 || dst_x >= (int)image->bufWidth)

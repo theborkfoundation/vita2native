@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include "fs.h"
@@ -21,6 +22,7 @@
 #define st_mtim st_mtimespec
 #define st_ctim st_ctimespec
 #endif
+#include <psp2/io/devctl.h>
 #include <psp2/io/dirent.h>
 
 #include "log.h"
@@ -604,6 +606,35 @@ EXPORT(SceLibKernel, 0x54ABACFA, int, sceIoIoctl, SceUID fd, unsigned int cmd, v
     (void)cmd;
     (void)indata;
     (void)inlen;
+
+    if (outdata && outlen > 0)
+        memset(outdata, 0, (size_t)outlen);
+
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0x04B30CB2, int, sceIoDevctl, const char *dev, unsigned int cmd,
+       void *indata, int inlen, void *outdata, int outlen)
+{
+    (void)indata;
+    (void)inlen;
+
+    /* 0x3001 is the device-info query every file manager uses. */
+    if (cmd == 0x3001 && outdata && outlen >= (int)sizeof(SceIoDevInfo)) {
+        SceIoDevInfo *info = outdata;
+        struct statvfs vfs;
+        char path[PATH_MAX];
+
+        if (!dev || host_fs_resolve_path(dev, path, sizeof(path)) < 0 || statvfs(path, &vfs) != 0)
+            return SCE_ERROR_ERRNO_EINVAL;
+
+        memset(info, 0, sizeof(*info));
+        info->max_size = (SceOff)((uint64_t)vfs.f_blocks * vfs.f_frsize);
+        info->free_size = (SceOff)((uint64_t)vfs.f_bavail * vfs.f_frsize);
+        info->cluster_size = (SceSize)vfs.f_frsize;
+        info->unk = NULL;
+        return 0;
+    }
 
     if (outdata && outlen > 0)
         memset(outdata, 0, (size_t)outlen);
