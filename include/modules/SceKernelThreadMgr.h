@@ -30,5 +30,6 @@ int SceKernelSync_finish(void);
 
 VitaThreadInfo *SceKernelThreadMgr_get_thread_info(void);
 int SceKernelThreadMgr_main_entry(SceKernelThreadEntry entry, int args, void *argp);
+void SceKernelThreadMgr_notify_event_callbacks(SceUID event_id, int notify_arg);
 
 #endif

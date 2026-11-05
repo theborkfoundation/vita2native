@@ -20,6 +20,7 @@
 
 #include "host.h"
 #include "module.h"
+#include "modules/SceKernelThreadMgr.h"
 #include "modules/SceSysmem.h"
 
 #define VITA_EVENT_SLOTS 64
@@ -161,6 +162,8 @@ static int event_set(SceUID uid, uint32_t set_pattern, uint64_t user_data)
     event->user_data = user_data;
     pthread_cond_broadcast(&event->cond);
     pthread_mutex_unlock(&event->mutex);
+
+    SceKernelThreadMgr_notify_event_callbacks(uid, (int)set_pattern);
 
     return 0;
 }

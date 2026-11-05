@@ -85,6 +85,7 @@ typedef struct {
     char name[32];
     SceKernelCallbackFunction callback;
     void *user_data;
+    SceUID event_id;
     SceUID notifier_id;
     int notify_count;
     int notify_arg;
@@ -599,23 +600,68 @@ EXPORT(SceThreadmgr, 0x2682E6ED, int, _sceKernelExitCallback, void)
 EXPORT(SceThreadmgr, 0x76FB37E9, int, sceKernelRegisterCallbackToEvent, SceUID callback_id,
        SceUID event_id)
 {
-    (void)callback_id;
-    (void)event_id;
-    return 0;
+    int ret = SCE_KERNEL_ERROR_UNKNOWN_CALLBACK_ID;
+
+    pthread_mutex_lock(&g_vita_callbacks_lock);
+    VitaCallbackInfo *info = callback_lookup(callback_id);
+
+    if (info) {
+        info->event_id = event_id;
+        ret = 0;
+    }
+    pthread_mutex_unlock(&g_vita_callbacks_lock);
+
+    return ret;
 }
 
 EXPORT(SceThreadmgr, 0x18462B11, int, sceKernelUnregisterCallbackFromEvent, SceUID callback_id,
        SceUID event_id)
 {
-    (void)callback_id;
-    (void)event_id;
-    return 0;
+    int ret = SCE_KERNEL_ERROR_UNKNOWN_CALLBACK_ID;
+
+    pthread_mutex_lock(&g_vita_callbacks_lock);
+    VitaCallbackInfo *info = callback_lookup(callback_id);
+
+    if (info) {
+        if (info->event_id == event_id)
+            info->event_id = 0;
+        ret = 0;
+    }
+    pthread_mutex_unlock(&g_vita_callbacks_lock);
+
+    return ret;
 }
 
 EXPORT(SceThreadmgr, 0x888A7361, int, sceKernelUnregisterCallbackFromEventAll, SceUID callback_id)
 {
-    (void)callback_id;
-    return 0;
+    int ret = SCE_KERNEL_ERROR_UNKNOWN_CALLBACK_ID;
+
+    pthread_mutex_lock(&g_vita_callbacks_lock);
+    VitaCallbackInfo *info = callback_lookup(callback_id);
+
+    if (info) {
+        info->event_id = 0;
+        ret = 0;
+    }
+    pthread_mutex_unlock(&g_vita_callbacks_lock);
+
+    return ret;
+}
+
+void SceKernelThreadMgr_notify_event_callbacks(SceUID event_id, int notify_arg)
+{
+    pthread_mutex_lock(&g_vita_callbacks_lock);
+    for (int i = 0; i < VITA_CALLBACK_SLOTS; i++) {
+        VitaCallbackInfo *info = &g_vita_callbacks[i];
+
+        if (!info->used || info->event_id != event_id)
+            continue;
+        if (info->notify_count < 0x7FFFFFFF)
+            info->notify_count++;
+        info->notify_arg = notify_arg;
+        info->notifier_id = 0;
+    }
+    pthread_mutex_unlock(&g_vita_callbacks_lock);
 }
 
 /* Thread event handlers. */
