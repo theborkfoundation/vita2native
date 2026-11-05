@@ -309,17 +309,29 @@ EXPORT(SceThreadmgr, 0x0402C633, int, _sceKernelGetSemaInfo, SceUID uid,
 
 EXPORT(SceThreadmgr, 0xCBE235C7, SceUID, sceKernelOpenSema, const char *name)
 {
-    (void)name;
+    VitaSemaInfo *result = NULL;
+    vita_sema_dict_it_t it;
 
-    /* Opening by name is not supported; every object is per-process here. */
-    return SCE_KERNEL_ERROR_UNKNOWN_SEMA_ID;
+    if (!name)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    rwlockReadLock(&g_semas_lock);
+    for (vita_sema_dict_it(it, g_semas); !vita_sema_dict_end_p(it); vita_sema_dict_next(it)) {
+        VitaSemaInfo *sema = vita_sema_dict_ref(it)->value;
+
+        if (strncmp(sema->name, name, sizeof(sema->name)) == 0) {
+            result = sema;
+            break;
+        }
+    }
+    rwlockReadUnlock(&g_semas_lock);
+
+    return result ? result->uid : SCE_KERNEL_ERROR_UNKNOWN_SEMA_ID;
 }
 
 EXPORT(SceThreadmgr, 0xA2D81F9E, int, sceKernelCloseSema, SceUID uid)
 {
-    (void)uid;
-
-    return 0;
+    return sema_lookup(uid) ? 0 : SCE_KERNEL_ERROR_UNKNOWN_SEMA_ID;
 }
 
 /* ------------------------------------------------------------ event flags */
@@ -609,16 +621,30 @@ EXPORT(SceLibKernel, 0x2A12D9B7, int, sceKernelCancelEventFlag, SceUID uid, unsi
 
 EXPORT(SceThreadmgr, 0xBC19F8A1, SceUID, sceKernelOpenEventFlag, const char *name)
 {
-    (void)name;
+    VitaEventFlagInfo *result = NULL;
+    vita_event_flag_dict_it_t it;
 
-    return SCE_KERNEL_ERROR_UNKNOWN_EVF_ID;
+    if (!name)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    rwlockReadLock(&g_event_flags_lock);
+    for (vita_event_flag_dict_it(it, g_event_flags); !vita_event_flag_dict_end_p(it);
+         vita_event_flag_dict_next(it)) {
+        VitaEventFlagInfo *evf = vita_event_flag_dict_ref(it)->value;
+
+        if (strncmp(evf->name, name, sizeof(evf->name)) == 0) {
+            result = evf;
+            break;
+        }
+    }
+    rwlockReadUnlock(&g_event_flags_lock);
+
+    return result ? result->uid : SCE_KERNEL_ERROR_UNKNOWN_EVF_ID;
 }
 
 EXPORT(SceThreadmgr, 0x9A68F547, int, sceKernelCloseEventFlag, SceUID uid)
 {
-    (void)uid;
-
-    return 0;
+    return event_flag_lookup(uid) ? 0 : SCE_KERNEL_ERROR_UNKNOWN_EVF_ID;
 }
 
 /* ------------------------------------------------------------ lw mutexes */

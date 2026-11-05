@@ -754,6 +754,44 @@ EXPORT(SceThreadmgr, 0x92667AE5, SceUID, _sceKernelCreateMutex, const char *name
     return sceKernelCreateMutex(name, attr, init_count, option);
 }
 
+EXPORT(SceThreadmgr, 0x52E17182, SceUID, sceKernelOpenMutex, const char *name)
+{
+    VitaMutexInfo *result = NULL;
+    vita_mutex_info_dict_it_t it;
+
+    if (!name)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    rwlockReadLock(&g_vita_sync_objects_lock);
+    for (vita_mutex_info_dict_it(it, g_vita_mutex_infos);
+         !vita_mutex_info_dict_end_p(it); vita_mutex_info_dict_next(it)) {
+        VitaMutexInfo *info = vita_mutex_info_dict_ref(it)->value;
+
+        if (strncmp(info->name, name, sizeof(info->name)) == 0) {
+            result = info;
+            break;
+        }
+    }
+    rwlockReadUnlock(&g_vita_sync_objects_lock);
+
+    return result ? result->uid : SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID;
+}
+
+EXPORT(SceThreadmgr, 0x2928D2EC, SceUID, sceKernelOpenMutex_089, const char *name)
+{
+    return sceKernelOpenMutex(name);
+}
+
+EXPORT(SceThreadmgr, 0x03E23AF6, int, sceKernelCloseMutex, SceUID mutexid)
+{
+    return get_mutex_info(mutexid) ? 0 : SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID;
+}
+
+EXPORT(SceThreadmgr, 0xA35427EE, int, sceKernelCloseMutex_089, SceUID mutexid)
+{
+    return sceKernelCloseMutex(mutexid);
+}
+
 EXPORT(SceThreadmgr, 0xCB78710D, int, sceKernelDeleteMutex, SceUID mutexid)
 {
     VitaMutexInfo *info = get_mutex_info(mutexid);
@@ -1542,16 +1580,29 @@ EXPORT(SceLibKernel, 0x6864DCE2, int, sceKernelGetCondInfo, SceUID uid, SceKerne
 
 EXPORT(SceThreadmgr, 0x76BDA02F, SceUID, sceKernelOpenCond, const char *name)
 {
-    (void)name;
+    VitaCondInfo *result = NULL;
+    vita_cond_dict_it_t it;
 
-    return SCE_KERNEL_ERROR_UNKNOWN_COND_ID;
+    if (!name)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    rwlockReadLock(&g_conds_lock);
+    for (vita_cond_dict_it(it, g_conds); !vita_cond_dict_end_p(it); vita_cond_dict_next(it)) {
+        VitaCondInfo *cond = vita_cond_dict_ref(it)->value;
+
+        if (strncmp(cond->name, name, sizeof(cond->name)) == 0) {
+            result = cond;
+            break;
+        }
+    }
+    rwlockReadUnlock(&g_conds_lock);
+
+    return result ? result->uid : SCE_KERNEL_ERROR_UNKNOWN_COND_ID;
 }
 
 EXPORT(SceThreadmgr, 0x15C690E0, int, sceKernelCloseCond, SceUID uid)
 {
-    (void)uid;
-
-    return 0;
+    return cond_lookup(uid) ? 0 : SCE_KERNEL_ERROR_UNKNOWN_COND_ID;
 }
 
 
