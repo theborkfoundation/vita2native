@@ -229,6 +229,14 @@ if(BUILD_TESTING)
     target_compile_definitions(ctrl_script_smoke PRIVATE _GNU_SOURCE=1)
     add_test(NAME ctrl_script_smoke COMMAND ctrl_script_smoke)
 
+    add_executable(regmgr_smoke
+        tests/regmgr_smoke.c
+        source/modules/SceRegistryMgr.c
+    )
+    target_include_directories(regmgr_smoke PRIVATE include external/vita-headers/include)
+    target_compile_definitions(regmgr_smoke PRIVATE _GNU_SOURCE=1)
+    add_test(NAME regmgr_smoke COMMAND regmgr_smoke)
+
     add_executable(gfx_smoke
         tests/gfx_smoke.c
         source/host/host_gfx.c
