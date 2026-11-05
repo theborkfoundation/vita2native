@@ -86,6 +86,7 @@ int main(void)
     failures += check_export(0x880BF710, 0x353BA9B0, "sceJpegGetOutputInfo");
     failures += check_export(0x3748BFD3, 0xC60DE94C, "sceJpegEncoderEncode");
     failures += check_export(0x19F04693, 0xA4ABFCE3, "sceJpegArmDecodeMJpeg");
+    failures += check_export(0xCF9C23A2, 0x648FFAA3, "sceJpegArmEncoderEncode");
 
     make_test_jpeg();
     CHECK(g_jpeg_size > 0 && g_jpeg[0] == 0xFF && g_jpeg[1] == 0xD8, "could not create JPEG");

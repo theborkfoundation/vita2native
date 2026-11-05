@@ -16,6 +16,7 @@
 #include <psp2/jpeg.h>
 #include <psp2/jpegarm.h>
 #include <psp2/jpegenc.h>
+#include <psp2/jpegencarm.h>
 
 #include "module.h"
 #include "stb_image.h"
@@ -855,6 +856,58 @@ EXPORT(SceJpegEncUser, 0x824A7D4F, int, sceJpegEncoderCsc, SceJpegEncoderContext
     (void)inPixelFormat;
     return -1;
 }
+
+/* --------------------------------------------------------------- ARM encoder */
+
+EXPORT(SceJpegEncArm, 0x8D15B36D, SceSize, sceJpegArmEncoderGetContextSize, void)
+{
+    return (SceSize)sceJpegEncoderGetContextSize();
+}
+
+EXPORT(SceJpegEncArm, 0x8C23875A, int, sceJpegArmEncoderInit, SceJpegArmEncoderContext context,
+       SceUInt16 inWidth, SceUInt16 inHeight, SceJpegArmEncoderPixelFormat pixelformat,
+       void *outBuffer, SceSize outSize)
+{
+    return sceJpegEncoderInit(context, inWidth, inHeight,
+                              (SceJpegEncoderPixelFormat)pixelformat, outBuffer, outSize);
+}
+
+EXPORT(SceJpegEncArm, 0x8A42D6EC, int, sceJpegArmEncoderEnd, SceJpegArmEncoderContext context)
+{
+    return sceJpegEncoderEnd(context);
+}
+
+EXPORT(SceJpegEncArm, 0x648FFAA3, int, sceJpegArmEncoderEncode, SceJpegArmEncoderContext context,
+       const void *inBuffer)
+{
+    return sceJpegEncoderEncode(context, inBuffer);
+}
+
+EXPORT(SceJpegEncArm, 0x32B8E159, int, sceJpegArmEncoderSetCompressionRatio,
+       SceJpegArmEncoderContext context, SceUInt8 ratio)
+{
+    return sceJpegEncoderSetCompressionRatio(context, ratio);
+}
+
+EXPORT(SceJpegEncArm, 0xDA0D0868, int, sceJpegArmEncoderSetOutputAddr,
+       SceJpegArmEncoderContext context, void *outBuffer, SceSize outSize)
+{
+    return sceJpegEncoderSetOutputAddr(context, outBuffer, outSize);
+}
+
+EXPORT(SceJpegEncArm, 0xD561E2E5, int, sceJpegArmEncoderSetValidRegion,
+       SceJpegArmEncoderContext context, SceUInt16 regionWidth, SceUInt16 regionHeight)
+{
+    return sceJpegEncoderSetValidRegion(context, regionWidth, regionHeight);
+}
+
+EXPORT(SceJpegEncArm, 0x6D24A669, int, sceJpegArmEncoderSetHeaderMode,
+       SceJpegArmEncoderContext context, SceJpegArmEncoderHeaderMode mode)
+{
+    return sceJpegEncoderSetHeaderMode(context, mode);
+}
+
+DECLARE_LIBRARY(SceJpegEncArm, 0xCF9C23A2);
 
 DECLARE_LIBRARY(SceJpegUser, 0x880BF710);
 DECLARE_LIBRARY(SceJpegEncUser, 0x3748BFD3);
