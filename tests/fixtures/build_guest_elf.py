@@ -485,7 +485,7 @@ def build_audio_elf():
         emit(0xE3500000)             # cmp r0, #0
         emit(0x13844000 | bit)       # orrne r4, r4, #bit
 
-    emit(0xE92D4030)                 # push {r4, r5, lr}
+    emit(0xE92D4070)                 # push {r4, r5, r6, lr} (keeps SP 8-byte aligned)
     emit(arm_mov_imm(4, 0))          # mov r4, #0
 
     # port = sceAudioOutOpenPort(MAIN, 64, 48000, STEREO)
@@ -520,7 +520,7 @@ def build_audio_elf():
     emit(0xE1A00004)                 # mov r0, r4
     emit(0xE3500000)                 # cmp r0, #0
     emit(0x03A0002A)                 # moveq r0, #42
-    emit(0xE8BD8030)                 # pop {r4, r5, pc}
+    emit(0xE8BD8070)                 # pop {r4, r5, r6, pc}
 
     assert len(code) * 4 <= AUDIO_STUB_BASE, "audio fixture code overlaps the stubs"
 
@@ -753,6 +753,275 @@ def build_ngs_elf():
 
     rela = bytearray(b"".join(rx_relocs) + b"".join(rw_relocs))
     return assemble_elf(rx, rw, rela, NGS_MODINFO)
+
+
+# --- SceIofilemgr async fixture -------------------------------------------
+
+IO_STUB_BASE = 0x280
+IO_LIB1_NAME = 0x330
+IO_LIB2_NAME = 0x340
+IO_MODINFO = 0x350
+IO_IMPORT1 = 0x3B0
+IO_IMPORT2 = 0x3D4
+IO_NIDS1 = 0x400
+IO_ENTRIES1 = 0x420
+IO_NIDS2 = 0x440
+IO_ENTRIES2 = 0x460
+IO_RX_SIZE = 0x480
+
+IO_LIB1 = b"SceLibKernel\0"
+IO_LIB2 = b"SceIofilemgr\0"
+IO_LIB1_NID = 0xCAE9ACE6
+IO_LIB2_NID = 0xF2FF276E
+
+IO_KERNEL_FUNCS = [
+    0x6A7EA9FD,  # sceIoOpenAsync
+    0xCAC5D672,  # sceIoLseekAsync
+    0x82B20B41,  # sceIoGetstatAsync
+    0x8E5FCBB1,  # sceIoMkdirAsync
+    0xEE9857CD,  # sceIoRenameAsync
+    0x446A60AC,  # sceIoRemoveAsync
+    0x9694D00F,  # sceIoRmdirAsync
+]
+
+IO_FILEMGR_FUNCS = [
+    0xE0D63D2A,  # sceIoWriteAsync
+    0x773EBD45,  # sceIoReadAsync
+    0xD1C49D2F,  # sceIoComplete
+    0x8EA3616A,  # sceIoCloseAsync
+    0xCC67B6FD,  # _sceIoOpen
+    0x539FD5C4,  # _sceIoPread
+    0xC70B8886,  # sceIoClose
+]
+
+IO_RW_PATH = 0x000
+IO_RW_PATH2 = 0x020
+IO_RW_DIR = 0x040
+IO_RW_DATA = 0x050
+IO_RW_BUF = 0x060
+IO_RW_FD = 0x068
+IO_RW_FD2 = 0x06C
+IO_RW_STAT = 0x080
+IO_RW_PREAD = 0x0E0
+IO_RW_SIZE = 0x100
+
+
+def build_io_async_elf():
+    """Guest ELF that drives the async I/O lifecycle over real import stubs."""
+    code = []
+    rx_relocs = []
+
+    def emit(word):
+        code.append(word & 0xFFFFFFFF)
+
+    def movw_movt_rw(rd, offset):
+        base = len(code) * 4
+        emit(arm_movw(rd, 0))
+        emit(arm_movt(rd, 0))
+        rx_relocs.append(encode_rela(0, 1, base, offset, R_ARM_MOVW_ABS_NC))
+        rx_relocs.append(encode_rela(0, 1, base + 4, offset, R_ARM_MOVT_ABS))
+
+    def call(index):
+        emit(arm_bl(len(code) * 4, IO_STUB_BASE + index * 12))
+
+    def load_rw(rd, offset):
+        movw_movt_rw(rd, offset)
+        emit(0xE5900000 | (rd << 16) | (rd << 12))  # ldr rd, [rd]
+
+    def check(bit):
+        emit(0xE3500000)             # cmp r0, #0
+        emit(0x13844000 | arm_encode_imm(bit))  # orrne r4, r4, #bit
+
+    def check_nonzero(bit):
+        emit(0xE3500000)             # cmp r0, #0
+        emit(0x03844000 | arm_encode_imm(bit))  # orreq r4, r4, #bit
+
+    def check_equal(value, bit):
+        emit(arm_movw(1, value & 0xFFFF))
+        if value > 0xFFFF:
+            emit(arm_movt(1, value >> 16))
+        emit(0xE1500001)             # cmp r0, r1
+        emit(0x13844000 | arm_encode_imm(bit))  # orrne r4, r4, #bit
+
+    emit(0xE92D4070)                 # push {r4, r5, r6, lr} (keeps SP 8-byte aligned)
+    emit(arm_mov_imm(4, 0))          # mov r4, #0
+
+    # fd = sceIoOpenAsync(path, RDWR|CREAT|TRUNC, 0666)
+    movw_movt_rw(0, IO_RW_PATH)
+    emit(arm_movw(1, 0x0603))
+    emit(arm_movw(2, 0x01B6))
+    call(0)
+    movw_movt_rw(1, IO_RW_FD)
+    emit(0xE5810000)                 # str r0, [r1]
+    check_nonzero(1)
+
+    # sceIoComplete(fd) == 0 after open
+    load_rw(0, IO_RW_FD)
+    call(9)
+    check(2)
+
+    # sceIoWriteAsync(fd, "hello", 5), completion result == 5
+    load_rw(0, IO_RW_FD)
+    movw_movt_rw(1, IO_RW_DATA)
+    emit(arm_mov_imm(2, 5))
+    call(7)
+    check(4)
+    load_rw(0, IO_RW_FD)
+    call(9)
+    check_equal(5, 8)
+
+    # sceIoLseekAsync(fd, 0, SEEK_SET), completion result == 0.
+    # 64-bit SceOff goes in r2:r3 and the trailing int on the stack.
+    load_rw(0, IO_RW_FD)
+    emit(arm_mov_imm(1, 0))          # padding before the 64-bit argument
+    emit(arm_mov_imm(2, 0))
+    emit(arm_mov_imm(3, 0))
+    emit(0xE24DD008)                 # sub sp, sp, #8
+    emit(arm_mov_imm(12, 0))
+    emit(0xE58DC000)                 # str r12, [sp]
+    call(1)
+    emit(0xE28DD008)                 # add sp, sp, #8
+    check(16)
+    load_rw(0, IO_RW_FD)
+    call(9)
+    check(32)
+
+    # sceIoReadAsync(fd, buf, 5), completion result == 5 and buf[0] == 'h'
+    load_rw(0, IO_RW_FD)
+    movw_movt_rw(1, IO_RW_BUF)
+    emit(arm_mov_imm(2, 5))
+    call(8)
+    check(64)
+    load_rw(0, IO_RW_FD)
+    call(9)
+    check_equal(5, 128)
+    movw_movt_rw(1, IO_RW_BUF)
+    emit(0xE5D11000)                 # ldrb r1, [r1]
+    emit(0xE3510068)                 # cmp r1, #'h'
+    emit(0x13844000 | arm_encode_imm(256))
+
+    # sceIoCloseAsync(fd)
+    load_rw(0, IO_RW_FD)
+    call(10)
+    check(512)
+
+    # _sceIoOpen(path, RDONLY, 0, NULL), _sceIoPread(fd, {buf, 5, 0}) == 5
+    movw_movt_rw(0, IO_RW_PATH)
+    emit(arm_mov_imm(1, 1))
+    emit(arm_mov_imm(2, 0))
+    emit(arm_mov_imm(3, 0))
+    call(11)
+    movw_movt_rw(1, IO_RW_FD2)
+    emit(0xE5810000)
+    check_nonzero(1024)
+    load_rw(0, IO_RW_FD2)
+    movw_movt_rw(1, IO_RW_PREAD)
+    call(12)
+    check_equal(5, 2048)
+    load_rw(0, IO_RW_FD2)
+    call(13)
+    check(4096)
+
+    # Path operations: getstat, mkdir, rename, remove, rmdir.
+    movw_movt_rw(0, IO_RW_PATH)
+    movw_movt_rw(1, IO_RW_STAT)
+    call(2)
+    check(8192)
+    call(9)
+    emit(arm_mov_imm(0, 0))
+    check(16384)
+
+    movw_movt_rw(0, IO_RW_DIR)
+    emit(arm_movw(1, 0x01FF))
+    call(3)
+    check(32768)
+    emit(arm_mov_imm(0, 0))
+    call(9)
+    check(65536)
+
+    movw_movt_rw(0, IO_RW_PATH)
+    movw_movt_rw(1, IO_RW_PATH2)
+    call(4)
+    check(131072)
+    emit(arm_mov_imm(0, 0))
+    call(9)
+    check(262144)
+
+    movw_movt_rw(0, IO_RW_PATH2)
+    call(5)
+    check(524288)
+    emit(arm_mov_imm(0, 0))
+    call(9)
+    check(1048576)
+
+    movw_movt_rw(0, IO_RW_DIR)
+    call(6)
+    check(2097152)
+    emit(arm_mov_imm(0, 0))
+    call(9)
+    check(4194304)
+
+    emit(0xE1A00004)                 # mov r0, r4
+    emit(0xE3500000)                 # cmp r0, #0
+    emit(0x03A0002A)                 # moveq r0, #42
+    emit(0xE8BD8070)                 # pop {r4, r5, r6, pc}
+
+    assert len(code) * 4 <= IO_STUB_BASE, "I/O fixture code overlaps the stubs"
+
+    rx = bytearray(IO_RX_SIZE)
+    rx[:len(code) * 4] = b"".join(struct.pack("<I", w) for w in code)
+    rx[IO_LIB1_NAME:IO_LIB1_NAME + len(IO_LIB1)] = IO_LIB1
+    rx[IO_LIB2_NAME:IO_LIB2_NAME + len(IO_LIB2)] = IO_LIB2
+
+    info = bytearray(MODULE_INFO_SIZE)
+    struct.pack_into("<HH", info, 0x00, 0x0000, 0x0101)
+    info[0x04:0x04 + len(MODULE_NAME)] = MODULE_NAME
+    struct.pack_into("<I", info, 0x2C, IO_IMPORT1)
+    struct.pack_into("<I", info, 0x30, IO_IMPORT2 + IMPORT_SIZE)
+    struct.pack_into("<I", info, 0x34, 0x12345678)
+    struct.pack_into("<I", info, 0x44, 0x00000000)
+    struct.pack_into("<I", info, 0x48, 0xFFFFFFFF)
+    struct.pack_into("<I", info, 0x5C, 0x03570011)
+    rx[IO_MODINFO:IO_MODINFO + MODULE_INFO_SIZE] = info
+
+    imp1 = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp1, 0, IMPORT_SIZE, 1, 0, len(IO_KERNEL_FUNCS), 0, 0)
+    struct.pack_into("<I", imp1, IMP_LIBRARY_NID, IO_LIB1_NID)
+    rx[IO_IMPORT1:IO_IMPORT1 + IMPORT_SIZE] = imp1
+
+    imp2 = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp2, 0, IMPORT_SIZE, 1, 0, len(IO_FILEMGR_FUNCS), 0, 0)
+    struct.pack_into("<I", imp2, IMP_LIBRARY_NID, IO_LIB2_NID)
+    rx[IO_IMPORT2:IO_IMPORT2 + IMPORT_SIZE] = imp2
+
+    for i, nid in enumerate(IO_KERNEL_FUNCS):
+        struct.pack_into("<I", rx, IO_NIDS1 + i * 4, nid)
+    for i, nid in enumerate(IO_FILEMGR_FUNCS):
+        struct.pack_into("<I", rx, IO_NIDS2 + i * 4, nid)
+
+    rx_relocs.append(encode_rela(0, 0, IO_IMPORT1 + IMP_LIBRARY_NAME, IO_LIB1_NAME))
+    rx_relocs.append(encode_rela(0, 0, IO_IMPORT1 + IMP_FUNC_NID_TABLE, IO_NIDS1))
+    rx_relocs.append(encode_rela(0, 0, IO_IMPORT1 + IMP_FUNC_ENTRY_TABLE, IO_ENTRIES1))
+    rx_relocs.append(encode_rela(0, 0, IO_IMPORT2 + IMP_LIBRARY_NAME, IO_LIB2_NAME))
+    rx_relocs.append(encode_rela(0, 0, IO_IMPORT2 + IMP_FUNC_NID_TABLE, IO_NIDS2))
+    rx_relocs.append(encode_rela(0, 0, IO_IMPORT2 + IMP_FUNC_ENTRY_TABLE, IO_ENTRIES2))
+
+    for i in range(len(IO_KERNEL_FUNCS)):
+        rx_relocs.append(encode_rela(0, 0, IO_ENTRIES1 + i * 4, IO_STUB_BASE + i * 12))
+    for i in range(len(IO_FILEMGR_FUNCS)):
+        rx_relocs.append(encode_rela(0, 0, IO_ENTRIES2 + i * 4,
+                                     IO_STUB_BASE + (len(IO_KERNEL_FUNCS) + i) * 12))
+
+    rw = bytearray(IO_RW_SIZE)
+    rw[IO_RW_PATH:IO_RW_PATH + 15] = b"ux0:/async.txt\0"
+    rw[IO_RW_PATH2:IO_RW_PATH2 + 16] = b"ux0:/async2.txt\0"
+    rw[IO_RW_DIR:IO_RW_DIR + 10] = b"ux0:/adir\0"
+    rw[IO_RW_DATA:IO_RW_DATA + 6] = b"hello\0"
+    struct.pack_into("<I", rw, IO_RW_PREAD + 4, 5)
+    rw_relocs = [encode_rela(1, 1, IO_RW_PREAD, IO_RW_BUF)]
+
+    rela = bytearray(b"".join(rx_relocs) + b"".join(rw_relocs))
+    return assemble_elf(rx, rw, rela, IO_MODINFO)
 
 
 # --- SceAppUtil fixture ----------------------------------------------------
@@ -1389,6 +1658,11 @@ def main():
     with open(ngs_path, "wb") as f:
         f.write(build_ngs_elf())
     print(f"wrote {ngs_path}")
+
+    io_async_path = os.path.join(out_dir, "guest_io_async.elf")
+    with open(io_async_path, "wb") as f:
+        f.write(build_io_async_elf())
+    print(f"wrote {io_async_path}")
 
     if os.path.exists(os.path.join(shader_dir, "texture_v.gxp")) and os.path.exists(
             os.path.join(shader_dir, "texture_f.gxp")):
