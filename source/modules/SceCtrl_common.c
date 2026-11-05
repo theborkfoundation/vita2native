@@ -76,6 +76,33 @@ EXPORT(SceCtrl, 0x16D26DC7, int, sceCtrlDisconnect, void)
     return 0;
 }
 
+EXPORT(SceCtrl, 0x8F9B1CE5, int, sceCtrlGetBatteryInfo, int port, SceUInt8 *battery)
+{
+    (void)port;
+
+    if (!battery)
+        return -1;
+    *battery = 100;
+
+    return 0;
+}
+
+EXPORT(SceCtrl, 0x6FAFAD05, int, sceCtrlGetButtonIntercept, int *intercept)
+{
+    if (!intercept)
+        return -1;
+    *intercept = 0;
+
+    return 0;
+}
+
+EXPORT(SceCtrl, 0x433D71F4, int, sceCtrlSetButtonIntercept, int intercept)
+{
+    (void)intercept;
+
+    return 0;
+}
+
 EXPORT(SceCtrl, 0xA59454D3, int, sceCtrlPeekBufferPositiveExt, int port, SceCtrlData *pad_data,
        int count)
 {
