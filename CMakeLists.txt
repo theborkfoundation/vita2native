@@ -97,6 +97,7 @@ add_executable(vita2native
     source/modules/SceLibKernel.c
     source/modules/SceLibClib.c
     source/modules/SceNet.c
+    source/modules/SceNgs.c
     source/modules/ScePower.c
     source/modules/SceRtc.c
     source/modules/SceSharedFb.c
@@ -304,6 +305,15 @@ if(BUILD_TESTING)
     target_compile_definitions(apputil_smoke PRIVATE _GNU_SOURCE=1 _FILE_OFFSET_BITS=64)
     target_link_libraries(apputil_smoke PRIVATE pthread m)
     add_test(NAME apputil_smoke COMMAND apputil_smoke)
+
+    add_executable(ngs_smoke
+        tests/ngs_smoke.c
+        source/modules/SceNgs.c
+    )
+    target_include_directories(ngs_smoke PRIVATE include)
+    target_compile_definitions(ngs_smoke PRIVATE _GNU_SOURCE=1)
+    target_link_libraries(ngs_smoke PRIVATE pthread)
+    add_test(NAME ngs_smoke COMMAND ngs_smoke)
 
     add_executable(egl_window_smoke
         tests/egl_window_smoke.c

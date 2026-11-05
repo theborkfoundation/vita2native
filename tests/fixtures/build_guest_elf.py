@@ -563,6 +563,198 @@ def build_audio_elf():
     return assemble_elf(rx, rw, rela, AUDIO_MODINFO)
 
 
+# --- SceNgs fixture --------------------------------------------------------
+
+NGS_STUB_BASE = 0x200
+NGS_LIB_NAME = 0x280
+NGS_MODINFO = 0x290
+NGS_IMPORT = 0x2F0
+NGS_NIDS = 0x320
+NGS_ENTRIES = 0x350
+NGS_RX_SIZE = 0x3E0
+
+NGS_LIB = b"SceNgs\0"
+NGS_LIB_NID = 0xB01598D9
+
+NGS_FUNCS = [
+    0x6CE8B36F,  # sceNgsSystemGetRequiredMemorySize
+    0xED14CF4A,  # sceNgsSystemInit
+    0x79A121D1,  # sceNgsVoiceDefGetMasterBuss
+    0x477318C0,  # sceNgsRackGetRequiredMemorySize
+    0x0A92E4EC,  # sceNgsRackInit
+    0xFE1A98E9,  # sceNgsRackGetVoiceHandle
+    0xFA0A0F34,  # sceNgsVoicePlay
+    0x5551410D,  # sceNgsVoiceGetInfo
+    0xDD5CA10B,  # sceNgsRackRelease
+    0x4A25BEBC,  # sceNgsSystemRelease
+]
+
+NGS_RW_PARAMS = 0x000
+NGS_RW_SIZE_OUT = 0x020
+NGS_RW_SYSMEM = 0x040
+NGS_RW_RACKDESC = 0x1840
+NGS_RW_RACKBUF = 0x1860
+NGS_RW_SYSTEM = 0x1880
+NGS_RW_RACK = 0x1884
+NGS_RW_VOICE = 0x1888
+NGS_RW_VOICEINFO = 0x1890
+NGS_RW_RACKMEM = 0x18B0
+NGS_RW_SIZE = 0x28B0
+
+
+def build_ngs_elf():
+    """Guest ELF that drives a complete NGS system/rack/voice lifecycle.
+
+    Every call goes through a real guest import stub, so this also proves the
+    SceNgs library NID and the function NIDs used by the port.
+    """
+    code = []
+    rx_relocs = []
+
+    def emit(word):
+        code.append(word & 0xFFFFFFFF)
+
+    def movw_movt_rw(rd, offset):
+        base = len(code) * 4
+        emit(arm_movw(rd, 0))
+        emit(arm_movt(rd, 0))
+        rx_relocs.append(encode_rela(0, 1, base, offset, R_ARM_MOVW_ABS_NC))
+        rx_relocs.append(encode_rela(0, 1, base + 4, offset, R_ARM_MOVT_ABS))
+
+    def call(index):
+        emit(arm_bl(len(code) * 4, NGS_STUB_BASE + index * 12))
+
+    def check(bit):
+        emit(0xE3500000)             # cmp r0, #0
+        emit(0x13844000 | arm_encode_imm(bit))  # orrne r4, r4, #bit
+
+    def orrne_r4(bit):
+        emit(0x13844000 | arm_encode_imm(bit))  # orrne r4, r4, #bit
+
+    def orreq_r4(bit):
+        emit(0x03844000 | arm_encode_imm(bit))  # orreq r4, r4, #bit
+
+    def load_rw(rd, offset):
+        movw_movt_rw(rd, offset)
+        emit(0xE5900000 | (rd << 16) | (rd << 12))  # ldr rd, [rd]
+
+    emit(0xE92D4010)                 # push {r4, lr}
+    emit(arm_mov_imm(4, 0))          # mov r4, #0
+
+    # sceNgsSystemGetRequiredMemorySize(&params, &size)
+    movw_movt_rw(0, NGS_RW_PARAMS)
+    movw_movt_rw(1, NGS_RW_SIZE_OUT)
+    call(0)
+    check(1)
+
+    # sceNgsSystemInit(system_mem, size, &params, &system)
+    movw_movt_rw(0, NGS_RW_SYSMEM)
+    load_rw(1, NGS_RW_SIZE_OUT)
+    movw_movt_rw(2, NGS_RW_PARAMS)
+    movw_movt_rw(3, NGS_RW_SYSTEM)
+    call(1)
+    check(2)
+
+    # rack_desc.voice_definition = sceNgsVoiceDefGetMasterBuss()
+    call(2)
+    movw_movt_rw(1, NGS_RW_RACKDESC)
+    emit(0xE5810000)                 # str r0, [r1]
+
+    # sceNgsRackGetRequiredMemorySize(system, &rack_desc, &size)
+    load_rw(0, NGS_RW_SYSTEM)
+    movw_movt_rw(1, NGS_RW_RACKDESC)
+    movw_movt_rw(2, NGS_RW_SIZE_OUT)
+    call(3)
+    check(4)
+
+    # sceNgsRackInit(system, &rack_buffer, &rack_desc, &rack)
+    load_rw(0, NGS_RW_SYSTEM)
+    movw_movt_rw(1, NGS_RW_RACKBUF)
+    movw_movt_rw(2, NGS_RW_RACKDESC)
+    movw_movt_rw(3, NGS_RW_RACK)
+    call(4)
+    check(8)
+
+    # sceNgsRackGetVoiceHandle(rack, 0, &voice)
+    load_rw(0, NGS_RW_RACK)
+    emit(arm_mov_imm(1, 0))
+    movw_movt_rw(2, NGS_RW_VOICE)
+    call(5)
+    check(16)
+    load_rw(1, NGS_RW_VOICE)
+    emit(0xE3510000)                 # cmp r1, #0
+    orreq_r4(32)
+
+    # sceNgsVoicePlay(voice)
+    load_rw(0, NGS_RW_VOICE)
+    call(6)
+    check(64)
+
+    # sceNgsVoiceGetInfo(voice, &info), expect ACTIVE (1)
+    load_rw(0, NGS_RW_VOICE)
+    movw_movt_rw(1, NGS_RW_VOICEINFO)
+    call(7)
+    check(128)
+    load_rw(1, NGS_RW_VOICEINFO)
+    emit(0xE3510001)                 # cmp r1, #1
+    emit(0x13844000 | arm_encode_imm(256))  # orrne r4, r4, #256
+
+    # sceNgsRackRelease(rack, NULL)
+    load_rw(0, NGS_RW_RACK)
+    emit(arm_mov_imm(1, 0))
+    call(8)
+    check(512)
+
+    # sceNgsSystemRelease(system)
+    load_rw(0, NGS_RW_SYSTEM)
+    call(9)
+    check(1024)
+
+    emit(0xE1A00004)                 # mov r0, r4
+    emit(0xE3500000)                 # cmp r0, #0
+    emit(0x03A0002A)                 # moveq r0, #42
+    emit(0xE8BD8010)                 # pop {r4, pc}
+
+    assert len(code) * 4 <= NGS_STUB_BASE, "NGS fixture code overlaps the stubs"
+
+    rx = bytearray(NGS_RX_SIZE)
+    rx[:len(code) * 4] = b"".join(struct.pack("<I", w) for w in code)
+    rx[NGS_LIB_NAME:NGS_LIB_NAME + len(NGS_LIB)] = NGS_LIB
+
+    info = bytearray(MODULE_INFO_SIZE)
+    struct.pack_into("<HH", info, 0x00, 0x0000, 0x0101)
+    info[0x04:0x04 + len(MODULE_NAME)] = MODULE_NAME
+    struct.pack_into("<I", info, 0x2C, NGS_IMPORT)
+    struct.pack_into("<I", info, 0x30, NGS_IMPORT + IMPORT_SIZE)
+    struct.pack_into("<I", info, 0x34, 0x12345678)
+    struct.pack_into("<I", info, 0x44, 0x00000000)
+    struct.pack_into("<I", info, 0x48, 0xFFFFFFFF)
+    struct.pack_into("<I", info, 0x5C, 0x03570011)
+    rx[NGS_MODINFO:NGS_MODINFO + MODULE_INFO_SIZE] = info
+
+    imp = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp, 0, IMPORT_SIZE, 1, 0, len(NGS_FUNCS), 0, 0)
+    struct.pack_into("<I", imp, IMP_LIBRARY_NID, NGS_LIB_NID)
+    rx[NGS_IMPORT:NGS_IMPORT + IMPORT_SIZE] = imp
+
+    for i, nid in enumerate(NGS_FUNCS):
+        struct.pack_into("<I", rx, NGS_NIDS + i * 4, nid)
+
+    rx_relocs.append(encode_rela(0, 0, NGS_IMPORT + IMP_LIBRARY_NAME, NGS_LIB_NAME))
+    rx_relocs.append(encode_rela(0, 0, NGS_IMPORT + IMP_FUNC_NID_TABLE, NGS_NIDS))
+    rx_relocs.append(encode_rela(0, 0, NGS_IMPORT + IMP_FUNC_ENTRY_TABLE, NGS_ENTRIES))
+    for i in range(len(NGS_FUNCS)):
+        rx_relocs.append(encode_rela(0, 0, NGS_ENTRIES + i * 4, NGS_STUB_BASE + i * 12))
+
+    rw = bytearray(NGS_RW_SIZE)
+    struct.pack_into("<iiiii", rw, NGS_RW_PARAMS, 2, 4, 256, 48000, 0)
+    struct.pack_into("<iiiii", rw, NGS_RW_RACKDESC + 4, 2, 2, 4, 4, 0)
+    rw_relocs = [encode_rela(1, 1, NGS_RW_RACKBUF, NGS_RW_RACKMEM)]
+
+    rela = bytearray(b"".join(rx_relocs) + b"".join(rw_relocs))
+    return assemble_elf(rx, rw, rela, NGS_MODINFO)
+
+
 # --- SceAppUtil fixture ----------------------------------------------------
 
 APPUTIL_STUB_BASE = 0x140
@@ -1192,6 +1384,11 @@ def main():
     with open(apputil_path, "wb") as f:
         f.write(build_apputil_elf())
     print(f"wrote {apputil_path}")
+
+    ngs_path = os.path.join(out_dir, "guest_ngs.elf")
+    with open(ngs_path, "wb") as f:
+        f.write(build_ngs_elf())
+    print(f"wrote {ngs_path}")
 
     if os.path.exists(os.path.join(shader_dir, "texture_v.gxp")) and os.path.exists(
             os.path.join(shader_dir, "texture_f.gxp")):
