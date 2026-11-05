@@ -284,6 +284,91 @@ static void test_tiled(void)
             assert(decoded[(y * 32 + x) * 4] == (uint8_t)(x + y));
 }
 
+static void test_compressed(void)
+{
+    /* BC1: c0 = red, c1 = green, all indices 0 => solid red. */
+    {
+        const uint8_t bc1[8] = { 0x00, 0xf8, 0xe0, 0x07, 0x00, 0x00, 0x00, 0x00 };
+        uint8_t rgba[4 * 4 * 4];
+
+        assert(gxm_texture_decode_rgba8(rgba, bc1, 4, 4, SCE_GXM_TEXTURE_FORMAT_UBC1_ABGR,
+                                        SCE_GXM_TEXTURE_LINEAR) == 0);
+        for (int i = 0; i < 16; i++) {
+            assert(rgba[i * 4 + 0] == 255);
+            assert(rgba[i * 4 + 1] == 0);
+            assert(rgba[i * 4 + 2] == 0);
+            assert(rgba[i * 4 + 3] == 255);
+        }
+    }
+
+    /* BC3: 8-bit alpha block (a0 = a1 = 255, indices 0) plus a red colour block. */
+    {
+        uint8_t bc3[16] = { 0 };
+        uint8_t rgba[4 * 4 * 4];
+
+        bc3[0] = 255;
+        bc3[1] = 255;
+        bc3[8] = 0x00;
+        bc3[9] = 0xf8;
+        bc3[10] = 0xe0;
+        bc3[11] = 0x07;
+        assert(gxm_texture_decode_rgba8(rgba, bc3, 4, 4, SCE_GXM_TEXTURE_FORMAT_UBC3_ABGR,
+                                        SCE_GXM_TEXTURE_LINEAR) == 0);
+        for (int i = 0; i < 16; i++) {
+            assert(rgba[i * 4 + 0] == 255);
+            assert(rgba[i * 4 + 1] == 0);
+            assert(rgba[i * 4 + 2] == 0);
+            assert(rgba[i * 4 + 3] == 255);
+        }
+    }
+
+    /* BC4: a0 = 255, a1 = 0, all indices 0 => solid 255 in the red channel. */
+    {
+        const uint8_t bc4[8] = { 255, 0, 0, 0, 0, 0, 0, 0 };
+        uint8_t rgba[4 * 4 * 4];
+
+        assert(gxm_texture_decode_rgba8(rgba, bc4, 4, 4,
+                                        SCE_GXM_TEXTURE_BASE_FORMAT_UBC4 |
+                                            SCE_GXM_TEXTURE_SWIZZLE1_R,
+                                        SCE_GXM_TEXTURE_LINEAR) == 0);
+        for (int i = 0; i < 16; i++) {
+            assert(rgba[i * 4 + 0] == 255);
+            assert(rgba[i * 4 + 1] == 0);
+            assert(rgba[i * 4 + 2] == 0);
+            assert(rgba[i * 4 + 3] == 255);
+        }
+    }
+}
+
+static void test_yuv(void)
+{
+    /* NV12, 4x4, all Y = U = V = 128: a neutral grey around 130. */
+    uint8_t nv12[8 * 4 + 8 * 2];
+    uint8_t rgba[4 * 4 * 4];
+
+    memset(nv12, 128, sizeof(nv12));
+    assert(gxm_texture_decode_rgba8(rgba, nv12, 4, 4,
+                                    SCE_GXM_TEXTURE_FORMAT_YUV420P2_CSC0,
+                                    SCE_GXM_TEXTURE_LINEAR) == 0);
+    for (int i = 0; i < 16; i++) {
+        assert(rgba[i * 4 + 0] >= 129 && rgba[i * 4 + 0] <= 131);
+        assert(rgba[i * 4 + 1] == rgba[i * 4 + 0]);
+        assert(rgba[i * 4 + 2] == rgba[i * 4 + 0]);
+        assert(rgba[i * 4 + 3] == 255);
+    }
+
+    /* YUYV 4:2:2, two pixels with Y = 128 and neutral chroma. */
+    {
+        uint8_t yuyv[8 * 2] = { 128, 128, 128, 128 };
+
+        assert(gxm_texture_decode_rgba8(rgba, yuyv, 2, 1,
+                                        SCE_GXM_TEXTURE_FORMAT_YUYV422_CSC0,
+                                        SCE_GXM_TEXTURE_LINEAR) == 0);
+        assert(rgba[0] >= 129 && rgba[0] <= 131);
+        assert(rgba[4] >= 129 && rgba[4] <= 131);
+    }
+}
+
 int main(void)
 {
     test_swizzle4();
@@ -292,6 +377,8 @@ int main(void)
     test_linear_strided();
     test_palette();
     test_tiled();
+    test_compressed();
+    test_yuv();
 
     /* Format conversion: ABGR bytes -> RGBA8. */
     {

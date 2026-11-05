@@ -13,8 +13,10 @@
  * format. Paletted formats look the index up in an A8B8G8R8 palette.
  */
 #include "gxm/texture.h"
+#include "gxm/texture_compressed.h"
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ---------------------------------------------------------------- helpers */
@@ -152,8 +154,12 @@ uint32_t gxm_texture_base_bits(SceGxmTextureFormat format)
     case SCE_GXM_TEXTURE_BASE_FORMAT_SE5M9M9M9:
     case SCE_GXM_TEXTURE_BASE_FORMAT_F11F11F10:
     case SCE_GXM_TEXTURE_BASE_FORMAT_U2F10F10F10:
+        return 32;
+
     case SCE_GXM_TEXTURE_BASE_FORMAT_YUV420P2:
     case SCE_GXM_TEXTURE_BASE_FORMAT_YUV420P3:
+        return 12;
+
     case SCE_GXM_TEXTURE_BASE_FORMAT_UBC2:
     case SCE_GXM_TEXTURE_BASE_FORMAT_UBC3:
     case SCE_GXM_TEXTURE_BASE_FORMAT_UBC5:
@@ -854,6 +860,406 @@ int gxm_texture_get_level(const SceGxmTextureInner *texture, uint32_t face, uint
 
 /* --------------------------------------------------------------- decoding */
 
+/* ----------------------------------------------------- compressed blocks */
+
+static bool is_bc_format(uint32_t base)
+{
+    return base == SCE_GXM_TEXTURE_BASE_FORMAT_UBC1 ||
+           base == SCE_GXM_TEXTURE_BASE_FORMAT_UBC2 ||
+           base == SCE_GXM_TEXTURE_BASE_FORMAT_UBC3 ||
+           base == SCE_GXM_TEXTURE_BASE_FORMAT_UBC4 ||
+           base == SCE_GXM_TEXTURE_BASE_FORMAT_SBC4 ||
+           base == SCE_GXM_TEXTURE_BASE_FORMAT_UBC5 ||
+           base == SCE_GXM_TEXTURE_BASE_FORMAT_SBC5;
+}
+
+static bool is_pvrt_format(uint32_t base)
+{
+    return base == SCE_GXM_TEXTURE_BASE_FORMAT_PVRT2BPP ||
+           base == SCE_GXM_TEXTURE_BASE_FORMAT_PVRT4BPP ||
+           base == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII2BPP ||
+           base == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII4BPP;
+}
+
+static uint32_t compressed_block_bytes(uint32_t base)
+{
+    switch (base) {
+    case SCE_GXM_TEXTURE_BASE_FORMAT_UBC1:
+    case SCE_GXM_TEXTURE_BASE_FORMAT_UBC4:
+    case SCE_GXM_TEXTURE_BASE_FORMAT_SBC4:
+        return 8;
+    case SCE_GXM_TEXTURE_BASE_FORMAT_UBC2:
+    case SCE_GXM_TEXTURE_BASE_FORMAT_UBC3:
+    case SCE_GXM_TEXTURE_BASE_FORMAT_UBC5:
+    case SCE_GXM_TEXTURE_BASE_FORMAT_SBC5:
+        return 16;
+    default:
+        return 0;
+    }
+}
+
+static void expand_rgb565(uint16_t value, uint8_t rgb[3])
+{
+    uint32_t r = (value >> 11) & 0x1f;
+    uint32_t g = (value >> 5) & 0x3f;
+    uint32_t b = value & 0x1f;
+
+    rgb[0] = (uint8_t)((r << 3) | (r >> 2));
+    rgb[1] = (uint8_t)((g << 2) | (g >> 4));
+    rgb[2] = (uint8_t)((b << 3) | (b >> 2));
+}
+
+static void decode_bc1_colors(const uint8_t *block, uint8_t colors[4][4], bool allow_three)
+{
+    uint16_t c0 = (uint16_t)(block[0] | (block[1] << 8));
+    uint16_t c1 = (uint16_t)(block[2] | (block[3] << 8));
+    uint8_t rgb0[3], rgb1[3];
+
+    expand_rgb565(c0, rgb0);
+    expand_rgb565(c1, rgb1);
+
+    memcpy(colors[0], rgb0, 3);
+    colors[0][3] = 255;
+    memcpy(colors[1], rgb1, 3);
+    colors[1][3] = 255;
+
+    if (c0 > c1 || !allow_three) {
+        for (int i = 0; i < 3; i++) {
+            colors[2][i] = (uint8_t)((2 * rgb0[i] + rgb1[i]) / 3);
+            colors[3][i] = (uint8_t)((rgb0[i] + 2 * rgb1[i]) / 3);
+        }
+        colors[2][3] = colors[3][3] = 255;
+    } else {
+        for (int i = 0; i < 3; i++) {
+            colors[2][i] = (uint8_t)((rgb0[i] + rgb1[i]) / 2);
+            colors[3][i] = 0;
+        }
+        colors[2][3] = 255;
+        colors[3][3] = 0;
+    }
+}
+
+static void decode_bc4_channel(const uint8_t *block, uint8_t values[16])
+{
+    uint8_t a0 = block[0];
+    uint8_t a1 = block[1];
+    uint64_t bits = 0;
+
+    for (int i = 0; i < 6; i++)
+        bits |= (uint64_t)block[2 + i] << (8 * i);
+
+    if (a0 > a1) {
+        values[0] = a0;
+        values[1] = a1;
+        for (int i = 0; i < 6; i++)
+            values[2 + i] = (uint8_t)(((6 - i) * a0 + (1 + i) * a1) / 7);
+    } else {
+        values[0] = a0;
+        values[1] = a1;
+        for (int i = 0; i < 4; i++)
+            values[2 + i] = (uint8_t)(((4 - i) * a0 + (1 + i) * a1) / 5);
+        values[6] = 0;
+        values[7] = 255;
+    }
+
+    for (int i = 0; i < 16; i++)
+        values[i] = values[(bits >> (3 * i)) & 7];
+}
+
+static void decode_bc_block(const uint8_t *block, uint32_t base, uint8_t pixels[16][4])
+{
+    if (base == SCE_GXM_TEXTURE_BASE_FORMAT_UBC4 || base == SCE_GXM_TEXTURE_BASE_FORMAT_SBC4) {
+        uint8_t values[16];
+
+        decode_bc4_channel(block, values);
+        for (int i = 0; i < 16; i++) {
+            pixels[i][0] = values[i];
+            pixels[i][1] = 0;
+            pixels[i][2] = 0;
+            pixels[i][3] = 255;
+        }
+        return;
+    }
+
+    if (base == SCE_GXM_TEXTURE_BASE_FORMAT_UBC5 || base == SCE_GXM_TEXTURE_BASE_FORMAT_SBC5) {
+        uint8_t red[16], green[16];
+
+        decode_bc4_channel(block, red);
+        decode_bc4_channel(block + 8, green);
+        for (int i = 0; i < 16; i++) {
+            pixels[i][0] = red[i];
+            pixels[i][1] = green[i];
+            pixels[i][2] = 0;
+            pixels[i][3] = 255;
+        }
+        return;
+    }
+
+    {
+        const uint8_t *color_block = (base == SCE_GXM_TEXTURE_BASE_FORMAT_UBC2 ||
+                                      base == SCE_GXM_TEXTURE_BASE_FORMAT_UBC3)
+                                         ? block + 8
+                                         : block;
+        uint8_t colors[4][4];
+        uint32_t color_bits = (uint32_t)color_block[4] | ((uint32_t)color_block[5] << 8) |
+                              ((uint32_t)color_block[6] << 16) |
+                              ((uint32_t)color_block[7] << 24);
+        bool allow_three = base != SCE_GXM_TEXTURE_BASE_FORMAT_UBC2 &&
+                           base != SCE_GXM_TEXTURE_BASE_FORMAT_UBC3;
+        int i;
+
+        decode_bc1_colors(color_block, colors, allow_three);
+
+        for (i = 0; i < 16; i++)
+            memcpy(pixels[i], colors[(color_bits >> (2 * i)) & 3], 4);
+
+        if (base == SCE_GXM_TEXTURE_BASE_FORMAT_UBC2) {
+            for (i = 0; i < 16; i++) {
+                uint8_t alpha = (uint8_t)((block[i >> 1] >> ((i & 1) * 4)) & 0xf);
+                pixels[i][3] = (uint8_t)(alpha * 17);
+            }
+        } else if (base == SCE_GXM_TEXTURE_BASE_FORMAT_UBC3) {
+            uint8_t alphas[16];
+
+            decode_bc4_channel(block, alphas);
+            for (i = 0; i < 16; i++)
+                pixels[i][3] = alphas[i];
+        }
+    }
+}
+
+static void copy_decoded_block(uint8_t *dest, uint32_t width, uint32_t height, uint32_t x0,
+                               uint32_t y0, const uint8_t pixels[16][4])
+{
+    for (uint32_t y = 0; y < 4; y++) {
+        for (uint32_t x = 0; x < 4; x++) {
+            uint32_t px = x0 + x;
+            uint32_t py = y0 + y;
+
+            if (px >= width || py >= height)
+                continue;
+            memcpy(dest + ((size_t)py * width + px) * 4, pixels[y * 4 + x], 4);
+        }
+    }
+}
+
+static int decode_bc_level(uint8_t *dest, const uint8_t *input, SceGxmTextureType type,
+                           SceGxmTextureFormat format, const GxmTextureLevel *info)
+{
+    uint32_t base = base_format(format);
+    uint32_t block_bytes = compressed_block_bytes(base);
+    uint32_t blocks_x = (info->width + 3) / 4;
+    uint32_t blocks_y = (info->height + 3) / 4;
+
+    if (!block_bytes)
+        return -1;
+
+    if (type == SCE_GXM_TEXTURE_SWIZZLED || type == SCE_GXM_TEXTURE_CUBE || is_arbitrary(type)) {
+        uint32_t layout_x = info->layout_width / 4;
+        uint32_t layout_y = info->layout_height / 4;
+        uint32_t minimum = layout_x < layout_y ? layout_x : layout_y;
+        uint32_t k = highest_bit(minimum);
+        uint32_t count = layout_x * layout_y;
+
+        if (!minimum)
+            return -1;
+
+        for (uint32_t i = 0; i < count; i++) {
+            uint32_t bx = decode_morton2_x(i) & (minimum - 1);
+            uint32_t by = decode_morton2_y(i) & (minimum - 1);
+            uint32_t upper = (i >> (2 * k)) << k;
+            uint8_t pixels[16][4];
+
+            if (layout_x >= layout_y)
+                bx |= upper;
+            else
+                by |= upper;
+
+            if (bx >= blocks_x || by >= blocks_y)
+                continue;
+
+            decode_bc_block(input + (size_t)i * block_bytes, base, pixels);
+            copy_decoded_block(dest, info->width, info->height, bx * 4, by * 4, pixels);
+        }
+
+        return 0;
+    }
+
+    for (uint32_t by = 0; by < blocks_y; by++) {
+        for (uint32_t bx = 0; bx < blocks_x; bx++) {
+            uint32_t index;
+            uint8_t pixels[16][4];
+
+            if (type == SCE_GXM_TEXTURE_TILED) {
+                uint32_t tile = (bx >> 3) + (info->layout_width / 32) * (by >> 3);
+                index = (tile << 6) | (bx & 7) | ((by & 7) << 3);
+            } else {
+                index = by * (info->layout_width / 4) + bx;
+            }
+
+            decode_bc_block(input + (size_t)index * block_bytes, base, pixels);
+            copy_decoded_block(dest, info->width, info->height, bx * 4, by * 4, pixels);
+        }
+    }
+
+    return 0;
+}
+
+static int decode_pvrt_level(uint8_t *dest, const uint8_t *input, SceGxmTextureFormat format,
+                             const GxmTextureLevel *info)
+{
+    uint32_t base = base_format(format);
+    uint32_t two_bpp = base == SCE_GXM_TEXTURE_BASE_FORMAT_PVRT2BPP ||
+                       base == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII2BPP;
+    uint32_t pvrt2 = base == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII2BPP ||
+                     base == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII4BPP;
+    uint8_t *decoded;
+
+    if (!info->layout_width || !info->layout_height)
+        return -1;
+
+    decoded = malloc((size_t)info->layout_width * info->layout_height * 4);
+    if (!decoded)
+        return -1;
+
+    if (gxm_texture_decode_pvrtc(input, info->layout_width, info->layout_height, two_bpp, pvrt2,
+                                 decoded) != 0) {
+        free(decoded);
+        return -1;
+    }
+
+    for (uint32_t y = 0; y < info->height; y++)
+        memcpy(dest + (size_t)y * info->width * 4,
+               decoded + (size_t)y * info->layout_width * 4, (size_t)info->width * 4);
+
+    free(decoded);
+    return 0;
+}
+
+static bool is_yuv_format(uint32_t base)
+{
+    return base == SCE_GXM_TEXTURE_BASE_FORMAT_YUV420P2 ||
+           base == SCE_GXM_TEXTURE_BASE_FORMAT_YUV420P3 ||
+           base == SCE_GXM_TEXTURE_BASE_FORMAT_YUV422;
+}
+
+static uint8_t yuv_clamp(int value)
+{
+    if (value < 0)
+        return 0;
+    if (value > 255)
+        return 255;
+    return (uint8_t)value;
+}
+
+static void yuv_to_rgb(uint8_t out[4], int y, int u, int v, bool bt709)
+{
+    int c = y - 16;
+    int d = u - 128;
+    int e = v - 128;
+    int r, g, b;
+
+    if (bt709) {
+        r = (298 * c + 459 * e + 128) >> 8;
+        g = (298 * c - 55 * d - 136 * e + 128) >> 8;
+        b = (298 * c + 541 * d + 128) >> 8;
+    } else {
+        r = (298 * c + 409 * e + 128) >> 8;
+        g = (298 * c - 100 * d - 208 * e + 128) >> 8;
+        b = (298 * c + 516 * d + 128) >> 8;
+    }
+
+    out[0] = yuv_clamp(r);
+    out[1] = yuv_clamp(g);
+    out[2] = yuv_clamp(b);
+    out[3] = 255;
+}
+
+static int decode_yuv_level(uint8_t *dest, const uint8_t *input, SceGxmTextureFormat format,
+                            const GxmTextureLevel *info)
+{
+    uint32_t base = base_format(format);
+    uint32_t swizzle = (format >> 12) & 7;
+
+    if (base == SCE_GXM_TEXTURE_BASE_FORMAT_YUV422) {
+        bool bt709 = (swizzle & 4) != 0;
+        uint32_t mode = swizzle & 3;
+
+        for (uint32_t y = 0; y < info->height; y++) {
+            const uint8_t *row = input + (size_t)y * info->layout_width * 2;
+
+            for (uint32_t x = 0; x < info->width; x += 2) {
+                const uint8_t *pair = row + (size_t)x * 2;
+                int y0 = pair[1];
+                int y1 = pair[3];
+                int u = 0, v = 0;
+
+                switch (mode) {
+                case 1: /* YVYU */
+                    v = pair[0];
+                    u = pair[2];
+                    break;
+                case 2: /* UYVY */
+                    u = pair[0];
+                    v = pair[2];
+                    y0 = pair[1];
+                    y1 = pair[3];
+                    break;
+                case 3: /* VYUY */
+                    v = pair[0];
+                    u = pair[2];
+                    y0 = pair[1];
+                    y1 = pair[3];
+                    break;
+                case 0: /* YUYV */
+                default:
+                    u = pair[1];
+                    v = pair[3];
+                    y0 = pair[0];
+                    y1 = pair[2];
+                    break;
+                }
+
+                yuv_to_rgb(dest + ((size_t)y * info->width + x) * 4, y0, u, v, bt709);
+                if (x + 1 < info->width)
+                    yuv_to_rgb(dest + ((size_t)y * info->width + x + 1) * 4, y1, u, v, bt709);
+            }
+        }
+
+        return 0;
+    }
+
+    /* 4:2:0, either NV12 (P2) or three planes (P3). */
+    {
+        uint32_t layout_w = info->layout_width;
+        uint32_t layout_h = info->layout_height;
+        const uint8_t *luma = input;
+        const uint8_t *chroma = input + (size_t)layout_w * layout_h;
+        size_t chroma_plane = (size_t)(layout_w / 2) * (layout_h / 2);
+
+        for (uint32_t y = 0; y < info->height; y++) {
+            for (uint32_t x = 0; x < info->width; x++) {
+                uint32_t cx = x / 2;
+                uint32_t cy = y / 2;
+                int u, v;
+
+                if (base == SCE_GXM_TEXTURE_BASE_FORMAT_YUV420P3) {
+                    u = chroma[(size_t)cy * (layout_w / 2) + cx];
+                    v = chroma[chroma_plane + (size_t)cy * (layout_w / 2) + cx];
+                } else {
+                    u = chroma[(size_t)cy * layout_w + cx * 2];
+                    v = chroma[(size_t)cy * layout_w + cx * 2 + 1];
+                }
+
+                yuv_to_rgb(dest + ((size_t)y * info->width + x) * 4,
+                           luma[(size_t)y * layout_w + x], u, v, false);
+            }
+        }
+    }
+
+    return 0;
+}
+
 static int decode_level_rgba8(uint8_t *dest, const uint8_t *input,
                               const SceGxmTextureInner *texture, SceGxmTextureType type,
                               SceGxmTextureFormat format, const GxmTextureLevel *info)
@@ -863,6 +1269,13 @@ static int decode_level_rgba8(uint8_t *dest, const uint8_t *input,
 
     if (base == SCE_GXM_TEXTURE_BASE_FORMAT_P4 || base == SCE_GXM_TEXTURE_BASE_FORMAT_P8)
         palette = (const uint32_t *)(uintptr_t)(texture->palette_addr << 6);
+
+    if (is_bc_format(base))
+        return decode_bc_level(dest, input, type, format, info);
+    if (is_pvrt_format(base))
+        return decode_pvrt_level(dest, input, format, info);
+    if (is_yuv_format(base))
+        return decode_yuv_level(dest, input, format, info);
 
     if (type == SCE_GXM_TEXTURE_SWIZZLED || type == SCE_GXM_TEXTURE_CUBE ||
         is_arbitrary(type)) {

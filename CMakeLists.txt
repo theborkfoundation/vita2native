@@ -54,6 +54,8 @@ add_executable(vita2native
     source/host/host_thread.c
     external/Vita3K/external/miniz/miniz.c
     source/gxm_texture.c
+    source/gxm_texture_pvrtc.cpp
+    external/Vita3K/vita3k/renderer/src/texture/pvrt-dec.cpp
     source/load.c
     source/log.c
     source/main.c
@@ -77,6 +79,7 @@ target_include_directories(vita2native PRIVATE
     source/host
     external/khronos/include
     external/vita-headers/include
+    external/Vita3K/vita3k/renderer/include
     ${SDL2_INCLUDE_DIRS}
 )
 
@@ -187,8 +190,14 @@ if(BUILD_TESTING)
     add_executable(texture_smoke
         tests/texture_smoke.c
         source/gxm_texture.c
+        source/gxm_texture_pvrtc.cpp
+        external/Vita3K/vita3k/renderer/src/texture/pvrt-dec.cpp
     )
-    target_include_directories(texture_smoke PRIVATE include external/vita-headers/include)
+    target_include_directories(texture_smoke PRIVATE
+        include
+        external/vita-headers/include
+        external/Vita3K/vita3k/renderer/include
+    )
     target_compile_definitions(texture_smoke PRIVATE _GNU_SOURCE=1)
     add_test(NAME texture_smoke COMMAND texture_smoke)
 
@@ -199,6 +208,8 @@ if(BUILD_TESTING)
         source/host/host_gfx_null.c
         source/host/host_thread.c
         source/gxm_texture.c
+        source/gxm_texture_pvrtc.cpp
+        external/Vita3K/vita3k/renderer/src/texture/pvrt-dec.cpp
         source/modules/SceGxm.c
         source/spirv_cross_glsl_es.cpp
         source/vita3k_shader_recompiler_iface_c.cpp
@@ -208,6 +219,7 @@ if(BUILD_TESTING)
         source/host
         external/khronos/include
         external/vita-headers/include
+        external/Vita3K/vita3k/renderer/include
     )
     target_compile_definitions(gxm_draw_smoke PRIVATE _GNU_SOURCE=1)
     target_link_libraries(gxm_draw_smoke PRIVATE
