@@ -82,6 +82,12 @@ static VitaOpenedDir *get_opened_dir_for_fd(SceUID fd)
     return vdir;
 }
 
+/* Vita errno values are the host values with the SCE error bit set. */
+static inline uint32_t sce_error_from_errno(int err)
+{
+    return 0x80010000u | (uint32_t)err;
+}
+
 EXPORT(SceLibKernel, 0xB295EB61, void *, sceKernelGetTLSAddr, int key)
 {
     VitaThreadInfo *ti;
@@ -108,20 +114,23 @@ EXPORT(SceLibKernel, 0x7595D9AA, int, sceKernelExitProcess, int res)
 
 static const char *vita_io_open_flags_to_fopen_flags(int flags)
 {
-    if (flags == SCE_O_RDONLY)
-        return "r";
-    else if (flags == (SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC))
-        return "w";
-    else if (flags == (SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND))
-        return "a";
-    else if (flags == SCE_O_RDWR)
-        return "r+";
-    else if (flags == (SCE_O_RDWR | SCE_O_CREAT | SCE_O_TRUNC))
-        return "w+";
-    else if (flags == (SCE_O_RDWR | SCE_O_CREAT | SCE_O_APPEND))
-        return "a+";
-    else
+    int access = flags & (SCE_O_RDONLY | SCE_O_WRONLY);
+    int read_only = access == SCE_O_RDONLY;
+
+    if (access != SCE_O_RDONLY && access != SCE_O_WRONLY && access != SCE_O_RDWR)
         return NULL;
+
+    if (flags & SCE_O_APPEND)
+        return read_only ? "a+" : (access == SCE_O_RDWR ? "a+" : "a");
+
+    if (flags & SCE_O_TRUNC)
+        return read_only ? "w+" : (access == SCE_O_RDWR ? "w+" : "w");
+
+    /*
+     * CREAT without TRUNC must keep an existing file intact. Try to open it
+     * normally first; sceIoOpen retries with a creating mode on ENOENT.
+     */
+    return read_only ? "r" : "r+";
 }
 
 EXPORT(SceLibKernel, 0x6C60AC61, SceUID, sceIoOpen, const char *file, int flags, SceMode mode)
@@ -141,11 +150,18 @@ EXPORT(SceLibKernel, 0x6C60AC61, SceUID, sceIoOpen, const char *file, int flags,
 
     open_flags = vita_io_open_flags_to_fopen_flags(flags);
     if (!open_flags)
-        return SCE_ERROR_ERRNO_ENODEV;
+        return SCE_ERROR_ERRNO_EINVAL;
 
     fp = fopen(host_file, open_flags);
+    if (!fp && (flags & SCE_O_CREAT) && errno == ENOENT) {
+        /* RDONLY|CREAT still needs a readable stream, hence w+. */
+        int access = flags & (SCE_O_RDONLY | SCE_O_WRONLY);
+        fp = fopen(host_file, access == SCE_O_WRONLY ? "w" : "w+");
+    }
     if (!fp)
-        return SCE_ERROR_ERRNO_ENODEV;
+        return sce_error_from_errno(errno);
+
+    (void)mode;
 
     vfile = malloc(sizeof(*vfile));
     if (!vfile) {
@@ -288,12 +304,6 @@ static inline void tm_to_sce_datetime(SceDateTime *dt, const struct tm *tm)
     dt->minute = tm->tm_min;
     dt->second = tm->tm_sec;
     dt->microsecond = 0;
-}
-
-/* Vita errno values are the host values with the SCE error bit set. */
-static inline uint32_t sce_error_from_errno(int err)
-{
-    return 0x80010000u | (uint32_t)err;
 }
 
 static void stat_to_sce_iostat(const struct stat *sb, SceIoStat *st)
