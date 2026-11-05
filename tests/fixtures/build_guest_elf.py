@@ -3001,6 +3001,228 @@ def build_sysmem_elf():
     return assemble_elf(rx, rw, rela, SM_MODINFO)
 
 
+# --- Thread event handler fixture ------------------------------------------
+
+TH_STUB_BASE = 0x240
+TH_LIB1_NAME = 0x290
+TH_LIB2_NAME = 0x2A0
+TH_MODINFO = 0x2B0
+TH_IMPORT1 = 0x310
+TH_IMPORT2 = 0x334
+TH_NIDS1 = 0x360
+TH_ENTRIES1 = 0x374
+TH_NIDS2 = 0x384
+TH_ENTRIES2 = 0x388
+TH_RX_SIZE = 0x3A0
+
+TH_LIB1 = b"SceLibKernel\0"
+TH_LIB2 = b"SceThreadmgr\0"
+TH_LIB1_NID = 0xCAE9ACE6
+TH_LIB2_NID = 0x859A24B1
+
+TH_KERNEL_FUNCS = [
+    0x6D8C0F13,  # sceKernelRegisterThreadEventHandler
+    0xC5C11EE7,  # sceKernelCreateThread
+    0xF08DE149,  # sceKernelStartThread
+    0xDDB395A9,  # sceKernelWaitThreadEnd
+]
+
+TH_THREADMGR_FUNCS = [
+    0x2C8ED6F0,  # sceKernelUnregisterThreadEventHandler
+]
+
+TH_HANDLER_OFFSET = 0x200
+TH_CHILD_OFFSET = 0x1E0
+
+TH_RW_HANDLER_ID = 0x000
+TH_RW_THREAD_ID = 0x004
+TH_RW_STATUS = 0x008
+TH_RW_EVENT_DATA = 0x010
+TH_RW_HANDLER_NAME = 0x030
+TH_RW_THREAD_NAME = 0x038
+TH_RW_SIZE = 0x050
+TH_HANDLER_NAME = b"thandler\0"
+TH_THREAD_NAME = b"tchild\0"
+
+
+def build_thread_event_elf():
+    """Guest ELF exercising thread start/end handler dispatch."""
+    code = []
+    rx_relocs = []
+
+    def emit(word):
+        code.append(word & 0xFFFFFFFF)
+
+    def movw_movt(rd, offset, symseg):
+        base = len(code) * 4
+        emit(arm_movw(rd, 0))
+        emit(arm_movt(rd, 0))
+        rx_relocs.append(encode_rela(0, symseg, base, offset, R_ARM_MOVW_ABS_NC))
+        rx_relocs.append(encode_rela(0, symseg, base + 4, offset, R_ARM_MOVT_ABS))
+
+    def movw_movt_rw(rd, offset):
+        movw_movt(rd, offset, 1)
+
+    def movw_movt_code(rd, offset):
+        movw_movt(rd, offset, 0)
+
+    def call(index):
+        emit(arm_bl(len(code) * 4, TH_STUB_BASE + index * 12))
+
+    def load_rw(rd, offset):
+        movw_movt_rw(rd, offset)
+        emit(0xE5900000 | (rd << 16) | (rd << 12))
+
+    def store_rw(rs, offset):
+        movw_movt_rw(12, offset)
+        emit(0xE58C0000 | (rs << 12))
+
+    def check(bit):
+        emit(0xE3500000)
+        emit(0x13844000 | arm_encode_imm(bit))
+
+    def check_nonzero(bit):
+        emit(0xE3500000)
+        emit(0x03844000 | arm_encode_imm(bit))
+
+    def check_word(offset, value, bit):
+        movw_movt_rw(1, offset)
+        emit(0xE5910000)
+        emit(arm_movw(2, value & 0xFFFF))
+        emit(arm_movt(2, (value >> 16) & 0xFFFF))
+        emit(0xE1500002)
+        emit(0x13844000 | arm_encode_imm(bit))
+
+    emit(0xE92D4010)
+    emit(arm_mov_imm(4, 0))
+
+    # register start/end handler
+    movw_movt_rw(0, TH_RW_HANDLER_NAME)
+    emit(arm_mov_imm(1, 0))
+    emit(arm_mov_imm(2, 0x0C))
+    movw_movt_code(3, TH_HANDLER_OFFSET)
+    emit(0xE24DD008)
+    movw_movt_rw(12, TH_RW_EVENT_DATA)
+    emit(0xE58DC000)
+    call(0)
+    emit(0xE28DD008)
+    store_rw(0, TH_RW_HANDLER_ID)
+    check_nonzero(1)
+
+    # create and start a child thread
+    movw_movt_rw(0, TH_RW_THREAD_NAME)
+    movw_movt_code(1, TH_CHILD_OFFSET)
+    emit(arm_mov_imm(2, 160))
+    emit(arm_movw(3, 0x4000))
+    emit(0xE24DD010)
+    emit(arm_mov_imm(12, 0))
+    emit(0xE58DC000)
+    emit(0xE58DC004)
+    emit(0xE58DC008)
+    call(1)
+    emit(0xE28DD010)
+    store_rw(0, TH_RW_THREAD_ID)
+    check_nonzero(2)
+
+    load_rw(0, TH_RW_THREAD_ID)
+    emit(arm_mov_imm(1, 0))
+    emit(arm_mov_imm(2, 0))
+    call(2)
+    check(4)
+
+    load_rw(0, TH_RW_THREAD_ID)
+    movw_movt_rw(1, TH_RW_STATUS)
+    emit(arm_mov_imm(2, 0))
+    call(3)
+    check(8)
+    check_word(TH_RW_STATUS, 0x33, 16)
+
+    # handler saw both START (0x04) and END (0x08)
+    check_word(TH_RW_EVENT_DATA + 8, 0x0C, 32)
+    movw_movt_rw(1, TH_RW_EVENT_DATA + 4)
+    emit(0xE5911000)
+    load_rw(2, TH_RW_THREAD_ID)
+    emit(0xE1510002)
+    emit(0x13844000 | arm_encode_imm(64))
+
+    load_rw(0, TH_RW_HANDLER_ID)
+    call(4)
+    check(128)
+
+    emit(0xE1A00004)
+    emit(0xE3500000)
+    emit(0x03A0002A)
+    emit(0xE8BD8010)
+
+    assert len(code) * 4 <= TH_CHILD_OFFSET, f"thread handler code overlaps child ({len(code) * 4:#x})"
+
+    rx = bytearray(TH_RX_SIZE)
+    rx[:len(code) * 4] = b"".join(struct.pack("<I", w) for w in code)
+
+    # Child entry: return 0x33.
+    rx[TH_CHILD_OFFSET:TH_CHILD_OFFSET + 8] = b"".join(struct.pack("<I", w) for w in (
+        arm_mov_imm(0, 0x33), 0xE12FFF1E))
+
+    # Handler: OR event type into the flag word and record the thread id.
+    handler = [
+        0xE593C008,  # ldr r12, [r3, #8]
+        0xE18CC000,  # orr r12, r12, r0
+        0xE583C008,  # str r12, [r3, #8]
+        0xE5831004,  # str r1, [r3, #4]
+        0xE3A00000,  # mov r0, #0
+        0xE12FFF1E,  # bx lr
+    ]
+    rx[TH_HANDLER_OFFSET:TH_HANDLER_OFFSET + len(handler) * 4] = b"".join(
+        struct.pack("<I", w) for w in handler)
+
+    rx[TH_LIB1_NAME:TH_LIB1_NAME + len(TH_LIB1)] = TH_LIB1
+    rx[TH_LIB2_NAME:TH_LIB2_NAME + len(TH_LIB2)] = TH_LIB2
+
+    info = bytearray(MODULE_INFO_SIZE)
+    struct.pack_into("<HH", info, 0x00, 0x0000, 0x0101)
+    info[0x04:0x04 + len(MODULE_NAME)] = MODULE_NAME
+    struct.pack_into("<I", info, 0x2C, TH_IMPORT1)
+    struct.pack_into("<I", info, 0x30, TH_IMPORT2 + IMPORT_SIZE)
+    struct.pack_into("<I", info, 0x34, 0x12345678)
+    struct.pack_into("<I", info, 0x44, 0x00000000)
+    struct.pack_into("<I", info, 0x48, 0xFFFFFFFF)
+    struct.pack_into("<I", info, 0x5C, 0x03570011)
+    rx[TH_MODINFO:TH_MODINFO + MODULE_INFO_SIZE] = info
+
+    imp1 = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp1, 0, IMPORT_SIZE, 1, 0, len(TH_KERNEL_FUNCS), 0, 0)
+    struct.pack_into("<I", imp1, IMP_LIBRARY_NID, TH_LIB1_NID)
+    rx[TH_IMPORT1:TH_IMPORT1 + IMPORT_SIZE] = imp1
+
+    imp2 = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp2, 0, IMPORT_SIZE, 1, 0, len(TH_THREADMGR_FUNCS), 0, 0)
+    struct.pack_into("<I", imp2, IMP_LIBRARY_NID, TH_LIB2_NID)
+    rx[TH_IMPORT2:TH_IMPORT2 + IMPORT_SIZE] = imp2
+
+    for i, nid in enumerate(TH_KERNEL_FUNCS):
+        struct.pack_into("<I", rx, TH_NIDS1 + i * 4, nid)
+    for i, nid in enumerate(TH_THREADMGR_FUNCS):
+        struct.pack_into("<I", rx, TH_NIDS2 + i * 4, nid)
+
+    rx_relocs.append(encode_rela(0, 0, TH_IMPORT1 + IMP_LIBRARY_NAME, TH_LIB1_NAME))
+    rx_relocs.append(encode_rela(0, 0, TH_IMPORT1 + IMP_FUNC_NID_TABLE, TH_NIDS1))
+    rx_relocs.append(encode_rela(0, 0, TH_IMPORT1 + IMP_FUNC_ENTRY_TABLE, TH_ENTRIES1))
+    rx_relocs.append(encode_rela(0, 0, TH_IMPORT2 + IMP_LIBRARY_NAME, TH_LIB2_NAME))
+    rx_relocs.append(encode_rela(0, 0, TH_IMPORT2 + IMP_FUNC_NID_TABLE, TH_NIDS2))
+    rx_relocs.append(encode_rela(0, 0, TH_IMPORT2 + IMP_FUNC_ENTRY_TABLE, TH_ENTRIES2))
+    for i in range(len(TH_KERNEL_FUNCS)):
+        rx_relocs.append(encode_rela(0, 0, TH_ENTRIES1 + i * 4, TH_STUB_BASE + i * 12))
+    for i in range(len(TH_THREADMGR_FUNCS)):
+        rx_relocs.append(encode_rela(0, 0, TH_ENTRIES2 + i * 4,
+                                     TH_STUB_BASE + (len(TH_KERNEL_FUNCS) + i) * 12))
+
+    rw = bytearray(TH_RW_SIZE)
+    rw[TH_RW_HANDLER_NAME:TH_RW_HANDLER_NAME + len(TH_HANDLER_NAME)] = TH_HANDLER_NAME
+    rw[TH_RW_THREAD_NAME:TH_RW_THREAD_NAME + len(TH_THREAD_NAME)] = TH_THREAD_NAME
+    rela = bytearray(b"".join(rx_relocs))
+    return assemble_elf(rx, rw, rela, TH_MODINFO)
+
+
 # --- SceAppUtil fixture ----------------------------------------------------
 
 APPUTIL_STUB_BASE = 0x140
@@ -3689,6 +3911,10 @@ def main():
     sysmem_path = os.path.join(out_dir, "guest_sysmem.elf")
     with open(sysmem_path, "wb") as f:
         f.write(build_sysmem_elf())
+
+    thread_event_path = os.path.join(out_dir, "guest_thread_event.elf")
+    with open(thread_event_path, "wb") as f:
+        f.write(build_thread_event_elf())
     print(f"wrote {event_path}")
 
     if os.path.exists(os.path.join(shader_dir, "texture_v.gxp")) and os.path.exists(
