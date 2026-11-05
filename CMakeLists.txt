@@ -55,6 +55,7 @@ add_executable(vita2native
     source/host/host_jit.c
     source/host/host_thread.c
     external/Vita3K/external/miniz/miniz.c
+    external/sqlite/sqlite3.c
     source/gxm_texture.c
     source/gxm_texture_pvrtc.cpp
     external/Vita3K/vita3k/renderer/src/texture/pvrt-dec.cpp
@@ -125,11 +126,15 @@ target_include_directories(vita2native PRIVATE
     external/khronos/include
     external/minimp3
     external/font8x8
+    external/sqlite
     external/Vita3K/external/LibAtrac9/C/src
     external/vita-headers/include
     external/Vita3K/vita3k/renderer/include
     ${SDL2_INCLUDE_DIRS}
 )
+
+# The amalgamation is third-party code with its own warning hygiene.
+set_source_files_properties(external/sqlite/sqlite3.c PROPERTIES COMPILE_OPTIONS "-w")
 
 target_compile_options(vita2native PRIVATE
     -Wall
@@ -378,6 +383,19 @@ if(BUILD_TESTING)
     target_include_directories(aeabi_smoke PRIVATE include)
     target_compile_definitions(aeabi_smoke PRIVATE _GNU_SOURCE=1)
     add_test(NAME aeabi_smoke COMMAND aeabi_smoke)
+
+    add_executable(sqlite_smoke
+        tests/sqlite_smoke.c
+        source/modules/SceSqlite.c
+        external/sqlite/sqlite3.c
+        source/host/host_fs.c
+        source/host/host_thread.c
+    )
+    target_include_directories(sqlite_smoke PRIVATE include source/modules external/sqlite
+        external/vita-headers/include)
+    target_compile_definitions(sqlite_smoke PRIVATE _GNU_SOURCE=1 _FILE_OFFSET_BITS=64)
+    target_link_libraries(sqlite_smoke PRIVATE pthread m)
+    add_test(NAME sqlite_smoke COMMAND sqlite_smoke)
 
     add_executable(ngs_smoke
         tests/ngs_smoke.c

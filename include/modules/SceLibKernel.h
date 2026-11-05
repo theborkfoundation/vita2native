@@ -12,4 +12,8 @@ int SceLibKernel_init(void);
 UEvent *SceLibKernel_get_process_exit_uevent(void);
 int SceLibKernel_get_process_exit_res();
 
+/* Helpers for the SQLite VFS, which lives outside this translation unit. */
+int SceLibKernel_fd_truncate(SceUID fd, int64_t size);
+int SceLibKernel_fd_setlock(SceUID fd, int exclusive, int wait);
+
 #endif

@@ -27,6 +27,7 @@
 #include "modules/SceGxm.h"
 #include "modules/SceKernelThreadMgr.h"
 #include "modules/SceLibKernel.h"
+#include "modules/SceSqlite.h"
 #include "modules/SceSysmem.h"
 #include "modules/SceTouch.h"
 
@@ -139,6 +140,9 @@ static int launch(SceKernelThreadEntry entry)
     ret = SceFios2_init();
     if (ret != 0)
         goto done;
+    ret = SceSqlite_init();
+    if (ret != 0)
+        goto done;
     ret = SceKernelThreadMgr_init();
     if (ret != 0)
         goto done;
@@ -180,6 +184,7 @@ static int launch(SceKernelThreadEntry entry)
     SceAudio_finish();
     SceKernelSync_finish();
     SceKernelThreadMgr_finish();
+    SceSqlite_finish();
 
     LOG("Process finished! Returned: %d", ret);
 

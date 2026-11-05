@@ -1,5 +1,6 @@
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <m-dict.h>
 #include <psp2/kernel/error.h>
@@ -241,6 +242,34 @@ EXPORT(SceIofilemgr, 0x16512F59, int, sceIoSyncByFd, SceUID fd, int flag)
         return SCE_ERROR_ERRNO_EBADF;
 
     return fflush(vfile->fp);
+}
+
+int SceLibKernel_fd_truncate(SceUID fd, int64_t size)
+{
+    VitaOpenedFile *vfile = get_opened_file_for_fd(fd);
+
+    if (!vfile)
+        return -1;
+
+    fflush(vfile->fp);
+    return ftruncate(fileno(vfile->fp), (off_t)size);
+}
+
+int SceLibKernel_fd_setlock(SceUID fd, int exclusive, int wait)
+{
+    VitaOpenedFile *vfile = get_opened_file_for_fd(fd);
+    struct flock lock;
+
+    if (!vfile)
+        return -1;
+
+    memset(&lock, 0, sizeof(lock));
+    lock.l_type = exclusive < 0 ? F_UNLCK : (exclusive ? F_WRLCK : F_RDLCK);
+    lock.l_whence = SEEK_SET;
+    lock.l_start = 0;
+    lock.l_len = 0;
+
+    return fcntl(fileno(vfile->fp), wait ? F_SETLKW : F_SETLK, &lock);
 }
 
 EXPORT(SceLibKernel, 0xA9283DD0, SceUID, sceIoDopen, const char *dirname)
