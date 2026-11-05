@@ -16,6 +16,7 @@
 
 #include <psp2/kernel/error.h>
 #include <psp2/kernel/threadmgr.h>
+#include <psp2common/kernel/threadmgr.h>
 #include <psp2/kernel/threadmgr/lw_cond.h>
 #include <psp2/kernel/threadmgr/rwlock.h>
 
@@ -375,7 +376,17 @@ EXPORT(SceThreadmgr, 0xDBD09B09, int, _sceKernelLockWriteRWLockCB, SceUID rwlock
 typedef struct {
     pthread_cond_t cond;
     VitaLwMutex *mutex;
+    SceUID uid;
+    char name[32];
+    uint32_t attr;
+    SceKernelLwCondWork *work;
+    int waiting;
 } VitaLwCond;
+
+#define VITA_LWCOND_SLOTS 64
+
+static VitaLwCond *g_lwconds[VITA_LWCOND_SLOTS];
+static pthread_mutex_t g_lwcond_table_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static VitaLwCond *lwcond_from_work(SceKernelLwCondWork *work)
 {
@@ -388,6 +399,28 @@ static VitaLwCond *lwcond_from_work(SceKernelLwCondWork *work)
     return pointer;
 }
 
+static VitaLwCond *lwcond_lookup(SceUID uid)
+{
+    VitaLwCond *result = NULL;
+
+    pthread_mutex_lock(&g_lwcond_table_lock);
+    for (int i = 0; i < VITA_LWCOND_SLOTS; i++) {
+        if (g_lwconds[i] && g_lwconds[i]->uid == uid) {
+            result = g_lwconds[i];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_lwcond_table_lock);
+
+    return result;
+}
+
+int SceKernelLocks_classify_uid(SceUID uid)
+{
+    (void)uid;
+    return -1;
+}
+
 static int lwcond_wait(SceKernelLwCondWork *work, unsigned int *timeout)
 {
     VitaLwCond *cond = lwcond_from_work(work);
@@ -398,6 +431,7 @@ static int lwcond_wait(SceKernelLwCondWork *work, unsigned int *timeout)
     if (!cond->mutex)
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
 
+    cond->waiting++;
     if (timeout) {
         struct timespec ts;
         uint64_t micros = (uint64_t)(*timeout);
@@ -411,13 +445,49 @@ static int lwcond_wait(SceKernelLwCondWork *work, unsigned int *timeout)
         }
 
         result = pthread_cond_timedwait(&cond->cond, &cond->mutex->mutex, &ts);
+        cond->waiting--;
         if (result == ETIMEDOUT)
             return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
         return result == 0 ? 0 : SCE_KERNEL_ERROR_LW_COND_ERROR;
     }
 
     result = pthread_cond_wait(&cond->cond, &cond->mutex->mutex);
+    cond->waiting--;
     return result == 0 ? 0 : SCE_KERNEL_ERROR_LW_COND_ERROR;
+}
+
+static void lwcond_fill_info(const VitaLwCond *cond, VitaLwCondInfo *info)
+{
+    memset(info, 0, sizeof(*info));
+    info->size = sizeof(*info);
+    info->lwcond_id = cond->uid;
+    memcpy(info->name, cond->name, sizeof(info->name));
+    info->attr = (int)cond->attr;
+    info->work = cond->work;
+    info->lwmutex = cond->mutex ? cond->mutex->work : NULL;
+    info->num_wait_threads = cond->waiting;
+}
+
+static int lwcond_get_info(SceUID uid, VitaLwCondInfo *info, SceSize size)
+{
+    VitaLwCond *cond = lwcond_lookup(uid);
+
+    if (!cond)
+        return SCE_KERNEL_ERROR_UNKNOWN_LW_COND_ID;
+    if (!info)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    if (size != 0 && size < sizeof(VitaLwCondInfo)) {
+        VitaLwCondInfo local;
+
+        lwcond_fill_info(cond, &local);
+        local.size = size;
+        memcpy(info, &local, size);
+    } else {
+        lwcond_fill_info(cond, info);
+    }
+
+    return 0;
 }
 
 EXPORT(SceLibKernel, 0x48C7EAE6, int, sceKernelCreateLwCond, SceKernelLwCondWork *work,
@@ -425,9 +495,8 @@ EXPORT(SceLibKernel, 0x48C7EAE6, int, sceKernelCreateLwCond, SceKernelLwCondWork
        const SceKernelLwCondOptParam *opt_param)
 {
     VitaLwCond *cond;
+    int slot = -1;
 
-    (void)name;
-    (void)attr;
     (void)opt_param;
 
     if (!work || !lw_mutex)
@@ -443,6 +512,27 @@ EXPORT(SceLibKernel, 0x48C7EAE6, int, sceKernelCreateLwCond, SceKernelLwCondWork
     }
 
     cond->mutex = SceKernelSync_lw_mutex_from_work(lw_mutex);
+    cond->uid = SceSysmem_get_next_uid();
+    cond->attr = attr;
+    cond->work = work;
+    if (name)
+        strncpy(cond->name, name, sizeof(cond->name) - 1);
+
+    pthread_mutex_lock(&g_lwcond_table_lock);
+    for (int i = 0; i < VITA_LWCOND_SLOTS; i++) {
+        if (!g_lwconds[i]) {
+            g_lwconds[i] = cond;
+            slot = i;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_lwcond_table_lock);
+
+    if (slot < 0) {
+        pthread_cond_destroy(&cond->cond);
+        free(cond);
+        return SCE_KERNEL_ERROR_NO_MEMORY;
+    }
 
     memset(work, 0, sizeof(*work));
     memcpy(&work->data[0], &cond, sizeof(cond));
@@ -456,6 +546,15 @@ EXPORT(SceLibKernel, 0x721F6CB3, int, sceKernelDeleteLwCond, SceKernelLwCondWork
 
     if (!cond)
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    pthread_mutex_lock(&g_lwcond_table_lock);
+    for (int i = 0; i < VITA_LWCOND_SLOTS; i++) {
+        if (g_lwconds[i] == cond) {
+            g_lwconds[i] = NULL;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_lwcond_table_lock);
 
     pthread_cond_destroy(&cond->cond);
     free(cond);
@@ -550,6 +649,39 @@ EXPORT(SceThreadmgr, 0x72DBB96B, int, _sceKernelWaitLwCondCB, SceKernelLwCondWor
        unsigned int *timeout)
 {
     return lwcond_wait(work, timeout);
+}
+
+/* ------------------------------------------------------ lw cond introspection */
+
+EXPORT(SceThreadmgr, 0x6C79F2F2, int, _sceKernelGetLwCondInfo, SceUID lwcond_id,
+       VitaLwCondInfo *info)
+{
+    return lwcond_get_info(lwcond_id, info, 0);
+}
+
+EXPORT(SceThreadmgr, 0xD9E78D30, int, _sceKernelGetLwCondInfoById, SceUID lwcond_id,
+       VitaLwCondInfo *info, SceSize size)
+{
+    return lwcond_get_info(lwcond_id, info, size);
+}
+
+EXPORT(SceLibKernel, 0xE4DF36A0, int, sceKernelGetLwCondInfo, SceKernelLwCondWork *work,
+       VitaLwCondInfo *info)
+{
+    VitaLwCond *cond = lwcond_from_work(work);
+
+    if (!cond)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    return lwcond_get_info(cond->uid, info, 0);
+}
+
+EXPORT(SceLibKernel, 0x971F1DE8, int, sceKernelGetLwCondInfoById, SceUID lwcond_id,
+       VitaLwCondInfo *info)
+{
+    SceSize size = info ? info->size : 0;
+
+    return lwcond_get_info(lwcond_id, info, size);
 }
 
 /* ------------------------------------------------------------------------- */

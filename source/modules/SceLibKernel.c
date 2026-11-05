@@ -618,3 +618,91 @@ EXPORT(SceLibKernel, 0x98ACED6D, int, sceIoSync, const char *device, unsigned in
 
     return 0;
 }
+
+/*
+ * Diagnostics, module hooks and SBL helpers. The exact signatures of the
+ * backtrace and SBL entry points are not public; they take only scalar or
+ * pointer arguments, all of which arrive in registers, so ignoring them is
+ * safe. Returning success without filling a buffer is preferable to guessing
+ * at an output layout.
+ */
+
+EXPORT(SceLibKernel, 0x894037E8, int, sceKernelBacktrace, void *unk0, void *unk1, int unk2,
+       int unk3, void *unk4)
+{
+    (void)unk0;
+    (void)unk1;
+    (void)unk2;
+    (void)unk3;
+    (void)unk4;
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0xD16C03B0, int, sceKernelBacktraceSelf, void *unk0, int unk1)
+{
+    (void)unk0;
+    (void)unk1;
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0x1C02A434, int, sceKernelPrintBacktrace, void *unk0)
+{
+    (void)unk0;
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0x15E2A45D, int, sceKernelCallModuleExit, SceUID module_id)
+{
+    (void)module_id;
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0xAFE2B300, int, sceKernelCallWithChangeStack, void *stack, void *function,
+       void *argument)
+{
+    (void)stack;
+    (void)function;
+    (void)argument;
+    return SCE_ERROR_ERRNO_EINVAL;
+}
+
+EXPORT(SceLibKernel, 0xF8A99FDF, SceUInt32, sceKernelGetPMUSERENR, void)
+{
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0x963F4A99, int, sceSblACMgrIsGameProgram, int *result)
+{
+    if (result)
+        *result = 1;
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0x5F9F0D61, int, sceSblGcAuthMgrAdhocBB160Shutdown, void)
+{
+    return SCE_ERROR_ERRNO_EINVAL;
+}
+
+EXPORT(SceLibKernel, 0xE633BAD1, int, sceSblGcAuthMgrAdhocBB224Shutdown, void)
+{
+    return SCE_ERROR_ERRNO_EINVAL;
+}
+
+EXPORT(SceLibKernel, 0xEB02F15D, int, sceSblGcAuthMgrMsSaveBBCipherFinal, void *unk0)
+{
+    (void)unk0;
+    return SCE_ERROR_ERRNO_EINVAL;
+}
+
+EXPORT(SceLibKernel, 0xEE2D40F7, int, sceSblGcAuthMgrMsSaveBBMacUpdate, void *unk0, void *unk1)
+{
+    (void)unk0;
+    (void)unk1;
+    return SCE_ERROR_ERRNO_EINVAL;
+}
+
+EXPORT(SceLibKernel, 0x17C0CEF4, int, sceSblGcAuthMgrPcactActivation, void *unk0)
+{
+    (void)unk0;
+    return SCE_ERROR_ERRNO_EINVAL;
+}

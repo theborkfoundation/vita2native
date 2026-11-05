@@ -17,6 +17,7 @@
 
 #include <psp2/kernel/error.h>
 #include <psp2/types.h>
+#include <psp2common/kernel/threadmgr.h>
 
 #include "host.h"
 #include "module.h"
@@ -68,6 +69,11 @@ static VitaEvent *event_lookup(SceUID uid)
     pthread_mutex_unlock(&g_event_table_lock);
 
     return NULL;
+}
+
+int SceKernelEvent_classify_uid(SceUID uid)
+{
+    return event_lookup(uid) ? SCE_KERNEL_TMID_EventFlag : -1;
 }
 
 static SceUID event_create(const char *name, uint32_t attr, uint32_t init_pattern)

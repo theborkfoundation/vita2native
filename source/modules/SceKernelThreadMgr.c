@@ -5,6 +5,7 @@
 #include <psp2/kernel/error.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
+#include <psp2common/kernel/threadmgr.h>
 #include <psp2/kernel/threadmgr/msgpipe.h>
 #include <psp2/kernel/threadmgr/mutex.h>
 #include <pthread.h>
@@ -18,6 +19,7 @@
 #include "module.h"
 #include "util.h"
 
+#include "modules/SceKernelSync.h"
 #include "modules/SceKernelThreadMgr.h"
 #include "modules/SceLibKernel.h"
 #include "modules/SceSysmem.h"
@@ -264,7 +266,10 @@ static SceUID create_thread(const char *name, SceKernelThreadEntry entry, int in
     ti->current_priority = initPriority;
     ti->stack_size = stackSize;
     ti->attr = attr;
+    ti->affinity_mask = 1;
     ti->vita_tls = malloc(SCE_KERNEL_TLS_SIZE);
+    mutexInit(&ti->signal_lock);
+    condvarInit(&ti->signal_cond);
 
     res = threadCreate(&ti->thread, thread_entry_wrapper, ti, NULL, stackSize, priority, -2);
     if (R_FAILED(res)) {
@@ -332,6 +337,8 @@ EXPORT(SceThreadmgr, 0x1BBDE3D9, int, sceKernelDeleteThread, SceUID thid)
 
     free(ti->argp);
     free(ti->vita_tls);
+    mutexDestroy(&ti->signal_lock);
+    condvarDestroy(&ti->signal_cond);
     rwlockWriteLock(&g_vita_thread_infos_lock);
     vita_thread_info_dict_erase(g_vita_thread_infos, thid);
     rwlockWriteUnlock(&g_vita_thread_infos_lock);
@@ -1905,6 +1912,523 @@ EXPORT(SceThreadmgr, 0xFA3D4491, int, _sceKernelWaitThreadEndCB, SceUID thid, in
 }
 
 EXPORT(SceThreadmgr, 0x0373C5E3, int, sceKernelWaitThreadEndCB_089, SceUID thid, int *stat,
+       SceUInt *timeout)
+{
+    return sceKernelWaitThreadEnd(thid, stat, timeout);
+}
+
+/* ------------------------------------------------------------- signals */
+
+EXPORT(SceThreadmgr, 0xD4C367B2, int, sceKernelSendSignal, SceUID thid)
+{
+    VitaThreadInfo *ti = get_thread_info_or_current(thid);
+
+    if (!ti)
+        return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
+
+    mutexLock(&ti->signal_lock);
+    if (ti->signal_pending) {
+        mutexUnlock(&ti->signal_lock);
+        return SCE_KERNEL_ERROR_ALREADY_SENT;
+    }
+
+    ti->signal_pending = true;
+    condvarWakeAll(&ti->signal_cond);
+    mutexUnlock(&ti->signal_lock);
+
+    return 0;
+}
+
+static int wait_for_signal(SceUInt32 delay, SceUInt32 *timeout)
+{
+    VitaThreadInfo *ti = SceKernelThreadMgr_get_thread_info();
+    uint64_t timeout_ns;
+
+    if (!ti)
+        return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
+
+    if (delay)
+        host_sleep_ns((s64)delay * 1000);
+
+    mutexLock(&ti->signal_lock);
+    if (!ti->signal_pending) {
+        if (timeout) {
+            timeout_ns = (uint64_t)*timeout * 1000ull;
+            while (!ti->signal_pending) {
+                if (condvarWaitTimeoutLocked(&ti->signal_cond, &ti->signal_lock, timeout_ns) < 0)
+                    break;
+            }
+        } else {
+            while (!ti->signal_pending)
+                condvarWaitLocked(&ti->signal_cond, &ti->signal_lock);
+        }
+    }
+
+    if (!ti->signal_pending) {
+        mutexUnlock(&ti->signal_lock);
+        return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+    }
+
+    ti->signal_pending = false;
+    mutexUnlock(&ti->signal_lock);
+
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0xADCA94E5, int, sceKernelWaitSignal, SceUInt32 unk0, SceUInt32 delay,
+       SceUInt32 *timeout)
+{
+    (void)unk0;
+    return wait_for_signal(delay, timeout);
+}
+
+EXPORT(SceLibKernel, 0x24460BB3, int, sceKernelWaitSignalCB, SceUInt32 unk0, SceUInt32 delay,
+       SceUInt32 *timeout)
+{
+    run_pending_callbacks(current_thread_uid());
+    return sceKernelWaitSignal(unk0, delay, timeout);
+}
+
+EXPORT(SceThreadmgr, 0x50407BF4, int, _sceKernelWaitSignal, SceUInt32 unk0, SceUInt32 delay,
+       SceUInt32 *timeout)
+{
+    (void)unk0;
+    return wait_for_signal(delay, timeout);
+}
+
+EXPORT(SceThreadmgr, 0xCEA3FC52, int, _sceKernelWaitSignalCB, SceUInt32 unk0, SceUInt32 delay,
+       SceUInt32 *timeout)
+{
+    run_pending_callbacks(current_thread_uid());
+    return wait_for_signal(delay, timeout);
+}
+
+/* ---------------------------------------------------------- exceptions */
+
+/*
+ * There is no exception delivery mechanism on the host, so the wait points
+ * complete immediately. The alternative would be a permanent block, which is
+ * worse for callers that only use these as a scheduling point.
+ */
+static void warn_exception_unsupported(const char *name)
+{
+    static bool warned_wait_exception;
+    static bool warned_wait_multiple;
+    bool *flag = name[0] == 'w' ? &warned_wait_exception : &warned_wait_multiple;
+
+    if (!*flag) {
+        *flag = true;
+        LOG("%s is not modelled on the host; returning success", name);
+    }
+}
+
+EXPORT(SceLibKernel, 0x11E263A5, int, sceKernelWaitException, SceUInt32 unk0, SceUInt32 delay,
+       SceUInt32 *timeout)
+{
+    (void)unk0;
+    (void)delay;
+    (void)timeout;
+    warn_exception_unsupported("sceKernelWaitException");
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0xAB4B5485, int, sceKernelWaitExceptionCB, SceUInt32 unk0, SceUInt32 delay,
+       SceUInt32 *timeout)
+{
+    run_pending_callbacks(current_thread_uid());
+    return sceKernelWaitException(unk0, delay, timeout);
+}
+
+EXPORT(SceThreadmgr, 0x6F7C4DE6, int, _sceKernelWaitException, SceUInt32 unk0, SceUInt32 delay,
+       SceUInt32 *timeout)
+{
+    return sceKernelWaitException(unk0, delay, timeout);
+}
+
+EXPORT(SceThreadmgr, 0x5E7876F2, int, _sceKernelWaitExceptionCB, SceUInt32 unk0, SceUInt32 delay,
+       SceUInt32 *timeout)
+{
+    run_pending_callbacks(current_thread_uid());
+    return sceKernelWaitException(unk0, delay, timeout);
+}
+
+EXPORT(SceLibKernel, 0x10586418, int, sceKernelWaitMultipleEvents, SceUInt32 unk0, SceUInt32 delay,
+       SceUInt32 *timeout)
+{
+    (void)unk0;
+    (void)delay;
+    (void)timeout;
+    warn_exception_unsupported("sceKernelWaitMultipleEvents");
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0x4263DBC9, int, sceKernelWaitMultipleEventsCB, SceUInt32 unk0,
+       SceUInt32 delay, SceUInt32 *timeout)
+{
+    run_pending_callbacks(current_thread_uid());
+    return sceKernelWaitMultipleEvents(unk0, delay, timeout);
+}
+
+EXPORT(SceThreadmgr, 0x200CC503, int, _sceKernelWaitMultipleEvents, SceUInt32 unk0,
+       SceUInt32 delay, SceUInt32 *timeout)
+{
+    return sceKernelWaitMultipleEvents(unk0, delay, timeout);
+}
+
+EXPORT(SceThreadmgr, 0x0558B7C1, int, _sceKernelWaitMultipleEventsCB, SceUInt32 unk0,
+       SceUInt32 delay, SceUInt32 *timeout)
+{
+    run_pending_callbacks(current_thread_uid());
+    return sceKernelWaitMultipleEvents(unk0, delay, timeout);
+}
+
+/* ------------------------------------------------------- VM thread hooks */
+
+/*
+ * The VM (Mono) hooks are used to inspect or replace a suspended thread's
+ * register context. The host cannot rewrite a running thread's registers, so
+ * reads report a zeroed context and writes are accepted but ignored. Both
+ * still validate the thread handle and the structure size.
+ */
+typedef struct {
+    SceSize size;
+    SceUInt32 cpsr;
+    SceUInt32 reg[16];
+    SceUInt32 tpidrurw;
+    SceUInt32 teehbr;
+    SceUInt32 sb;
+    SceUInt32 st;
+} VitaThreadCpuRegisterInfo;
+
+typedef struct {
+    SceSize size;
+    SceUInt32 fpscr;
+    float reg[64];
+} VitaThreadVfpRegisterInfo;
+
+static int get_thread_context_for_vm(SceUID thid, VitaThreadCpuRegisterInfo *cpu,
+                                     VitaThreadVfpRegisterInfo *vfp)
+{
+    VitaThreadInfo *ti = get_thread_info_or_current(thid);
+
+    if (!ti)
+        return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
+
+    if (cpu) {
+        if (cpu->size && cpu->size < sizeof(*cpu))
+            return SCE_KERNEL_ERROR_INVALID_ARGUMENT_SIZE;
+        memset(cpu, 0, sizeof(*cpu));
+        cpu->size = sizeof(*cpu);
+    }
+
+    if (vfp) {
+        if (vfp->size && vfp->size < sizeof(*vfp))
+            return SCE_KERNEL_ERROR_INVALID_ARGUMENT_SIZE;
+        memset(vfp, 0, sizeof(*vfp));
+        vfp->size = sizeof(*vfp);
+    }
+
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0x377094D5, int, _sceKernelGetThreadContextForVM, SceUID thid,
+       VitaThreadCpuRegisterInfo *cpu, VitaThreadVfpRegisterInfo *vfp)
+{
+    return get_thread_context_for_vm(thid, cpu, vfp);
+}
+
+EXPORT(SceLibKernel, 0x22C9595E, int, sceKernelGetThreadContextForVM, SceUID thid,
+       VitaThreadCpuRegisterInfo *cpu, VitaThreadVfpRegisterInfo *vfp)
+{
+    return get_thread_context_for_vm(thid, cpu, vfp);
+}
+
+static int set_thread_context_for_vm(SceUID thid)
+{
+    if (!get_thread_info_or_current(thid))
+        return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
+
+    LOG("sceKernelSetThreadContextForVM: host cannot replace guest registers, ignoring");
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0xD4785C41, int, _sceKernelSetThreadContextForVM, SceUID thid,
+       const VitaThreadCpuRegisterInfo *cpu, const VitaThreadVfpRegisterInfo *vfp)
+{
+    (void)cpu;
+    (void)vfp;
+    return set_thread_context_for_vm(thid);
+}
+
+EXPORT(SceLibKernel, 0x27E6DEDE, int, sceKernelSetThreadContextForVM, SceUID thid,
+       const VitaThreadCpuRegisterInfo *cpu, const VitaThreadVfpRegisterInfo *vfp)
+{
+    (void)cpu;
+    (void)vfp;
+    return set_thread_context_for_vm(thid);
+}
+
+EXPORT(SceThreadmgr, 0x1FF5960D, int, sceKernelSuspendThreadForVM, SceUID thid)
+{
+    VitaThreadInfo *ti = get_thread_info_or_current(thid);
+
+    if (!ti)
+        return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
+
+    ti->suspend_count++;
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0x7EB55DAC, int, sceKernelResumeThreadForVM, SceUID thid)
+{
+    VitaThreadInfo *ti = get_thread_info_or_current(thid);
+
+    if (!ti)
+        return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
+    if (ti->suspend_count == 0)
+        return SCE_KERNEL_ERROR_NOT_SUSPENDED;
+
+    ti->suspend_count--;
+    return 0;
+}
+
+/* ------------------------------------------------ performance counters */
+
+EXPORT(SceThreadmgr, 0x6B9711AC, int, _sceKernelPMonThreadGetCounter, SceUID thid, int counter,
+       SceUInt32 *value)
+{
+    (void)counter;
+
+    if (!get_thread_info_or_current(thid))
+        return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
+    if (value)
+        *value = 0;
+
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0x99B2BF15, int, sceKernelPMonThreadGetCounter, SceUID thid, int counter,
+       SceUInt32 *value)
+{
+    return _sceKernelPMonThreadGetCounter(thid, counter, value);
+}
+
+EXPORT(SceThreadmgr, 0xD9BD74EB, int, sceKernelCheckWaitableStatus, void)
+{
+    return 0;
+}
+
+/* --------------------------------------------- thread event inspection */
+
+/*
+ * The event-info structure is not publicly documented. Resolve the handle and
+ * report success without writing to the caller's buffer rather than guessing
+ * at a layout.
+ */
+static int thread_event_info(SceUID id, void *info)
+{
+    (void)info;
+
+    if (get_thread_info_for_uid(id) || SceKernelEvent_classify_uid(id) >= 0)
+        return 0;
+
+    return SCE_KERNEL_ERROR_UNKNOWN_UID;
+}
+
+EXPORT(SceThreadmgr, 0x5DE0B7E9, int, _sceKernelGetThreadEventInfo, SceUID id, void *info)
+{
+    return thread_event_info(id, info);
+}
+
+EXPORT(SceLibKernel, 0xE48476FE, int, sceKernelGetThreadEventInfo, SceUID id, void *info)
+{
+    return thread_event_info(id, info);
+}
+
+/* --------------------------------------------------- thread attributes */
+
+#define VITA_CPU_MASK_USER_ALL 0x00070000
+
+static int change_thread_priority2(SceUID thid, int priority)
+{
+    VitaThreadInfo *ti = get_thread_info_or_current(thid);
+    int old_priority;
+
+    if (!ti)
+        return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
+
+    old_priority = ti->current_priority;
+
+    if (priority == 0) {
+        VitaThreadInfo *current = SceKernelThreadMgr_get_thread_info();
+
+        if (!current)
+            return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
+        priority = current->current_priority;
+    }
+
+    if (priority >= SCE_KERNEL_DEFAULT_PRIORITY - 32 &&
+        priority <= SCE_KERNEL_DEFAULT_PRIORITY + 31)
+        priority = SCE_KERNEL_DEFAULT_PRIORITY_GAME_APP + (priority - SCE_KERNEL_DEFAULT_PRIORITY);
+
+    if (priority < SCE_KERNEL_HIGHEST_PRIORITY_USER ||
+        priority > SCE_KERNEL_LOWEST_PRIORITY_USER)
+        return SCE_KERNEL_ERROR_ILLEGAL_PRIORITY;
+
+    ti->current_priority = priority;
+    return old_priority;
+}
+
+EXPORT(SceThreadmgr, 0xC5FFCA61, int, sceKernelChangeThreadPriority2, SceUID thid, int priority)
+{
+    return change_thread_priority2(thid, priority);
+}
+
+EXPORT(SceThreadmgr, 0xCC18FBAE, int, sceKernelChangeThreadVfpException, SceUInt32 clear_mask,
+       SceUInt32 set_mask)
+{
+    VitaThreadInfo *ti = SceKernelThreadMgr_get_thread_info();
+    SceUInt32 old;
+
+    if (((clear_mask | set_mask) & 0xf7ffff60u) != 0 || (clear_mask & set_mask) != 0)
+        return SCE_KERNEL_ERROR_INVALID_ARGUMENT;
+    if (!ti)
+        return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
+
+    old = ti->vfp_exception;
+    ti->vfp_exception = set_mask | (old & ~clear_mask);
+    return (int)old;
+}
+
+EXPORT(SceLibKernel, 0xA37A6057, int, sceKernelGetCurrentThreadVfpException, void)
+{
+    VitaThreadInfo *ti = SceKernelThreadMgr_get_thread_info();
+
+    return ti ? (int)ti->vfp_exception : 0;
+}
+
+typedef struct {
+    SceSize size;
+    int stack_size;
+    SceUInt attr;
+    int cpu_affinity_mask;
+    const SceKernelThreadOptParam *option;
+} VitaCreateThreadOpt;
+
+EXPORT(SceThreadmgr, 0xC0FAF6A3, SceUID, sceKernelCreateThreadForUser, const char *name,
+       SceKernelThreadEntry entry, int init_priority, VitaCreateThreadOpt *options)
+{
+    SceSize stack_size = SCE_KERNEL_THREAD_STACK_SIZE_DEFAULT_USER_MAIN;
+    SceUInt attr = 0;
+
+    if (!options)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    if (options->size && options->size < sizeof(*options))
+        return SCE_KERNEL_ERROR_INVALID_ARGUMENT_SIZE;
+    if (options->cpu_affinity_mask & ~VITA_CPU_MASK_USER_ALL)
+        return SCE_KERNEL_ERROR_ILLEGAL_CPU_AFFINITY_MASK;
+
+    if (options->stack_size > 0)
+        stack_size = (SceSize)options->stack_size;
+    attr = options->attr;
+
+    return create_thread(name, entry, init_priority, stack_size, attr);
+}
+
+EXPORT(SceThreadmgr, 0x001173F8, int, sceKernelChangeActiveCpuMask, SceUInt32 mask)
+{
+    static SceUInt32 active_mask = VITA_CPU_MASK_USER_ALL;
+    SceUInt32 old = active_mask;
+
+    if (mask & ~VITA_CPU_MASK_USER_ALL)
+        return SCE_KERNEL_ERROR_ILLEGAL_CPU_AFFINITY_MASK;
+
+    active_mask = mask;
+    return (int)old;
+}
+
+EXPORT(SceThreadmgr, 0xC9678F7F, SceKernelIdListType, sceKernelGetThreadmgrUIDClass, SceUID uid)
+{
+    int type;
+
+    if (get_thread_info_for_uid(uid))
+        return SCE_KERNEL_TMID_Thread;
+    if (get_msgpipe_info(uid))
+        return SCE_KERNEL_TMID_Mpipe;
+    if (callback_lookup(uid))
+        return SCE_KERNEL_TMID_Callback;
+
+    pthread_mutex_lock(&g_vita_thread_event_handlers_lock);
+    for (int i = 0; i < VITA_CALLBACK_SLOTS; i++) {
+        if (g_vita_thread_event_handlers[i].used && g_vita_thread_event_handlers[i].uid == uid) {
+            pthread_mutex_unlock(&g_vita_thread_event_handlers_lock);
+            return SCE_KERNEL_TMID_ThreadEventHandler;
+        }
+    }
+    pthread_mutex_unlock(&g_vita_thread_event_handlers_lock);
+
+    type = SceKernelSync_classify_uid(uid);
+    if (type >= 0)
+        return (SceKernelIdListType)type;
+
+    type = SceKernelEvent_classify_uid(uid);
+    if (type >= 0)
+        return (SceKernelIdListType)type;
+
+    return (SceKernelIdListType)SCE_KERNEL_ERROR_UNKNOWN_UID;
+}
+
+/* -------------------------------------- underscore message pipe vectors */
+
+EXPORT(SceThreadmgr, 0x5E65E454, int, _sceKernelSendMsgPipeVector, SceUID uid,
+       const VitaMsgPipeVector *vec, unsigned int count, int unk1, void *unk2,
+       unsigned int *timeout)
+{
+    (void)unk1;
+    (void)timeout;
+    return msgpipe_send_vector(uid, vec, count, unk2, true);
+}
+
+EXPORT(SceThreadmgr, 0xF6D515DC, int, _sceKernelSendMsgPipeVectorCB, SceUID uid,
+       const VitaMsgPipeVector *vec, unsigned int count, int unk1, void *unk2,
+       unsigned int *timeout)
+{
+    run_pending_callbacks(current_thread_uid());
+    return _sceKernelSendMsgPipeVector(uid, vec, count, unk1, unk2, timeout);
+}
+
+EXPORT(SceThreadmgr, 0x3DD9E4AB, int, _sceKernelReceiveMsgPipeVector, SceUID uid,
+       const VitaMsgPipeVector *vec, unsigned int count, int unk1, void *unk2,
+       unsigned int *timeout)
+{
+    (void)unk1;
+    (void)timeout;
+    return msgpipe_receive_vector(uid, vec, count, unk2, true);
+}
+
+EXPORT(SceThreadmgr, 0x4DBF648E, int, _sceKernelReceiveMsgPipeVectorCB, SceUID uid,
+       const VitaMsgPipeVector *vec, unsigned int count, int unk1, void *unk2,
+       unsigned int *timeout)
+{
+    run_pending_callbacks(current_thread_uid());
+    return _sceKernelReceiveMsgPipeVector(uid, vec, count, unk1, unk2, timeout);
+}
+
+EXPORT(SceThreadmgr, 0xB3D600AB, int, _sceKernelTrySendMsgPipeVector, SceUID uid,
+       const VitaMsgPipeVector *vec, SceSize count, int unk1, void *unk2)
+{
+    (void)unk1;
+    return msgpipe_send_vector(uid, vec, count, unk2, false);
+}
+
+EXPORT(SceThreadmgr, 0x03CFCF00, int, _sceKernelTryReceiveMsgPipeVector, SceUID uid,
+       const VitaMsgPipeVector *vec, SceSize count, int unk1, void *unk2)
+{
+    (void)unk1;
+    return msgpipe_receive_vector(uid, vec, count, unk2, false);
+}
+
+EXPORT(SceThreadmgr, 0xF3489EF4, int, sceKernelWaitThreadEnd_089, SceUID thid, int *stat,
        SceUInt *timeout)
 {
     return sceKernelWaitThreadEnd(thid, stat, timeout);

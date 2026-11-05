@@ -102,6 +102,10 @@ void mutexDestroy(Mutex *mutex);
 /* Condition variables. */
 void condvarInit(CondVar *condvar);
 void condvarWait(CondVar *condvar, Mutex *mutex);
+int condvarWaitTimeout(CondVar *condvar, Mutex *mutex, uint64_t timeout_ns);
+/* Variants for callers that already hold the mutex; it stays held on return. */
+void condvarWaitLocked(CondVar *condvar, Mutex *mutex);
+int condvarWaitTimeoutLocked(CondVar *condvar, Mutex *mutex, uint64_t timeout_ns);
 void condvarWakeAll(CondVar *condvar);
 void condvarDestroy(CondVar *condvar);
 

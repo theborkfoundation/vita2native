@@ -25,6 +25,12 @@ SceUID SceSysmem_get_next_uid(void)
     return atomic_fetch_add(&g_next_uid, 1);
 }
 
+/* Owner tracking is best-effort; the thread manager is not linked here. */
+VitaThreadInfo *SceKernelThreadMgr_get_thread_info(void)
+{
+    return NULL;
+}
+
 SceUID sceKernelCreateSema(const char *name, SceUInt attr, int init_count, int max_count,
                            SceKernelSemaOptParam *option);
 int sceKernelDeleteSema(SceUID uid);

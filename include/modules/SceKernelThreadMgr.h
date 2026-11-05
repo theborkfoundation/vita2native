@@ -19,6 +19,12 @@ typedef struct {
     int current_priority;
     SceSize stack_size;
     SceUInt attr;
+    int affinity_mask;
+    uint32_t vfp_exception;
+    uint32_t suspend_count;
+    bool signal_pending;
+    Mutex signal_lock;
+    CondVar signal_cond;
 } VitaThreadInfo;
 
 int SceKernelThreadMgr_init(void);

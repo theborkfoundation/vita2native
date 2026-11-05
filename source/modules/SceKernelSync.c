@@ -14,6 +14,7 @@
 #include <m-dict.h>
 #include <psp2/kernel/error.h>
 #include <psp2/kernel/threadmgr.h>
+#include <psp2common/kernel/threadmgr.h>
 #include <psp2/kernel/threadmgr/eventflag.h>
 #include <psp2/kernel/threadmgr/semaphore.h>
 #include <pthread.h>
@@ -154,6 +155,12 @@ EXPORT(SceThreadmgr, 0x0D76458E, SceUID, _sceKernelCreateSema, const char *name,
 }
 
 EXPORT(SceThreadmgr, 0xBD06F27C, SceUID, _sceKernelCreateSema_16XX, const char *name, SceUInt attr,
+       int init_count, int max_count, SceKernelSemaOptParam *option)
+{
+    return sceKernelCreateSema(name, attr, init_count, max_count, option);
+}
+
+EXPORT(SceLibKernel, 0x297AA2AE, SceUID, sceKernelCreateSema_16XX, const char *name, SceUInt attr,
        int init_count, int max_count, SceKernelSemaOptParam *option)
 {
     return sceKernelCreateSema(name, attr, init_count, max_count, option);
@@ -651,10 +658,24 @@ EXPORT(SceThreadmgr, 0x9A68F547, int, sceKernelCloseEventFlag, SceUID uid)
 /* ------------------------------------------------------------ lw mutexes */
 
 /*
- * Lightweight mutexes live in guest-provided work structures, so there is no
- * UID. A host mutex is allocated on create and its address is kept in the
- * work area's first word.
+ * Lightweight mutexes live in guest-provided work structures. A host mutex is
+ * allocated on create and its address is kept in the work area's first word,
+ * while a small registry keeps the metadata needed by the introspection APIs
+ * keyed by the UID the kernel would assign.
  */
+
+#define VITA_LW_MUTEX_SLOTS 64
+
+static VitaLwMutex *g_lw_mutexes[VITA_LW_MUTEX_SLOTS];
+static pthread_mutex_t g_lw_mutex_table_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static SceUID sync_current_thread_uid(void)
+{
+    VitaThreadInfo *info = SceKernelThreadMgr_get_thread_info();
+
+    return info ? info->uid : 0;
+}
+
 VitaLwMutex *SceKernelSync_lw_mutex_from_work(SceKernelLwMutexWork *work)
 {
     void *pointer;
@@ -668,21 +689,135 @@ VitaLwMutex *SceKernelSync_lw_mutex_from_work(SceKernelLwMutexWork *work)
     return pointer;
 }
 
+VitaLwMutex *SceKernelSync_lw_mutex_lookup(SceUID uid)
+{
+    VitaLwMutex *result = NULL;
+
+    pthread_mutex_lock(&g_lw_mutex_table_lock);
+    for (int i = 0; i < VITA_LW_MUTEX_SLOTS; i++) {
+        if (g_lw_mutexes[i] && g_lw_mutexes[i]->uid == uid) {
+            result = g_lw_mutexes[i];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_lw_mutex_table_lock);
+
+    return result;
+}
+
+static int lw_mutex_register(VitaLwMutex *lw)
+{
+    int slot = -1;
+
+    pthread_mutex_lock(&g_lw_mutex_table_lock);
+    for (int i = 0; i < VITA_LW_MUTEX_SLOTS; i++) {
+        if (!g_lw_mutexes[i]) {
+            g_lw_mutexes[i] = lw;
+            slot = i;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_lw_mutex_table_lock);
+
+    return slot;
+}
+
+static void lw_mutex_unregister(VitaLwMutex *lw)
+{
+    pthread_mutex_lock(&g_lw_mutex_table_lock);
+    for (int i = 0; i < VITA_LW_MUTEX_SLOTS; i++) {
+        if (g_lw_mutexes[i] == lw) {
+            g_lw_mutexes[i] = NULL;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_lw_mutex_table_lock);
+}
+
+void SceKernelSync_lw_mutex_fill_info(const VitaLwMutex *lw, VitaLwMutexInfo *info)
+{
+    memset(info, 0, sizeof(*info));
+    info->size = sizeof(*info);
+    info->uid = lw->uid;
+    memcpy(info->name, lw->name, sizeof(info->name));
+    info->attr = (int)lw->attr;
+    info->work = lw->work;
+    info->init_count = lw->init_count;
+    info->current_count = lw->current_count;
+    info->current_owner_id = lw->owner;
+    info->num_wait_threads = lw->waiting;
+}
+
+int SceKernelSync_lw_mutex_get_info(SceUID uid, VitaLwMutexInfo *info, SceSize size)
+{
+    VitaLwMutex *lw = SceKernelSync_lw_mutex_lookup(uid);
+
+    if (!lw)
+        return SCE_KERNEL_ERROR_UNKNOWN_LW_MUTEX_ID;
+    if (!info)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    if (size != 0 && size < sizeof(VitaLwMutexInfo)) {
+        VitaLwMutexInfo local;
+
+        SceKernelSync_lw_mutex_fill_info(lw, &local);
+        local.size = size;
+        memcpy(info, &local, size);
+    } else {
+        SceKernelSync_lw_mutex_fill_info(lw, info);
+    }
+
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0xFEC9E946, int, _sceKernelGetLwMutexInfoById, SceUID lwmutex_id,
+       VitaLwMutexInfo *info, SceSize size)
+{
+    return SceKernelSync_lw_mutex_get_info(lwmutex_id, info, size);
+}
+
+EXPORT(SceLibKernel, 0xF7D8F1FC, int, sceKernelGetLwMutexInfo, SceKernelLwMutexWork *work,
+       VitaLwMutexInfo *info)
+{
+    VitaLwMutex *lw = SceKernelSync_lw_mutex_from_work(work);
+
+    if (!lw)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    return SceKernelSync_lw_mutex_get_info(lw->uid, info, 0);
+}
+
+EXPORT(SceLibKernel, 0x4846613D, int, sceKernelGetLwMutexInfoById, SceUID lwmutex_id,
+       VitaLwMutexInfo *info)
+{
+    SceSize size = info ? info->size : 0;
+
+    return SceKernelSync_lw_mutex_get_info(lwmutex_id, info, size);
+}
+
 EXPORT(SceLibKernel, 0xDA6EC8EF, int, sceKernelCreateLwMutex, SceKernelLwMutexWork *work,
        const char *name, unsigned int attr, int init_count, const SceKernelLwMutexOptParam *option)
 {
     VitaLwMutex *lw;
     pthread_mutexattr_t mutex_attr;
 
-    (void)name;
     (void)option;
 
     if (!work)
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    if (init_count < 0)
+        return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
 
     lw = calloc(1, sizeof(*lw));
     if (!lw)
         return SCE_KERNEL_ERROR_NO_MEMORY;
+
+    lw->uid = SceSysmem_get_next_uid();
+    lw->attr = attr;
+    lw->work = work;
+    lw->init_count = init_count;
+    if (name)
+        strncpy(lw->name, name, sizeof(lw->name) - 1);
 
     pthread_mutexattr_init(&mutex_attr);
     if (attr & SCE_KERNEL_MUTEX_ATTR_RECURSIVE)
@@ -690,9 +825,18 @@ EXPORT(SceLibKernel, 0xDA6EC8EF, int, sceKernelCreateLwMutex, SceKernelLwMutexWo
     pthread_mutex_init(&lw->mutex, &mutex_attr);
     pthread_mutexattr_destroy(&mutex_attr);
 
-    if (init_count > 0)
+    if (init_count > 0) {
         for (int i = 0; i < init_count; i++)
             pthread_mutex_lock(&lw->mutex);
+        lw->current_count = init_count;
+        lw->owner = sync_current_thread_uid();
+    }
+
+    if (lw_mutex_register(lw) < 0) {
+        pthread_mutex_destroy(&lw->mutex);
+        free(lw);
+        return SCE_KERNEL_ERROR_NO_MEMORY;
+    }
 
     memset(work, 0, sizeof(*work));
     memcpy(&work->data[0], &lw, sizeof(lw));
@@ -711,6 +855,7 @@ EXPORT(SceLibKernel, 0x244E76D2, int, sceKernelDeleteLwMutex, SceKernelLwMutexWo
     if (!lw)
         return 0;
 
+    lw_mutex_unregister(lw);
     pthread_mutex_destroy(&lw->mutex);
     free(lw);
     memset(work, 0, sizeof(*work));
@@ -731,9 +876,17 @@ EXPORT(SceLibKernel, 0x46E7BE7B, int, sceKernelLockLwMutex, SceKernelLwMutexWork
     lw = SceKernelSync_lw_mutex_from_work(work);
     if (!lw)
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    if (count < 0)
+        return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
 
+    lw->waiting++;
     for (int i = 0; i < count; i++)
         pthread_mutex_lock(&lw->mutex);
+    lw->waiting--;
+
+    lw->current_count += count;
+    if (count > 0)
+        lw->owner = sync_current_thread_uid();
 
     return 0;
 }
@@ -749,11 +902,17 @@ EXPORT(SceLibKernel, 0xA6A2C915, int, sceKernelTryLockLwMutex, SceKernelLwMutexW
     lw = SceKernelSync_lw_mutex_from_work(work);
     if (!lw)
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    if (count < 0)
+        return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
 
     for (int i = 0; i < count; i++) {
         if (pthread_mutex_trylock(&lw->mutex) != 0)
             return SCE_KERNEL_ERROR_LW_MUTEX_FAILED_TO_OWN;
     }
+
+    lw->current_count += count;
+    if (count > 0)
+        lw->owner = sync_current_thread_uid();
 
     return 0;
 }
@@ -769,11 +928,30 @@ EXPORT(SceLibKernel, 0x91FA6614, int, sceKernelUnlockLwMutex, SceKernelLwMutexWo
     lw = SceKernelSync_lw_mutex_from_work(work);
     if (!lw)
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    if (count < 0)
+        return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
 
     for (int i = 0; i < count; i++)
         pthread_mutex_unlock(&lw->mutex);
 
+    if (count >= lw->current_count)
+        lw->current_count = 0;
+    else
+        lw->current_count -= count;
+    if (lw->current_count == 0)
+        lw->owner = 0;
+
     return 0;
+}
+
+int SceKernelSync_classify_uid(SceUID uid)
+{
+    if (sema_lookup(uid))
+        return SCE_KERNEL_TMID_Semaphore;
+    if (event_flag_lookup(uid))
+        return SCE_KERNEL_TMID_EventFlag;
+
+    return -1;
 }
 
 int SceKernelSync_init(void)

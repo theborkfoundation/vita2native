@@ -263,6 +263,47 @@ void condvarWait(CondVar *condvar, Mutex *mutex)
     pthread_mutex_unlock(&m->mutex);
 }
 
+int condvarWaitTimeout(CondVar *condvar, Mutex *mutex, uint64_t timeout_ns)
+{
+    HostCondSlot *cond = host_cond_slot(condvar);
+    HostMutexSlot *m = host_mutex_slot(mutex);
+    int ret;
+
+    if (!cond || !m)
+        return -1;
+
+    pthread_mutex_lock(&m->mutex);
+    ret = host_cond_wait(&cond->cond, &m->mutex, timeout_ns);
+    pthread_mutex_unlock(&m->mutex);
+
+    return ret == ETIMEDOUT ? -1 : 0;
+}
+
+void condvarWaitLocked(CondVar *condvar, Mutex *mutex)
+{
+    HostCondSlot *cond = host_cond_slot(condvar);
+    HostMutexSlot *m = host_mutex_slot(mutex);
+
+    if (!cond || !m)
+        return;
+
+    pthread_cond_wait(&cond->cond, &m->mutex);
+}
+
+int condvarWaitTimeoutLocked(CondVar *condvar, Mutex *mutex, uint64_t timeout_ns)
+{
+    HostCondSlot *cond = host_cond_slot(condvar);
+    HostMutexSlot *m = host_mutex_slot(mutex);
+    int ret;
+
+    if (!cond || !m)
+        return -1;
+
+    ret = host_cond_wait(&cond->cond, &m->mutex, timeout_ns);
+
+    return ret == ETIMEDOUT ? -1 : 0;
+}
+
 void condvarWakeAll(CondVar *condvar)
 {
     HostCondSlot *cond = host_cond_slot(condvar);

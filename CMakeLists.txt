@@ -254,6 +254,22 @@ if(BUILD_TESTING)
     target_link_libraries(sync_smoke PRIVATE pthread m)
     add_test(NAME sync_smoke COMMAND sync_smoke)
 
+    add_executable(threadmgr_smoke
+        tests/threadmgr_smoke.c
+        source/modules/SceKernelThreadMgr.c
+        source/modules/SceKernelSync.c
+        source/modules/SceKernelLocks.c
+        source/modules/SceKernelEvent.c
+        source/host/host_thread.c
+        source/log.c
+        source/netlog.c
+    )
+    target_include_directories(threadmgr_smoke PRIVATE include source/modules
+        external/vita-headers/include external/mlib)
+    target_compile_definitions(threadmgr_smoke PRIVATE _GNU_SOURCE=1 _FILE_OFFSET_BITS=64)
+    target_link_libraries(threadmgr_smoke PRIVATE pthread m)
+    add_test(NAME threadmgr_smoke COMMAND threadmgr_smoke)
+
     add_executable(audiodec_smoke
         tests/audiodec_smoke.c
         source/modules/SceAudiodec.c
