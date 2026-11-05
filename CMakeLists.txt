@@ -289,6 +289,16 @@ if(BUILD_TESTING)
     target_link_libraries(jpeg_smoke PRIVATE pthread m)
     add_test(NAME jpeg_smoke COMMAND jpeg_smoke)
 
+    add_executable(camera_smoke
+        tests/camera_smoke.c
+        source/module.c
+        source/modules/SceCamera.c
+    )
+    target_include_directories(camera_smoke PRIVATE include external/vita-headers/include)
+    target_compile_definitions(camera_smoke PRIVATE _GNU_SOURCE=1)
+    target_link_libraries(camera_smoke PRIVATE pthread)
+    add_test(NAME camera_smoke COMMAND camera_smoke)
+
     add_executable(gfx_smoke
         tests/gfx_smoke.c
         source/host/host_gfx.c
