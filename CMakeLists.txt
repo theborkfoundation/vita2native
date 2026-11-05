@@ -335,6 +335,16 @@ if(BUILD_TESTING)
     target_link_libraries(fios2_smoke PRIVATE pthread m)
     add_test(NAME fios2_smoke COMMAND fios2_smoke)
 
+    add_executable(pgf_smoke
+        tests/pgf_smoke.c
+        source/modules/ScePgf.c
+    )
+    target_include_directories(pgf_smoke PRIVATE include external/font8x8
+        external/vita-headers/include)
+    target_compile_definitions(pgf_smoke PRIVATE _GNU_SOURCE=1)
+    target_link_libraries(pgf_smoke PRIVATE m)
+    add_test(NAME pgf_smoke COMMAND pgf_smoke)
+
     add_executable(ngs_smoke
         tests/ngs_smoke.c
         source/modules/SceNgs.c
