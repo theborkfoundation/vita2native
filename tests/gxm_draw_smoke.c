@@ -22,6 +22,7 @@
 #include <psp2/gxm.h>
 
 #include "gfx.h"
+#include "gxm/util.h"
 #include "modules/SceGxm.h"
 
 #define WIDTH  64
@@ -315,6 +316,9 @@ int main(int argc, char **argv)
     uint8_t *solid_pixels;
     uint8_t *quad_pixels;
     void *context_mem;
+    void *deferred_mem = NULL;
+    SceGxmContext *deferred = NULL;
+    SceGxmCommandList command_list;
     int result = 1;
 
     memset(&scene, 0, sizeof(scene));
@@ -615,6 +619,79 @@ int main(int argc, char **argv)
     }
     printf("packed S8D24 depth/stencil: ok\n");
 
+    /* 7: a deferred context records a draw that the immediate context replays. */
+    {
+        SceGxmDeferredContextParams deferred_params;
+        void *uniform = NULL;
+        const float identity[16] = {
+            1.0f, 0.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, 1.0f, 0.0f,
+            0.0f, 0.0f, 0.0f, 1.0f,
+        };
+
+        memset(&deferred_params, 0, sizeof(deferred_params));
+        memset(&command_list, 0, sizeof(command_list));
+        deferred_mem = calloc(1, 1 << 20);
+        assert(deferred_mem);
+        deferred_params.hostMem = deferred_mem;
+        deferred_params.hostMemSize = 1 << 20;
+        deferred_params.vdmRingBufferMem = deferred_mem;
+        deferred_params.vdmRingBufferMemSize = 1 << 16;
+        assert(sceGxmCreateDeferredContext(&deferred_params, &deferred) == 0);
+
+        /* Draws outside a command list must be rejected. */
+        if (sceGxmDraw(deferred, SCE_GXM_PRIMITIVE_TRIANGLES, SCE_GXM_INDEX_FORMAT_U16,
+                       quad_indices, 6) != SCE_GXM_ERROR_NOT_WITHIN_COMMAND_LIST) {
+            fprintf(stderr, "deferred draw outside a command list was accepted\n");
+            goto done;
+        }
+
+        assert(sceGxmBeginCommandList(deferred) == 0);
+        sceGxmSetVertexProgram(deferred, scene.vertex_program);
+        sceGxmSetFragmentProgram(deferred, scene.fragment_program);
+        assert(sceGxmSetFragmentTexture(deferred, 0, &solid_texture) == 0);
+        assert(sceGxmSetVertexStream(deferred, 0, quad_vertices) == 0);
+        assert(sceGxmSetVertexStream(deferred, 1, quad_uvs) == 0);
+        assert(sceGxmReserveVertexDefaultUniformBuffer(deferred, &uniform) == 0);
+        assert(sceGxmSetUniformDataF(uniform, scene.wvp, 0, 16, identity) == 0);
+        sceGxmSetFrontPolygonMode(deferred, SCE_GXM_POLYGON_MODE_TRIANGLE_FILL);
+        assert(sceGxmDraw(deferred, SCE_GXM_PRIMITIVE_TRIANGLES, SCE_GXM_INDEX_FORMAT_U16,
+                          quad_indices, 6) == 0);
+        assert(sceGxmEndCommandList(deferred, &command_list) == 0);
+
+        /* Executing a command list on a deferred context is invalid. */
+        if (sceGxmExecuteCommandList(deferred, &command_list) != SCE_GXM_ERROR_INVALID_VALUE) {
+            fprintf(stderr, "deferred ExecuteCommandList was accepted\n");
+            goto done;
+        }
+
+        set_solid_color(solid_pixels, 11, 22, 33, 255);
+        begin_frame(&scene);
+        /* The recorded state must win over the immediate context's line mode. */
+        sceGxmSetFrontPolygonMode(scene.context, SCE_GXM_POLYGON_MODE_LINE);
+        assert(sceGxmExecuteCommandList(scene.context, &command_list) == 0);
+        end_frame(&scene);
+
+        {
+            uint32_t matched = 0;
+
+            for (int y = 0; y < HEIGHT; y++) {
+                for (int x = 0; x < WIDTH; x++) {
+                    if (pixel_is(scene.pixels, x, y, 11, 22, 33, 255))
+                        matched++;
+                }
+            }
+
+            if (matched != (uint32_t)(WIDTH * HEIGHT)) {
+                fprintf(stderr, "replayed command list covered %u/%u pixels\n", matched,
+                        WIDTH * HEIGHT);
+                goto done;
+            }
+        }
+        printf("deferred command list: ok\n");
+    }
+
     printf("gxm_draw_smoke: ok\n");
     result = 0;
 
@@ -624,6 +701,9 @@ done:
     free(scene.depth_values);
     free(scene.packed_depth_stencil);
     free(scene.stencil_values);
+    if (deferred)
+        sceGxmDestroyDeferredContext(deferred);
+    free(deferred_mem);
     if (scene.target)
         sceGxmDestroyRenderTarget(scene.target);
     if (scene.fragment_program)

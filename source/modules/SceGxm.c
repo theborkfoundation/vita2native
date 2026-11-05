@@ -79,6 +79,10 @@ typedef struct {
     bool valid;
 } GxmTextureCache;
 
+typedef struct GxmCommand GxmCommand;
+
+static void gxm_command_free(GxmCommand *command);
+
 typedef struct SceGxmContext {
     SceGxmContextParams params;
     bool in_scene;
@@ -152,6 +156,17 @@ typedef struct SceGxmContext {
 
     const SceGxmPrecomputedVertexState *precomputed_vertex;
     const SceGxmPrecomputedFragmentState *precomputed_fragment;
+
+    bool deferred;
+    bool command_list_active;
+    GxmCommand *cmd_head;
+    GxmCommand *cmd_tail;
+    void *vdm_buffer;
+    uint32_t vdm_buffer_size;
+    void *vertex_buffer;
+    uint32_t vertex_buffer_size;
+    void *fragment_buffer;
+    uint32_t fragment_buffer_size;
 } SceGxmContext;
 
 typedef struct SceGxmSyncObject {
@@ -207,6 +222,66 @@ typedef struct {
     GLuint program;
 } GxmLinkedProgram;
 
+/*
+ * Deferred contexts record draw snapshots instead of issuing GL commands. A
+ * snapshot stores everything sceGxmDraw would read, so command lists can be
+ * executed later on an immediate context that is inside a scene.
+ */
+typedef struct {
+    const SceGxmVertexProgram *vertex_program;
+    const SceGxmFragmentProgram *fragment_program;
+    const void *streams[SCE_GXM_MAX_VERTEX_STREAMS];
+    SceGxmTextureInner fragment_textures[SCE_GXM_MAX_TEXTURE_UNITS];
+    SceGxmTextureInner vertex_textures[SCE_GXM_MAX_TEXTURE_UNITS];
+    const void *vertex_uniform_buffers[SCE_GXM_MAX_UNIFORM_BUFFERS];
+    const void *fragment_uniform_buffers[SCE_GXM_MAX_UNIFORM_BUFFERS];
+    void *vertex_uniforms;
+    uint32_t vertex_uniform_size;
+    void *fragment_uniforms;
+    uint32_t fragment_uniform_size;
+
+    float viewport_x_offset, viewport_x_scale;
+    float viewport_y_offset, viewport_y_scale;
+    float viewport_z_offset, viewport_z_scale;
+    SceGxmViewportMode viewport_enable;
+    SceGxmRegionClipMode region_clip_mode;
+    unsigned int region_clip_xmin, region_clip_ymin, region_clip_xmax, region_clip_ymax;
+    SceGxmCullMode cull_mode;
+    SceGxmPolygonMode front_polygon_mode;
+    SceGxmPolygonMode back_polygon_mode;
+    unsigned int front_point_line_width;
+    int front_depth_bias_factor, front_depth_bias_units;
+    SceGxmTwoSidedMode two_sided;
+    SceGxmFragmentProgramMode front_fragment_program_enable;
+    SceGxmFragmentProgramMode back_fragment_program_enable;
+
+    SceGxmDepthFunc depth_func;
+    SceGxmDepthWriteMode depth_write;
+    SceGxmStencilFunc front_stencil_func;
+    SceGxmStencilOp front_stencil_fail, front_stencil_depth_fail, front_stencil_pass;
+    uint8_t front_stencil_compare_mask, front_stencil_write_mask;
+    SceGxmStencilFunc back_stencil_func;
+    SceGxmStencilOp back_stencil_fail, back_stencil_depth_fail, back_stencil_pass;
+    uint8_t back_stencil_compare_mask, back_stencil_write_mask;
+    unsigned int front_stencil_ref, back_stencil_ref;
+
+    SceGxmPrimitiveType prim_type;
+    SceGxmIndexFormat index_type;
+    const void *index_data;
+    unsigned int index_count;
+    unsigned int instances;
+} GxmDrawCommand;
+
+struct GxmCommand {
+    uint32_t type;
+    GxmDrawCommand draw;
+    struct GxmCommand *next;
+};
+
+#define GXM_COMMAND_DRAW 1
+#define GXM_MAX_COMMAND_LISTS 64
+#define GXM_COMMAND_LIST_MAGIC 0x4C53584Du /* "LXSL" */
+
 static bool g_gxm_initialized;
 static HostGpuDevice g_device;
 static HostGles *g_gl;
@@ -215,6 +290,15 @@ static GxmLinkedProgram g_linked[GXM_MAX_LINKED_PROGRAMS];
 static unsigned int g_linked_count;
 static SceGxmDisplayQueueCallback *g_display_callback;
 static uint32_t g_display_callback_data_size;
+
+typedef struct {
+    SceGxmCommandList *guest;
+    GxmCommand *head;
+    GxmCommand *tail;
+    uint32_t index;
+} GxmCommandListEntry;
+
+static GxmCommandListEntry g_command_lists[GXM_MAX_COMMAND_LISTS];
 
 static GLenum gxm_primitive_to_gl(SceGxmPrimitiveType type)
 {
@@ -1012,24 +1096,13 @@ EXPORT(SceGxm, 0x9F448E79, int, sceGxmNotificationWait, const SceGxmNotification
     return 0;
 }
 
-EXPORT(SceGxm, 0xE84CE5B4, int, sceGxmCreateContext, const SceGxmContextParams *params,
-       SceGxmContext **context)
+static void gxm_context_init_defaults(SceGxmContext *ctx, bool deferred)
 {
-    SceGxmContext *ctx;
-
-    if (!params || !context || params->hostMemSize < sizeof(SceGxmContext))
-        return SCE_GXM_ERROR_INVALID_VALUE;
-
-    ctx = params->hostMem;
-    memset(ctx, 0, sizeof(*ctx));
-    ctx->params = *params;
-
+    ctx->deferred = deferred;
     ctx->vertex_uniform_arena = malloc(GXM_UNIFORM_ARENA_SIZE);
     ctx->fragment_uniform_arena = malloc(GXM_UNIFORM_ARENA_SIZE);
-    if (!ctx->vertex_uniform_arena || !ctx->fragment_uniform_arena)
-        goto oom;
 
-    if (g_gl && g_gl->glGenBuffers) {
+    if (!deferred && g_gl && g_gl->glGenBuffers) {
         g_gl->glGenBuffers(2, ctx->ssbo);
         g_gl->glGenBuffers(2, ctx->ubo);
     }
@@ -1067,6 +1140,23 @@ EXPORT(SceGxm, 0xE84CE5B4, int, sceGxmCreateContext, const SceGxmContextParams *
     ctx->two_sided = SCE_GXM_TWO_SIDED_DISABLED;
     ctx->front_fragment_program_enable = SCE_GXM_FRAGMENT_PROGRAM_ENABLED;
     ctx->back_fragment_program_enable = SCE_GXM_FRAGMENT_PROGRAM_ENABLED;
+}
+
+EXPORT(SceGxm, 0xE84CE5B4, int, sceGxmCreateContext, const SceGxmContextParams *params,
+       SceGxmContext **context)
+{
+    SceGxmContext *ctx;
+
+    if (!params || !context || !params->hostMem || params->hostMemSize < sizeof(SceGxmContext))
+        return SCE_GXM_ERROR_INVALID_VALUE;
+
+    ctx = params->hostMem;
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->params = *params;
+    gxm_context_init_defaults(ctx, false);
+
+    if (!ctx->vertex_uniform_arena || !ctx->fragment_uniform_arena)
+        goto oom;
 
     *context = ctx;
     return 0;
@@ -1082,7 +1172,7 @@ EXPORT(SceGxm, 0xEDDC5FB2, int, sceGxmDestroyContext, SceGxmContext *context)
     if (!context)
         return SCE_GXM_ERROR_INVALID_POINTER;
 
-    if (g_gl) {
+    if (g_gl && !context->deferred) {
         for (unsigned int i = 0; i < SCE_GXM_MAX_TEXTURE_UNITS; i++) {
             if (context->textures[0][i].tex)
                 g_gl->glDeleteTextures(1, &context->textures[0][i].tex);
@@ -1106,6 +1196,9 @@ EXPORT(SceGxm, 0xEDDC5FB2, int, sceGxmDestroyContext, SceGxmContext *context)
     free(context->fragment_ssbo_data);
     free(context->vertex_uniform_arena);
     free(context->fragment_uniform_arena);
+    gxm_command_free(context->cmd_head);
+    context->cmd_head = NULL;
+    context->cmd_tail = NULL;
     return 0;
 }
 
@@ -2289,6 +2382,10 @@ EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsign
     (void)validRegion;
     (void)vertexSyncObject;
 
+    if (!context)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    if (context->deferred)
+        return SCE_GXM_ERROR_INVALID_VALUE;
     if (context->in_scene)
         return SCE_GXM_ERROR_WITHIN_SCENE;
     if (!renderTarget)
@@ -2458,6 +2555,10 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
     (void)vertexNotification;
     (void)fragmentNotification;
 
+    if (!context)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    if (context->deferred)
+        return SCE_GXM_ERROR_INVALID_VALUE;
     if (!context->in_scene)
         return SCE_GXM_ERROR_NOT_WITHIN_SCENE;
 
@@ -2591,8 +2692,12 @@ EXPORT(SceGxm, 0x97118913, int, sceGxmReserveVertexDefaultUniformBuffer, SceGxmC
 {
     uint32_t size;
 
-    if (!context->in_scene)
+    if (context->deferred) {
+        if (!context->command_list_active)
+            return SCE_GXM_ERROR_NOT_WITHIN_COMMAND_LIST;
+    } else if (!context->in_scene) {
         return SCE_GXM_ERROR_NOT_WITHIN_SCENE;
+    }
     if (!context->vertex_program)
         return SCE_GXM_ERROR_NULL_PROGRAM;
 
@@ -2629,8 +2734,12 @@ EXPORT(SceGxm, 0x7B1FABB6, int, sceGxmReserveFragmentDefaultUniformBuffer, SceGx
 {
     uint32_t size;
 
-    if (!context->in_scene)
+    if (context->deferred) {
+        if (!context->command_list_active)
+            return SCE_GXM_ERROR_NOT_WITHIN_COMMAND_LIST;
+    } else if (!context->in_scene) {
         return SCE_GXM_ERROR_NOT_WITHIN_SCENE;
+    }
     if (!context->fragment_program)
         return SCE_GXM_ERROR_NULL_PROGRAM;
 
@@ -3245,6 +3354,250 @@ static uint32_t *gxm_wireframe_indices(SceGxmPrimitiveType primitive, SceGxmInde
     return indices;
 }
 
+static uint32_t gxm_default_uniform_bytes(const SceGxmProgram *program, const void *buffer)
+{
+    if (!program || !buffer)
+        return 0;
+    return program->default_uniform_buffer_count * sizeof(float);
+}
+
+static void gxm_command_free(GxmCommand *command)
+{
+    while (command) {
+        GxmCommand *next = command->next;
+
+        free(command->draw.vertex_uniforms);
+        free(command->draw.fragment_uniforms);
+        free(command);
+        command = next;
+    }
+}
+
+static GxmCommandListEntry *gxm_command_list_entry(SceGxmCommandList *list, bool create)
+{
+    GxmCommandListEntry *free_slot = NULL;
+    uint32_t free_index = 0;
+
+    for (unsigned int i = 0; i < GXM_MAX_COMMAND_LISTS; i++) {
+        if (g_command_lists[i].guest == list)
+            return &g_command_lists[i];
+        if (!g_command_lists[i].guest && !free_slot) {
+            free_slot = &g_command_lists[i];
+            free_index = i;
+        }
+    }
+
+    if (!create || !free_slot)
+        return NULL;
+
+    free_slot->guest = list;
+    free_slot->head = NULL;
+    free_slot->tail = NULL;
+    free_slot->index = free_index;
+    return free_slot;
+}
+
+static GxmCommandListEntry *gxm_command_list_lookup(const SceGxmCommandList *list)
+{
+    uint32_t index;
+
+    if (!list || list->words[0] != GXM_COMMAND_LIST_MAGIC)
+        return NULL;
+
+    index = list->words[1];
+    if (index >= GXM_MAX_COMMAND_LISTS || !g_command_lists[index].guest)
+        return NULL;
+
+    return &g_command_lists[index];
+}
+
+/*
+ * Takes a snapshot of everything a draw reads from the deferred context. The
+ * command list is replayed later on an immediate context inside a scene.
+ */
+static int gxm_record_draw(SceGxmContext *context, SceGxmPrimitiveType primType,
+                           SceGxmIndexFormat indexType, const void *indexData,
+                           unsigned int indexCount, unsigned int instances)
+{
+    GxmCommand *command = calloc(1, sizeof(*command));
+    GxmDrawCommand *draw;
+    uint32_t vertex_size, fragment_size;
+
+    if (!command)
+        return SCE_GXM_ERROR_OUT_OF_MEMORY;
+
+    command->type = GXM_COMMAND_DRAW;
+    draw = &command->draw;
+    draw->vertex_program = context->vertex_program;
+    draw->fragment_program = context->fragment_program;
+    for (unsigned int i = 0; i < SCE_GXM_MAX_VERTEX_STREAMS; i++)
+        draw->streams[i] = context->streams[i].data;
+    memcpy(draw->fragment_textures, context->fragment_textures, sizeof(draw->fragment_textures));
+    memcpy(draw->vertex_textures, context->vertex_textures, sizeof(draw->vertex_textures));
+    memcpy(draw->vertex_uniform_buffers, context->vertex_uniform_buffers,
+           sizeof(draw->vertex_uniform_buffers));
+    memcpy(draw->fragment_uniform_buffers, context->fragment_uniform_buffers,
+           sizeof(draw->fragment_uniform_buffers));
+
+    draw->viewport_x_offset = context->viewport_x_offset;
+    draw->viewport_x_scale = context->viewport_x_scale;
+    draw->viewport_y_offset = context->viewport_y_offset;
+    draw->viewport_y_scale = context->viewport_y_scale;
+    draw->viewport_z_offset = context->viewport_z_offset;
+    draw->viewport_z_scale = context->viewport_z_scale;
+    draw->viewport_enable = context->viewport_enable;
+    draw->region_clip_mode = context->region_clip_mode;
+    draw->region_clip_xmin = context->region_clip_xmin;
+    draw->region_clip_ymin = context->region_clip_ymin;
+    draw->region_clip_xmax = context->region_clip_xmax;
+    draw->region_clip_ymax = context->region_clip_ymax;
+    draw->cull_mode = context->cull_mode;
+    draw->front_polygon_mode = context->front_polygon_mode;
+    draw->back_polygon_mode = context->back_polygon_mode;
+    draw->front_point_line_width = context->front_point_line_width;
+    draw->front_depth_bias_factor = context->front_depth_bias_factor;
+    draw->front_depth_bias_units = context->front_depth_bias_units;
+    draw->two_sided = context->two_sided;
+    draw->front_fragment_program_enable = context->front_fragment_program_enable;
+    draw->back_fragment_program_enable = context->back_fragment_program_enable;
+    draw->depth_func = context->depth_func;
+    draw->depth_write = context->depth_write;
+    draw->front_stencil_func = context->front_stencil_func;
+    draw->front_stencil_fail = context->front_stencil_fail;
+    draw->front_stencil_depth_fail = context->front_stencil_depth_fail;
+    draw->front_stencil_pass = context->front_stencil_pass;
+    draw->front_stencil_compare_mask = context->front_stencil_compare_mask;
+    draw->front_stencil_write_mask = context->front_stencil_write_mask;
+    draw->back_stencil_func = context->back_stencil_func;
+    draw->back_stencil_fail = context->back_stencil_fail;
+    draw->back_stencil_depth_fail = context->back_stencil_depth_fail;
+    draw->back_stencil_pass = context->back_stencil_pass;
+    draw->back_stencil_compare_mask = context->back_stencil_compare_mask;
+    draw->back_stencil_write_mask = context->back_stencil_write_mask;
+    draw->front_stencil_ref = context->front_stencil_ref;
+    draw->back_stencil_ref = context->back_stencil_ref;
+    draw->prim_type = primType;
+    draw->index_type = indexType;
+    draw->index_data = indexData;
+    draw->index_count = indexCount;
+    draw->instances = instances;
+
+    vertex_size =
+        gxm_default_uniform_bytes(context->vertex_program->programId->programHeader,
+                                  context->vertex_uniforms);
+    fragment_size =
+        gxm_default_uniform_bytes(context->fragment_program->programId->programHeader,
+                                  context->fragment_uniforms);
+
+    if (vertex_size) {
+        draw->vertex_uniforms = malloc(vertex_size);
+        if (!draw->vertex_uniforms)
+            goto oom;
+        memcpy(draw->vertex_uniforms, context->vertex_uniforms, vertex_size);
+        draw->vertex_uniform_size = vertex_size;
+    }
+    if (fragment_size) {
+        draw->fragment_uniforms = malloc(fragment_size);
+        if (!draw->fragment_uniforms)
+            goto oom;
+        memcpy(draw->fragment_uniforms, context->fragment_uniforms, fragment_size);
+        draw->fragment_uniform_size = fragment_size;
+    }
+
+    if (context->cmd_tail)
+        context->cmd_tail->next = command;
+    else
+        context->cmd_head = command;
+    context->cmd_tail = command;
+
+    return 0;
+
+oom:
+    gxm_command_free(command);
+    return SCE_GXM_ERROR_OUT_OF_MEMORY;
+}
+
+static void gxm_apply_draw_command(SceGxmContext *context, const GxmDrawCommand *draw)
+{
+    context->vertex_program = draw->vertex_program;
+    context->fragment_program = draw->fragment_program;
+    for (unsigned int i = 0; i < SCE_GXM_MAX_VERTEX_STREAMS; i++) {
+        context->streams[i].data = draw->streams[i];
+        context->streams[i].size = 0;
+    }
+    memcpy(context->fragment_textures, draw->fragment_textures, sizeof(context->fragment_textures));
+    memcpy(context->vertex_textures, draw->vertex_textures, sizeof(context->vertex_textures));
+    memcpy(context->vertex_uniform_buffers, draw->vertex_uniform_buffers,
+           sizeof(context->vertex_uniform_buffers));
+    memcpy(context->fragment_uniform_buffers, draw->fragment_uniform_buffers,
+           sizeof(context->fragment_uniform_buffers));
+    context->vertex_uniforms = draw->vertex_uniforms;
+    context->vertex_uniform_size = draw->vertex_uniform_size;
+    context->fragment_uniforms = draw->fragment_uniforms;
+    context->fragment_uniform_size = draw->fragment_uniform_size;
+
+    context->viewport_x_offset = draw->viewport_x_offset;
+    context->viewport_x_scale = draw->viewport_x_scale;
+    context->viewport_y_offset = draw->viewport_y_offset;
+    context->viewport_y_scale = draw->viewport_y_scale;
+    context->viewport_z_offset = draw->viewport_z_offset;
+    context->viewport_z_scale = draw->viewport_z_scale;
+    context->viewport_enable = draw->viewport_enable;
+    context->region_clip_mode = draw->region_clip_mode;
+    context->region_clip_xmin = draw->region_clip_xmin;
+    context->region_clip_ymin = draw->region_clip_ymin;
+    context->region_clip_xmax = draw->region_clip_xmax;
+    context->region_clip_ymax = draw->region_clip_ymax;
+    context->cull_mode = draw->cull_mode;
+    context->front_polygon_mode = draw->front_polygon_mode;
+    context->back_polygon_mode = draw->back_polygon_mode;
+    context->front_point_line_width = draw->front_point_line_width;
+    context->front_depth_bias_factor = draw->front_depth_bias_factor;
+    context->front_depth_bias_units = draw->front_depth_bias_units;
+    context->two_sided = draw->two_sided;
+    context->front_fragment_program_enable = draw->front_fragment_program_enable;
+    context->back_fragment_program_enable = draw->back_fragment_program_enable;
+    context->depth_func = draw->depth_func;
+    context->depth_write = draw->depth_write;
+    context->front_stencil_func = draw->front_stencil_func;
+    context->front_stencil_fail = draw->front_stencil_fail;
+    context->front_stencil_depth_fail = draw->front_stencil_depth_fail;
+    context->front_stencil_pass = draw->front_stencil_pass;
+    context->front_stencil_compare_mask = draw->front_stencil_compare_mask;
+    context->front_stencil_write_mask = draw->front_stencil_write_mask;
+    context->back_stencil_func = draw->back_stencil_func;
+    context->back_stencil_fail = draw->back_stencil_fail;
+    context->back_stencil_depth_fail = draw->back_stencil_depth_fail;
+    context->back_stencil_pass = draw->back_stencil_pass;
+    context->back_stencil_compare_mask = draw->back_stencil_compare_mask;
+    context->back_stencil_write_mask = draw->back_stencil_write_mask;
+    context->front_stencil_ref = draw->front_stencil_ref;
+    context->back_stencil_ref = draw->back_stencil_ref;
+}
+
+static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
+                           SceGxmIndexFormat indexType, const void *indexData,
+                           unsigned int indexCount, unsigned int instances);
+
+static int gxm_replay_commands(SceGxmContext *context, GxmCommand *command)
+{
+    for (; command; command = command->next) {
+        int result;
+
+        if (command->type != GXM_COMMAND_DRAW)
+            continue;
+
+        gxm_apply_draw_command(context, &command->draw);
+        result = gxm_draw_common(context, command->draw.prim_type, command->draw.index_type,
+                                 command->draw.index_data, command->draw.index_count,
+                                 command->draw.instances);
+        if (result != 0)
+            return result;
+    }
+
+    return 0;
+}
+
 static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
                            SceGxmIndexFormat indexType, const void *indexData,
                            unsigned int indexCount, unsigned int instances)
@@ -3255,6 +3608,18 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
     size_t index_size;
     uint32_t max_index = 0;
     SceGxmPolygonMode polygon_mode;
+
+    if (context->deferred) {
+        if (!context->command_list_active)
+            return SCE_GXM_ERROR_NOT_WITHIN_COMMAND_LIST;
+        if (!context->vertex_program || !context->fragment_program)
+            return SCE_GXM_ERROR_NULL_PROGRAM;
+        if (!indexData || !indexCount)
+            return SCE_GXM_ERROR_INVALID_VALUE;
+        if (!g_gl)
+            return 0;
+        return gxm_record_draw(context, primType, indexType, indexData, indexCount, instances);
+    }
 
     if (!context->in_scene)
         return SCE_GXM_ERROR_NOT_WITHIN_SCENE;
@@ -3809,94 +4174,187 @@ EXPORT(SceGxm, 0x45229C39, int, sceGxmTransferFinish, void)
     return 0;
 }
 
-/* --------------------------------------------------------- deferred stubs */
+/* ------------------------------------------------------- deferred contexts */
 
 EXPORT(SceGxm, 0x249D5B00, int, sceGxmCreateDeferredContext,
        const SceGxmDeferredContextParams *params, SceGxmContext **context)
 {
-    (void)params;
-    if (context)
-        *context = NULL;
-    return SCE_GXM_ERROR_UNSUPPORTED;
+    SceGxmContext *ctx;
+
+    if (!params || !context || !params->hostMem)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    if (params->hostMemSize < sizeof(SceGxmContext))
+        return SCE_GXM_ERROR_INVALID_VALUE;
+
+    ctx = params->hostMem;
+    memset(ctx, 0, sizeof(*ctx));
+    gxm_context_init_defaults(ctx, true);
+    if (!ctx->vertex_uniform_arena || !ctx->fragment_uniform_arena) {
+        free(ctx->vertex_uniform_arena);
+        free(ctx->fragment_uniform_arena);
+        return SCE_GXM_ERROR_OUT_OF_MEMORY;
+    }
+
+    ctx->vdm_buffer = params->vdmRingBufferMem;
+    ctx->vdm_buffer_size = params->vdmRingBufferMemSize;
+    ctx->vertex_buffer = params->vertexRingBufferMem;
+    ctx->vertex_buffer_size = params->vertexRingBufferMemSize;
+    ctx->fragment_buffer = params->fragmentRingBufferMem;
+    ctx->fragment_buffer_size = params->fragmentRingBufferMemSize;
+
+    *context = ctx;
+    return 0;
 }
 
 EXPORT(SceGxm, 0xD6A2FF2F, int, sceGxmDestroyDeferredContext, SceGxmContext *context)
 {
-    (void)context;
+    if (!context)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    if (!context->deferred)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+
+    gxm_command_free(context->cmd_head);
+    context->cmd_head = NULL;
+    context->cmd_tail = NULL;
+    free(context->vertex_uniform_arena);
+    free(context->fragment_uniform_arena);
+    context->vertex_uniform_arena = NULL;
+    context->fragment_uniform_arena = NULL;
+    context->deferred = false;
     return 0;
 }
 
 EXPORT(SceGxm, 0x944D3F83, int, sceGxmBeginCommandList, SceGxmContext *context)
 {
-    (void)context;
+    if (!context)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    if (!context->deferred)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+    if (context->command_list_active)
+        return SCE_GXM_ERROR_WITHIN_COMMAND_LIST;
+
+    gxm_command_free(context->cmd_head);
+    context->cmd_head = NULL;
+    context->cmd_tail = NULL;
+    context->vertex_uniform_head = 0;
+    context->fragment_uniform_head = 0;
+    context->command_list_active = true;
     return 0;
 }
 
 EXPORT(SceGxm, 0x36D85916, int, sceGxmEndCommandList, SceGxmContext *context,
        SceGxmCommandList *list)
 {
-    (void)context;
-    (void)list;
+    GxmCommandListEntry *entry;
+
+    if (!context || !list)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    if (!context->deferred)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+    if (!context->command_list_active)
+        return SCE_GXM_ERROR_NOT_WITHIN_COMMAND_LIST;
+
+    entry = gxm_command_list_entry(list, true);
+    if (!entry) {
+        gxm_command_free(context->cmd_head);
+        context->cmd_head = NULL;
+        context->cmd_tail = NULL;
+        context->command_list_active = false;
+        return SCE_GXM_ERROR_OUT_OF_MEMORY;
+    }
+
+    gxm_command_free(entry->head);
+    entry->head = context->cmd_head;
+    entry->tail = context->cmd_tail;
+    context->cmd_head = NULL;
+    context->cmd_tail = NULL;
+    context->command_list_active = false;
+
+    memset(list, 0, sizeof(*list));
+    list->words[0] = GXM_COMMAND_LIST_MAGIC;
+    list->words[1] = entry->index;
     return 0;
 }
 
 EXPORT(SceGxm, 0xE8E139DD, int, sceGxmExecuteCommandList, SceGxmContext *context,
        SceGxmCommandList *list)
 {
-    (void)context;
-    (void)list;
-    return 0;
+    GxmCommandListEntry *entry;
+
+    if (!context || !list)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    if (context->deferred)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+    if (!context->in_scene)
+        return SCE_GXM_ERROR_NOT_WITHIN_SCENE;
+
+    entry = gxm_command_list_lookup(list);
+    if (!entry)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+
+    return gxm_replay_commands(context, entry->head);
 }
 
 EXPORT(SceGxm, 0xAD8C2EBA, int, sceGxmGetDeferredContextVdmBuffer,
        const SceGxmContext *context, void **buffer, unsigned int *size)
 {
-    (void)context;
-    if (buffer)
-        *buffer = NULL;
-    if (size)
-        *size = 0;
+    if (!context || !buffer || !size)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    if (!context->deferred)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+
+    *buffer = context->vdm_buffer;
+    *size = context->vdm_buffer_size;
     return 0;
 }
 
 EXPORT(SceGxm, 0x87632B9C, int, sceGxmGetDeferredContextVertexBuffer,
        const SceGxmContext *context, void **buffer)
 {
-    (void)context;
-    if (buffer)
-        *buffer = NULL;
+    if (!context || !buffer)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    if (!context->deferred)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+
+    *buffer = context->vertex_buffer;
     return 0;
 }
 
 EXPORT(SceGxm, 0xFA081D05, int, sceGxmGetDeferredContextFragmentBuffer,
        const SceGxmContext *context, void **buffer)
 {
-    (void)context;
-    if (buffer)
-        *buffer = NULL;
+    if (!context || !buffer)
+        return SCE_GXM_ERROR_INVALID_POINTER;
+    if (!context->deferred)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+
+    *buffer = context->fragment_buffer;
     return 0;
 }
 
 EXPORT(SceGxm, 0x0B9D13CE, void, sceGxmSetDeferredContextVdmBuffer, SceGxmContext *context,
        void *buffer, unsigned int size)
 {
-    (void)context;
-    (void)buffer;
-    (void)size;
+    if (!context || !context->deferred)
+        return;
+    context->vdm_buffer = buffer;
+    context->vdm_buffer_size = size;
 }
 
 EXPORT(SceGxm, 0x27CAD127, void, sceGxmSetDeferredContextVertexBuffer, SceGxmContext *context,
        void *buffer)
 {
-    (void)context;
-    (void)buffer;
+    if (!context || !context->deferred)
+        return;
+    context->vertex_buffer = buffer;
 }
 
 EXPORT(SceGxm, 0xC6B3FCD0, void, sceGxmSetDeferredContextFragmentBuffer, SceGxmContext *context,
        void *buffer)
 {
-    (void)context;
-    (void)buffer;
+    if (!context || !context->deferred)
+        return;
+    context->fragment_buffer = buffer;
 }
 
 #define GXM_PRECOMPUTED_MAGIC 0x47504d31u /* "GPM1" */
@@ -4305,7 +4763,7 @@ EXPORT(SceGxm, 0x2A1BCDDB, int, sceGxmGetContextType, const SceGxmContext *conte
 {
     if (!context || !type)
         return SCE_GXM_ERROR_INVALID_POINTER;
-    *type = 0; /* immediate context */
+    *type = context->deferred ? 1 : 0; /* SCE_GXM_CONTEXT_TYPE_DEFERRED / IMMEDIATE */
     return 0;
 }
 
