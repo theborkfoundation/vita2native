@@ -54,12 +54,13 @@ typedef struct {
     bool needs_free;
 } segment_info_t;
 
-static int load_vpk(Jit *jit, const void *data, uint32_t size, void **entry);
-static int load_executable(Jit *jit, const uint8_t *data, void **entry);
-static int load_elf(Jit *jit, const void *data, void **entry);
-static int load_self(Jit *jit, const void *data, void **entry);
+static int load_vpk(Jit *jit, const void *data, uint32_t size, void **entry,
+                    LoadedModuleInfo *info);
+static int load_executable(Jit *jit, const uint8_t *data, void **entry, LoadedModuleInfo *info);
+static int load_elf(Jit *jit, const void *data, void **entry, LoadedModuleInfo *info);
+static int load_self(Jit *jit, const void *data, void **entry, LoadedModuleInfo *info);
 static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_info_t *segments,
-                         int num_segments);
+                         int num_segments, LoadedModuleInfo *info);
 static int resolve_imports(uintptr_t rx_base, uintptr_t rw_base, sce_module_imports_u_t *import);
 static int relocate(const void *reloc, uint32_t size, segment_info_t *segs);
 
@@ -125,6 +126,11 @@ static int elf_get_sce_module_info(Elf32_Addr e_entry, const segment_info_t *seg
 
 int load_file(Jit *jit, const char *filename, void **entry)
 {
+    return load_file_info(jit, filename, entry, NULL);
+}
+
+int load_file_info(Jit *jit, const char *filename, void **entry, LoadedModuleInfo *info)
+{
     void *data;
     uint32_t size;
     int ret = 0;
@@ -135,19 +141,25 @@ int load_file(Jit *jit, const char *filename, void **entry)
         return -1;
     }
 
-    if (load_executable(jit, data, entry) < 0) {
+    if (load_executable(jit, data, entry, info) < 0) {
         /* Fallback to vpk (zip file) */
-        if (load_vpk(jit, data, size, entry) < 0) {
+        if (load_vpk(jit, data, size, entry, info) < 0) {
             LOG("Unsupported file.");
             ret = -1;
         }
+    }
+
+    if (ret == 0 && info) {
+        strncpy(info->path, filename, sizeof(info->path) - 1);
+        info->entry = *entry;
     }
 
     free(data);
     return ret;
 }
 
-static int load_vpk(Jit *jit, const void *data, uint32_t size, void **entry)
+static int load_vpk(Jit *jit, const void *data, uint32_t size, void **entry,
+                    LoadedModuleInfo *info)
 {
     mz_bool status;
     mz_zip_archive zip_archive;
@@ -170,7 +182,7 @@ static int load_vpk(Jit *jit, const void *data, uint32_t size, void **entry)
         return -1;
     }
 
-    ret = load_executable(jit, eboot_bin, entry);
+    ret = load_executable(jit, eboot_bin, entry, info);
 
     mz_free(eboot_bin);
     mz_zip_reader_end(&zip_archive);
@@ -178,12 +190,12 @@ static int load_vpk(Jit *jit, const void *data, uint32_t size, void **entry)
     return ret;
 }
 
-static int load_executable(Jit *jit, const uint8_t *data, void **entry)
+static int load_executable(Jit *jit, const uint8_t *data, void **entry, LoadedModuleInfo *info)
 {
     if (data[0] == ELFMAG0) {
         if (data[1] == ELFMAG1 && data[2] == ELFMAG2 && data[3] == ELFMAG3) {
             LOG("Found an ELF, loading.");
-            if (load_elf(jit, data, entry) < 0) {
+            if (load_elf(jit, data, entry, info) < 0) {
                 LOG("Cannot load ELF.");
                 return -1;
             }
@@ -191,7 +203,7 @@ static int load_executable(Jit *jit, const uint8_t *data, void **entry)
     } else if (data[0] == SCEMAG0) {
         if (data[1] == SCEMAG1 && data[2] == SCEMAG2 && data[3] == SCEMAG3) {
             LOG("Found a SELF, loading.");
-            if (load_self(jit, data, entry) < 0) {
+            if (load_self(jit, data, entry, info) < 0) {
                 LOG("Cannot load SELF.");
                 return -1;
             }
@@ -204,7 +216,7 @@ static int load_executable(Jit *jit, const uint8_t *data, void **entry)
     return 0;
 }
 
-static int load_self(Jit *jit, const void *data, void **entry)
+static int load_self(Jit *jit, const void *data, void **entry, LoadedModuleInfo *info)
 {
     const SCE_header *self_header = data;
     const Elf32_Ehdr *elf_hdr = (void *)((char *)data + self_header->elf_offset);
@@ -309,7 +321,7 @@ static int load_self(Jit *jit, const void *data, void **entry)
         }
     }
 
-    ret = load_segments(jit, entry, elf_hdr->e_entry, segments, elf_hdr->e_phnum);
+    ret = load_segments(jit, entry, elf_hdr->e_entry, segments, elf_hdr->e_phnum, info);
 
 done:
     for (Elf32_Half i = 0; i < elf_hdr->e_phnum; i++) {
@@ -322,7 +334,7 @@ done:
     return ret;
 }
 
-static int load_elf(Jit *jit, const void *data, void **entry)
+static int load_elf(Jit *jit, const void *data, void **entry, LoadedModuleInfo *info)
 {
     const Elf32_Ehdr *elf_hdr = data;
     Elf32_Phdr *prog_hdrs;
@@ -355,7 +367,7 @@ static int load_elf(Jit *jit, const void *data, void **entry)
         segments[i].p_align = prog_hdrs[i].p_align;
     }
 
-    ret = load_segments(jit, entry, elf_hdr->e_entry, segments, elf_hdr->e_phnum);
+    ret = load_segments(jit, entry, elf_hdr->e_entry, segments, elf_hdr->e_phnum, info);
 
     free(segments);
 
@@ -363,7 +375,7 @@ static int load_elf(Jit *jit, const void *data, void **entry)
 }
 
 static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_info_t *segments,
-                         int num_segments)
+                         int num_segments, LoadedModuleInfo *info)
 {
     uint32_t code_size = 0, data_size = 0;
     uint32_t code_offset = 0, data_offset = 0;
@@ -375,6 +387,11 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
     const char *imp_name;
     int mod_info_idx;
     Result res;
+
+    if (info) {
+        memset(info, 0, sizeof(*info));
+        info->num_segments = 0;
+    }
 
     /* Calculate total code and data sizes */
     for (int i = 0; i < num_segments; i++) {
@@ -436,6 +453,15 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
             segments[i].rx_addr = addr_rx;
             segments[i].rw_addr = addr_rw;
 
+            if (info && info->num_segments < LOAD_MAX_SEGMENTS) {
+                LoadedSegment *out = &info->segments[info->num_segments++];
+
+                out->perms = segments[i].p_flags;
+                out->vaddr = (void *)addr_rx;
+                out->memsz = segments[i].p_memsz;
+                out->filesz = segments[i].p_filesz;
+            }
+
             if ((segments[i].p_flags & PF_X) == PF_X) {
                 LOG("Code segment loaded at %p for RW, %p for RX", (void *)addr_rw,
                     (void *)addr_rx);
@@ -462,6 +488,14 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
         goto err_free_data;
     }
     LOG("Module name: %s", mod_info->name);
+    if (info) {
+        strncpy(info->name, mod_info->name, sizeof(info->name) - 1);
+        info->attributes = mod_info->attributes;
+        if (mod_info->module_stop != 0 && mod_info->module_stop != 0xFFFFFFFFu)
+            info->module_stop = (void *)(segments[mod_info_idx].rx_addr + mod_info->module_stop);
+        else
+            info->module_stop = NULL;
+    }
     LOG("  export table offset: 0x%" PRIx32, mod_info->export_top);
     LOG("  import table offset: 0x%" PRIx32, mod_info->import_top);
     LOG("  tls start: 0x%" PRIx32, mod_info->tls_start);
@@ -493,6 +527,12 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
     if (R_FAILED(res)) {
         LOG("Could not transition JIT to executable: 0x%" PRIx32, res);
         goto err_free_data;
+    }
+
+    if (info) {
+        info->code_rx = (void *)code_rx_addr;
+        info->code_rw = (void *)code_rw_addr;
+        info->data_addr = (void *)data_addr;
     }
 
     return 0;

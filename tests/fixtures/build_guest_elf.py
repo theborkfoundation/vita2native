@@ -2324,6 +2324,240 @@ def build_thread_extra_elf():
     return assemble_elf(rx, rw, rela, TE_MODINFO)
 
 
+# --- Module manager fixture ------------------------------------------------
+
+MM_STUB_BASE = 0x200
+MM_LIB1_NAME = 0x260
+MM_LIB2_NAME = 0x270
+MM_MODINFO = 0x280
+MM_IMPORT1 = 0x2E0
+MM_IMPORT2 = 0x304
+MM_NIDS1 = 0x330
+MM_ENTRIES1 = 0x33C
+MM_NIDS2 = 0x348
+MM_ENTRIES2 = 0x34C
+MM_RX_SIZE = 0x360
+
+MM_LIB1 = b"SceLibKernel\0"
+MM_LIB2 = b"SceModulemgr\0"
+MM_LIB1_NID = 0xCAE9ACE6
+MM_LIB2_NID = 0xEAED1616
+
+MM_LIBKERNEL_FUNCS = [
+    0x2DCC4AFA,  # sceKernelLoadStartModule
+    0x3B2CBA09,  # sceKernelStopModule
+    0x1987920E,  # sceKernelUnloadModule
+]
+
+MM_MODULEMGR_FUNCS = [
+    0x36585DAF,  # sceKernelGetModuleInfo
+]
+
+MM_RW_ID = 0x000
+MM_RW_STATUS = 0x004
+MM_RW_INFO = 0x010
+MM_RW_PATH = 0x1D0
+MM_RW_SIZE = 0x200
+MM_PATH = b"app0:/mod.suprx\0"
+MM_MODULE_FILE = b"mod.suprx\0"
+
+MM_MODULE_INFO = 0x100
+MM_MODULE_RX_SIZE = 0x200
+MM_MODULE_RW_SIZE = 0x100
+
+
+def build_module_file():
+    """Minimal PRX-style module: module_start returns 0x2A, stop returns 0x2B."""
+    rx = bytearray(MM_MODULE_RX_SIZE)
+    rx[0:12] = b"".join(struct.pack("<I", w) for w in (
+        arm_mov_imm(0, 0x2A),
+        0xE12FFF1E,  # bx lr
+        arm_mov_imm(0, 0x2B),
+    ))
+    rx[0x20:0x28] = b"".join(struct.pack("<I", w) for w in (
+        arm_mov_imm(0, 0x2B),
+        0xE12FFF1E,  # bx lr
+    ))
+
+    info = bytearray(MODULE_INFO_SIZE)
+    struct.pack_into("<HH", info, 0x00, 0x0000, 0x0101)
+    info[0x04:0x08] = b"mod\0"
+    info[0x1F] = 0x06
+    struct.pack_into("<I", info, 0x34, 0x12345678)
+    struct.pack_into("<I", info, 0x44, 0x00000000)  # module_start offset
+    struct.pack_into("<I", info, 0x48, 0x00000020)  # module_stop offset
+    struct.pack_into("<I", info, 0x5C, 0x03570011)
+    rx[MM_MODULE_INFO:MM_MODULE_INFO + MODULE_INFO_SIZE] = info
+
+    return assemble_elf(rx, bytearray(MM_MODULE_RW_SIZE), b"", MM_MODULE_INFO)
+
+
+def build_module_host_elf():
+    """Guest ELF that loads, starts, inspects, stops and unloads mod.suprx."""
+    code = []
+    rx_relocs = []
+
+    def emit(word):
+        code.append(word & 0xFFFFFFFF)
+
+    def movw_movt_rw(rd, offset):
+        base = len(code) * 4
+        emit(arm_movw(rd, 0))
+        emit(arm_movt(rd, 0))
+        rx_relocs.append(encode_rela(0, 1, base, offset, R_ARM_MOVW_ABS_NC))
+        rx_relocs.append(encode_rela(0, 1, base + 4, offset, R_ARM_MOVT_ABS))
+
+    def call(index):
+        emit(arm_bl(len(code) * 4, MM_STUB_BASE + index * 12))
+
+    def load_rw(rd, offset):
+        movw_movt_rw(rd, offset)
+        emit(0xE5900000 | (rd << 16) | (rd << 12))
+
+    def store_rw(rs, offset):
+        movw_movt_rw(12, offset)
+        emit(0xE58C0000 | (rs << 12))
+
+    def check(bit):
+        emit(0xE3500000)
+        emit(0x13844000 | arm_encode_imm(bit))
+
+    def check_nonzero(bit):
+        emit(0xE3500000)
+        emit(0x03844000 | arm_encode_imm(bit))
+
+    def check_negative(bit):
+        emit(0xE3500000)
+        emit(0xA3844000 | arm_encode_imm(bit))
+
+    def check_word(offset, value, bit):
+        movw_movt_rw(1, offset)
+        emit(0xE5910000)
+        emit(arm_movw(2, value & 0xFFFF))
+        emit(arm_movt(2, (value >> 16) & 0xFFFF))
+        emit(0xE1500002)
+        emit(0x13844000 | arm_encode_imm(bit))
+
+    emit(0xE92D4010)                 # push {r4, lr}
+    emit(arm_mov_imm(4, 0))
+
+    # sceKernelLoadStartModule("app0:/mod.suprx", 0, NULL, 0, NULL, &status)
+    movw_movt_rw(0, MM_RW_PATH)
+    emit(arm_mov_imm(1, 0))
+    emit(arm_mov_imm(2, 0))
+    emit(arm_mov_imm(3, 0))
+    emit(0xE24DD008)
+    emit(arm_mov_imm(12, 0))
+    emit(0xE58DC000)
+    movw_movt_rw(12, MM_RW_STATUS)
+    emit(0xE58DC004)
+    call(0)
+    emit(0xE28DD008)
+    store_rw(0, MM_RW_ID)
+    check_nonzero(1)
+    check_word(MM_RW_STATUS, 0x2A, 2)
+
+    # sceKernelGetModuleInfo(modid, &info)
+    load_rw(0, MM_RW_ID)
+    movw_movt_rw(1, MM_RW_INFO)
+    call(3)
+    check(4)
+    check_word(MM_RW_INFO, 0x1B8, 8)
+    movw_movt_rw(1, MM_RW_INFO + 4)
+    emit(0xE5911000)
+    load_rw(2, MM_RW_ID)
+    emit(0xE1510002)
+    emit(0x13844000 | arm_encode_imm(16))
+    check_word(MM_RW_INFO + 12, 0x00646F6D, 32)   # "mod"
+    check_word(MM_RW_INFO + 84, 0x30707061, 64)   # "app0"
+    check_word(MM_RW_INFO + 88, 0x6F6D2F3A, 128)  # ":/mo"
+    movw_movt_rw(1, MM_RW_INFO + 44)
+    emit(0xE5910000)
+    check_nonzero(256)
+
+    # sceKernelStopModule(modid, 0, NULL, 0, NULL, &status)
+    load_rw(0, MM_RW_ID)
+    emit(arm_mov_imm(1, 0))
+    emit(arm_mov_imm(2, 0))
+    emit(arm_mov_imm(3, 0))
+    emit(0xE24DD008)
+    emit(arm_mov_imm(12, 0))
+    emit(0xE58DC000)
+    movw_movt_rw(12, MM_RW_STATUS)
+    emit(0xE58DC004)
+    call(1)
+    emit(0xE28DD008)
+    check(512)
+    check_word(MM_RW_STATUS, 0x2B, 1024)
+
+    # unload and confirm the handle is gone
+    load_rw(0, MM_RW_ID)
+    emit(arm_mov_imm(1, 0))
+    emit(arm_mov_imm(2, 0))
+    call(2)
+    check(2048)
+    load_rw(0, MM_RW_ID)
+    movw_movt_rw(1, MM_RW_INFO)
+    call(3)
+    check_negative(4096)
+
+    emit(0xE1A00004)
+    emit(0xE3500000)
+    emit(0x03A0002A)
+    emit(0xE8BD8010)
+
+    assert len(code) * 4 <= 0x200, f"module fixture code overlaps the stubs ({len(code) * 4:#x})"
+
+    rx = bytearray(MM_RX_SIZE)
+    rx[:len(code) * 4] = b"".join(struct.pack("<I", w) for w in code)
+    rx[MM_LIB1_NAME:MM_LIB1_NAME + len(MM_LIB1)] = MM_LIB1
+    rx[MM_LIB2_NAME:MM_LIB2_NAME + len(MM_LIB2)] = MM_LIB2
+
+    info = bytearray(MODULE_INFO_SIZE)
+    struct.pack_into("<HH", info, 0x00, 0x0000, 0x0101)
+    info[0x04:0x04 + len(MODULE_NAME)] = MODULE_NAME
+    struct.pack_into("<I", info, 0x2C, MM_IMPORT1)
+    struct.pack_into("<I", info, 0x30, MM_IMPORT2 + IMPORT_SIZE)
+    struct.pack_into("<I", info, 0x34, 0x12345678)
+    struct.pack_into("<I", info, 0x44, 0x00000000)
+    struct.pack_into("<I", info, 0x48, 0xFFFFFFFF)
+    struct.pack_into("<I", info, 0x5C, 0x03570011)
+    rx[MM_MODINFO:MM_MODINFO + MODULE_INFO_SIZE] = info
+
+    imp1 = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp1, 0, IMPORT_SIZE, 1, 0, len(MM_LIBKERNEL_FUNCS), 0, 0)
+    struct.pack_into("<I", imp1, IMP_LIBRARY_NID, MM_LIB1_NID)
+    rx[MM_IMPORT1:MM_IMPORT1 + IMPORT_SIZE] = imp1
+
+    imp2 = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp2, 0, IMPORT_SIZE, 1, 0, len(MM_MODULEMGR_FUNCS), 0, 0)
+    struct.pack_into("<I", imp2, IMP_LIBRARY_NID, MM_LIB2_NID)
+    rx[MM_IMPORT2:MM_IMPORT2 + IMPORT_SIZE] = imp2
+
+    for i, nid in enumerate(MM_LIBKERNEL_FUNCS):
+        struct.pack_into("<I", rx, MM_NIDS1 + i * 4, nid)
+    for i, nid in enumerate(MM_MODULEMGR_FUNCS):
+        struct.pack_into("<I", rx, MM_NIDS2 + i * 4, nid)
+
+    rx_relocs.append(encode_rela(0, 0, MM_IMPORT1 + IMP_LIBRARY_NAME, MM_LIB1_NAME))
+    rx_relocs.append(encode_rela(0, 0, MM_IMPORT1 + IMP_FUNC_NID_TABLE, MM_NIDS1))
+    rx_relocs.append(encode_rela(0, 0, MM_IMPORT1 + IMP_FUNC_ENTRY_TABLE, MM_ENTRIES1))
+    rx_relocs.append(encode_rela(0, 0, MM_IMPORT2 + IMP_LIBRARY_NAME, MM_LIB2_NAME))
+    rx_relocs.append(encode_rela(0, 0, MM_IMPORT2 + IMP_FUNC_NID_TABLE, MM_NIDS2))
+    rx_relocs.append(encode_rela(0, 0, MM_IMPORT2 + IMP_FUNC_ENTRY_TABLE, MM_ENTRIES2))
+
+    for i in range(len(MM_LIBKERNEL_FUNCS)):
+        rx_relocs.append(encode_rela(0, 0, MM_ENTRIES1 + i * 4, MM_STUB_BASE + i * 12))
+    for i in range(len(MM_MODULEMGR_FUNCS)):
+        rx_relocs.append(encode_rela(0, 0, MM_ENTRIES2 + i * 4,
+                                     MM_STUB_BASE + (len(MM_LIBKERNEL_FUNCS) + i) * 12))
+
+    rw = bytearray(MM_RW_SIZE)
+    rw[MM_RW_PATH:MM_RW_PATH + len(MM_PATH)] = MM_PATH
+    rela = bytearray(b"".join(rx_relocs))
+    return assemble_elf(rx, rw, rela, MM_MODINFO)
+
+
 # --- SceAppUtil fixture ----------------------------------------------------
 
 APPUTIL_STUB_BASE = 0x140
@@ -2991,6 +3225,14 @@ def main():
     thread_extra_path = os.path.join(out_dir, "guest_thread_extra.elf")
     with open(thread_extra_path, "wb") as f:
         f.write(build_thread_extra_elf())
+
+    module_host_path = os.path.join(out_dir, "guest_module_host.elf")
+    with open(module_host_path, "wb") as f:
+        f.write(build_module_host_elf())
+
+    module_path = os.path.join(out_dir, "mod.suprx")
+    with open(module_path, "wb") as f:
+        f.write(build_module_file())
     print(f"wrote {event_path}")
 
     if os.path.exists(os.path.join(shader_dir, "texture_v.gxp")) and os.path.exists(
