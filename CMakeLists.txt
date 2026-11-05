@@ -173,6 +173,40 @@ if(BUILD_TESTING)
     target_link_libraries(egl_window_smoke PRIVATE ${CMAKE_DL_LIBS} m)
     add_test(NAME egl_window_smoke COMMAND egl_window_smoke)
 
+    if(NOT VITA2NATIVE_HEADLESS)
+        add_executable(display_egl_smoke
+            tests/display_egl_smoke.c
+            source/modules/SceDisplay_linux.c
+            source/host/host_gfx.c
+            source/host/host_gfx_gl.c
+            source/host/host_gfx_null.c
+            source/host/host_thread.c
+            source/log.c
+            source/netlog.c
+        )
+        target_include_directories(display_egl_smoke PRIVATE
+            include
+            source/host
+            external/khronos/include
+            external/vita-headers/include
+            ${SDL2_INCLUDE_DIRS}
+        )
+        target_compile_definitions(display_egl_smoke PRIVATE
+            _GNU_SOURCE=1
+            _FILE_OFFSET_BITS=64
+        )
+        if(SDL2_LIBRARY_DIRS)
+            target_link_directories(display_egl_smoke PRIVATE ${SDL2_LIBRARY_DIRS})
+        endif()
+        target_link_libraries(display_egl_smoke PRIVATE
+            ${SDL2_LIBRARIES}
+            ${CMAKE_DL_LIBS}
+            m
+            pthread
+        )
+        add_test(NAME display_egl_smoke COMMAND display_egl_smoke)
+    endif()
+
     add_executable(shader_smoke
         tests/shader_smoke.c
         source/spirv_cross_glsl_es.cpp
