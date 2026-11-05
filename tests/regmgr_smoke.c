@@ -68,6 +68,10 @@ int main(void)
     /* Type mismatch is an error, not a silent reinterpretation. */
     CHECK(sceRegMgrGetKeyStr("/CONFIG/TEST/", "counter", text, sizeof(text)) < 0,
           "int key was returned as a string");
+    CHECK(sceRegMgrGetKeyBin("/CONFIG/TEST/", "name", binary, sizeof(binary)) < 0,
+          "string key was returned as binary");
+    CHECK(sceRegMgrGetKeyInt("/CONFIG/TEST/", "name", &value) < 0,
+          "string key was returned as an int");
 
     /* Callbacks are accepted and unregistered. */
     CHECK(sceRegMgrRegisterCallback((void *)1) == 0, "register callback failed");

@@ -112,14 +112,17 @@ static int reg_store(const char *category, const char *name, RegType type, int i
             return -1;
         }
         g_entries = grown;
-        entry = &g_entries[g_entry_count++];
+        entry = &g_entries[g_entry_count];
         memset(entry, 0, sizeof(*entry));
         entry->category = strdup(category);
         entry->name = strdup(name);
         if (!entry->category || !entry->name) {
+            free(entry->category);
+            free(entry->name);
             free(copy);
             return -1;
         }
+        g_entry_count++;
     }
 
     entry->type = type;
@@ -154,7 +157,7 @@ EXPORT(SceRegMgr, 0x0B98D646, int, sceRegMgrGetKeyBin, const char *category, con
         return -1;
     if (size > 0)
         memset(buffer, 0, (size_t)size);
-    if (!entry || entry->type == REG_INT)
+    if (!entry || entry->type != REG_BIN)
         return -1;
 
     if (size > 0)
@@ -190,7 +193,7 @@ EXPORT(SceRegMgr, 0xE188382F, int, sceRegMgrGetKeyStr, const char *category, con
     if (!buffer || size <= 0)
         return -1;
     buffer[0] = '\0';
-    if (!entry || entry->type == REG_INT)
+    if (!entry || entry->type != REG_STR)
         return -1;
 
     {
