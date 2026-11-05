@@ -95,6 +95,7 @@ add_executable(vita2native
     source/modules/SceAtrac.c
     source/modules/SceAudiodec.c
     source/modules/SceJpeg.c
+    source/modules/SceAvPlayer.c
     source/modules/SceAppUtil.c
     source/modules/SceCommonDialog.c
     source/modules/common_dialog_overlay.c
@@ -556,6 +557,17 @@ if(BUILD_TESTING)
     target_compile_definitions(dialog_overlay_smoke PRIVATE _GNU_SOURCE=1)
     target_link_libraries(dialog_overlay_smoke PRIVATE pthread)
     add_test(NAME dialog_overlay_smoke COMMAND dialog_overlay_smoke)
+
+    add_executable(avplayer_smoke
+        tests/avplayer_smoke.c
+        source/module.c
+        source/modules/SceAvPlayer.c
+        source/host/host_thread.c
+    )
+    target_include_directories(avplayer_smoke PRIVATE include external/vita-headers/include)
+    target_compile_definitions(avplayer_smoke PRIVATE _GNU_SOURCE=1)
+    target_link_libraries(avplayer_smoke PRIVATE pthread)
+    add_test(NAME avplayer_smoke COMMAND avplayer_smoke)
 
     add_executable(touch_smoke
         tests/touch_smoke.c

@@ -81,9 +81,10 @@ libraries are available; otherwise a null backend is used. GXM is translated to
 GLES 3.x: GXP shaders through Vita3K's recompiler, render targets, textures,
 depth/stencil, MSAA and the transfer calls. `SceAudioOut`/`SceAudioIn`,
 MP3/ATRAC9/AAC decoding, JPEG encode/decode, `SceNet`/`SceHttp`/`SceSsl`,
-`SceSqlite`, `ScePgf`, `SceTouch`, `SceCommonDialog`, a synthetic camera and the
-kernel/thread surface are implemented. AAC uses the bundled FAAD2 decoder;
-CELP decoding and encrypted SELF files are not supported.
+`SceSqlite`, `ScePgf`, `SceTouch`, `SceCommonDialog` (with an on-screen
+overlay), a synthetic camera and `SceAvPlayer` (generated 30 fps video and
+silent audio) and the kernel/thread surface are implemented. AAC uses the
+bundled FAAD2 decoder; CELP decoding and encrypted SELF files are not supported.
 
 Guest code runs natively in the host process; there is no sandbox or isolation.
 
