@@ -81,6 +81,13 @@ EXPORT(ScePower, 0xD541FF03, int, scePowerGetUsingWireless, void)
     return 0;
 }
 
+EXPORT(ScePower, 0x4D695C1F, int, scePowerSetUsingWireless, int enabled)
+{
+    (void)enabled;
+
+    return 0;
+}
+
 EXPORT(ScePower, 0x525592E4, int, scePowerGetCaseTemp, void)
 {
     return 30;
@@ -164,6 +171,13 @@ EXPORT(ScePower, 0xB11EF149, int, scePowerSetIdleTimerCount, int count)
 }
 
 EXPORT(ScePower, 0x04B7766E, int, scePowerRegisterCallback, SceUID cbid)
+{
+    (void)cbid;
+
+    return 0;
+}
+
+EXPORT(ScePower, 0xDFA8BAF8, int, scePowerUnregisterCallback, SceUID cbid)
 {
     (void)cbid;
 
