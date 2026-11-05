@@ -8,6 +8,7 @@
 #include "module.h"
 
 #define MAX_GUEST_LIBRARIES 64
+#define MAX_GUEST_DEPENDENTS 32
 
 typedef struct {
     bool used;
@@ -17,12 +18,28 @@ typedef struct {
     uint32_t num_vars;
     const uint32_t *nids;
     const void *const *entries;
+    void *dependents[MAX_GUEST_DEPENDENTS];
+    uint32_t num_dependents;
 } guest_library_t;
 
 static guest_library_t g_guest_libraries[MAX_GUEST_LIBRARIES];
 static pthread_mutex_t g_guest_libraries_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static uint32_t g_stack_chk_guard = 0x0DEADBEEu;
+
+static void add_dependent(guest_library_t *lib, void *importer)
+{
+    if (!importer || importer == lib->owner)
+        return;
+
+    for (uint32_t i = 0; i < lib->num_dependents; i++) {
+        if (lib->dependents[i] == importer)
+            return;
+    }
+
+    if (lib->num_dependents < MAX_GUEST_DEPENDENTS)
+        lib->dependents[lib->num_dependents++] = importer;
+}
 
 void module_register_guest_library(uint32_t library_nid, uint32_t num_funcs, uint32_t num_vars,
                                    const uint32_t *nids, const void *const *entries, void *owner)
@@ -56,7 +73,7 @@ void module_unregister_guest_libraries(void *owner)
     pthread_mutex_unlock(&g_guest_libraries_lock);
 }
 
-const void *module_get_func_export(uint32_t lib_nid, uint32_t func_nid)
+const void *module_get_func_export(uint32_t lib_nid, uint32_t func_nid, void *importer)
 {
     size_t num_libs = NUM_EXPORTED_LIBS;
     const void *result = NULL;
@@ -83,6 +100,7 @@ const void *module_get_func_export(uint32_t lib_nid, uint32_t func_nid)
         for (uint32_t j = 0; j < lib->num_funcs; j++) {
             if (lib->nids[j] == func_nid) {
                 result = lib->entries[j];
+                add_dependent(lib, importer);
                 goto done;
             }
         }
@@ -93,7 +111,7 @@ done:
     return result;
 }
 
-void *module_get_var_export(uint32_t lib_nid, uint32_t var_nid)
+void *module_get_var_export(uint32_t lib_nid, uint32_t var_nid, void *importer)
 {
     void *result = NULL;
 
@@ -113,6 +131,7 @@ void *module_get_var_export(uint32_t lib_nid, uint32_t var_nid)
 
             if (lib->nids[index] == var_nid) {
                 result = (void *)lib->entries[index];
+                add_dependent(lib, importer);
                 goto done;
             }
         }
@@ -121,4 +140,49 @@ void *module_get_var_export(uint32_t lib_nid, uint32_t var_nid)
 done:
     pthread_mutex_unlock(&g_guest_libraries_lock);
     return result;
+}
+
+bool module_guest_library_has_dependents(const void *owner)
+{
+    bool result = false;
+
+    if (!owner)
+        return false;
+
+    pthread_mutex_lock(&g_guest_libraries_lock);
+    for (int i = 0; i < MAX_GUEST_LIBRARIES; i++) {
+        guest_library_t *lib = &g_guest_libraries[i];
+
+        if (lib->used && lib->owner == owner && lib->num_dependents > 0) {
+            result = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_guest_libraries_lock);
+
+    return result;
+}
+
+void module_remove_importer(void *importer)
+{
+    if (!importer)
+        return;
+
+    pthread_mutex_lock(&g_guest_libraries_lock);
+    for (int i = 0; i < MAX_GUEST_LIBRARIES; i++) {
+        guest_library_t *lib = &g_guest_libraries[i];
+
+        if (!lib->used)
+            continue;
+
+        for (uint32_t j = 0; j < lib->num_dependents;) {
+            if (lib->dependents[j] == importer) {
+                lib->dependents[j] = lib->dependents[--lib->num_dependents];
+                lib->dependents[lib->num_dependents] = NULL;
+            } else {
+                j++;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_guest_libraries_lock);
 }

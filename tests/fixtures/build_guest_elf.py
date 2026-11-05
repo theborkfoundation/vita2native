@@ -2719,6 +2719,10 @@ def build_module_export_host_elf():
         emit(0xE3500000)
         emit(0x03844000 | arm_encode_imm(bit))
 
+    def check_negative(bit):
+        emit(0xE3500000)
+        emit(0xA3844000 | arm_encode_imm(bit))
+
     def check_word(offset, value, bit):
         movw_movt_rw(1, offset)
         emit(0xE5910000)
@@ -2749,16 +2753,23 @@ def build_module_export_host_elf():
     load_start(ME_RW_LIB_PATH, ME_RW_LIB_ID, 1)
     load_start(ME_RW_IMP_PATH, ME_RW_IMP_ID, 4)
 
-    load_rw(0, ME_RW_IMP_ID)
-    emit(arm_mov_imm(1, 0))
-    emit(arm_mov_imm(2, 0))
-    call(1)
-    check(16)
+    # lib is still imported by imp, so unloading it must fail
     load_rw(0, ME_RW_LIB_ID)
     emit(arm_mov_imm(1, 0))
     emit(arm_mov_imm(2, 0))
     call(1)
+    check_negative(16)
+
+    load_rw(0, ME_RW_IMP_ID)
+    emit(arm_mov_imm(1, 0))
+    emit(arm_mov_imm(2, 0))
+    call(1)
     check(32)
+    load_rw(0, ME_RW_LIB_ID)
+    emit(arm_mov_imm(1, 0))
+    emit(arm_mov_imm(2, 0))
+    call(1)
+    check(64)
 
     emit(0xE1A00004)
     emit(0xE3500000)

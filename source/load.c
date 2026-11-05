@@ -61,7 +61,8 @@ static int load_elf(Jit *jit, const void *data, void **entry, LoadedModuleInfo *
 static int load_self(Jit *jit, const void *data, void **entry, LoadedModuleInfo *info);
 static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_info_t *segments,
                          int num_segments, LoadedModuleInfo *info);
-static int resolve_imports(uintptr_t rx_base, uintptr_t rw_base, sce_module_imports_u_t *import);
+static int resolve_imports(uintptr_t rx_base, uintptr_t rw_base, sce_module_imports_u_t *import,
+                           void *importer);
 static int relocate(const void *reloc, uint32_t size, segment_info_t *segs);
 
 int elf_check_vita_header(const Elf32_Ehdr *hdr)
@@ -532,7 +533,8 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
     for (; (void *)import < end; import = IMP_GET_NEXT(import)) {
         imp_name = (void *)CODE_RX_TO_RW_ADDR(code_rx_addr, code_rw_addr, IMP_GET_NAME(import));
         LOG("Resolving imports for %s (NID: 0x%08" PRIx32 ")", imp_name, IMP_GET_NID(import));
-        if (resolve_imports(code_rx_addr, code_rw_addr, import) < 0) {
+        if (resolve_imports(code_rx_addr, code_rw_addr, import,
+                            info ? info->module_info : NULL) < 0) {
             LOG("Failed to resolve imports for %s", imp_name);
             goto err_free_data;
         }
@@ -560,8 +562,10 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
     return 0;
 
 err_free_data:
-    if (info && info->module_info)
+    if (info && info->module_info) {
+        module_remove_importer(info->module_info);
         module_unregister_guest_libraries(info->module_info);
+    }
     free((void *)data_addr);
 err_jit_close:
     jitClose(jit);
@@ -569,7 +573,8 @@ err_jit_close:
     return -1;
 }
 
-static int resolve_imports(uintptr_t rx_base, uintptr_t rw_base, sce_module_imports_u_t *import)
+static int resolve_imports(uintptr_t rx_base, uintptr_t rw_base, sce_module_imports_u_t *import,
+                           void *importer)
 {
     const void *addr;
     uint32_t nid;
@@ -582,7 +587,7 @@ static int resolve_imports(uintptr_t rx_base, uintptr_t rw_base, sce_module_impo
     for (uint32_t i = 0; i < IMP_GET_FUNC_COUNT(import); i++) {
         nid = ((uint32_t *)CODE_RX_TO_RW_ADDR(rx_base, rw_base, IMP_GET_FUNC_TABLE(import)))[i];
         stub = (void *)CODE_RX_TO_RW_ADDR(rx_base, rw_base, IMP_GET_FUNC_ENTRIES(import)[i]);
-        addr = module_get_func_export(lib_nid, nid);
+        addr = module_get_func_export(lib_nid, nid, importer);
 
         if (addr) {
             LOG("  Resolved NID 0x%08" PRIx32 " to %p", nid, addr);
@@ -601,7 +606,7 @@ static int resolve_imports(uintptr_t rx_base, uintptr_t rw_base, sce_module_impo
         nid = ((uint32_t *)CODE_RX_TO_RW_ADDR(rx_base, rw_base, IMP_GET_VARS_TABLE(import)))[i];
         LOG("  Trying to resolve variable NID 0x%08" PRIx32, nid);
 
-        addr = module_get_var_export(lib_nid, nid);
+        addr = module_get_var_export(lib_nid, nid, importer);
         if (addr) {
             uint32_t *entry = (void *)CODE_RX_TO_RW_ADDR(
                 rx_base, rw_base, IMP_GET_VARS_ENTRIES(import));

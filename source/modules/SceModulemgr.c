@@ -326,6 +326,12 @@ EXPORT(SceLibKernel, 0x1987920E, int, sceKernelUnloadModule, SceUID modid, int f
         return 0;
     }
 
+    if (module_guest_library_has_dependents(module->loader.module_info)) {
+        pthread_mutex_unlock(&g_modules_lock);
+        return SCE_KERNEL_ERROR_MODULEMGR_IN_USE;
+    }
+
+    module_remove_importer(module->loader.module_info);
     module_release_locked(module);
     pthread_mutex_unlock(&g_modules_lock);
 
