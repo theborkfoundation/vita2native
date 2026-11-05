@@ -505,12 +505,412 @@ def build_elf(mode):
     return bytes(elf)
 
 
+def build_gxm_draw_elf(shader_dir):
+    """Guest ELF that performs a full imported-SceGxm draw of a textured quad.
+
+    Everything goes through the import stubs, so this covers the guest ARM
+    calling convention (including stack arguments) and the whole shader
+    patcher / stream / uniform / draw sequence. The framebuffer is checked in
+    guest code; under a null graphics backend the calls are no-ops but still
+    have to return success.
+    """
+    with open(os.path.join(shader_dir, "texture_v.gxp"), "rb") as f:
+        vertex_gxp = f.read()
+    with open(os.path.join(shader_dir, "texture_f.gxp"), "rb") as f:
+        fragment_gxp = f.read()
+
+    funcs = [
+        0xB0F1E4EC,  # sceGxmInitialize
+        0xE84CE5B4,  # sceGxmCreateContext
+        0x05032658,  # sceGxmShaderPatcherCreate
+        0x2B528462,  # sceGxmShaderPatcherRegisterProgram
+        0xB7BBA6D5,  # sceGxmShaderPatcherCreateVertexProgram
+        0x4ED2E49D,  # sceGxmShaderPatcherCreateFragmentProgram
+        0x277794C4,  # sceGxmProgramFindParameterByName
+        0x207AF96B,  # sceGxmCreateRenderTarget
+        0xED0F6E25,  # sceGxmColorSurfaceInit
+        0xA41DB0D6,  # sceGxmDepthStencilSurfaceInitDisabled
+        0x4811AECB,  # sceGxmTextureInitLinear
+        0x8734FF4E,  # sceGxmBeginScene
+        0x60CF708E,  # sceGxmSetDefaultRegionClipAndViewport
+        0x31FF8ABD,  # sceGxmSetVertexProgram
+        0xAD2F48D9,  # sceGxmSetFragmentProgram
+        0x29C34DF5,  # sceGxmSetFragmentTexture
+        0x895DF2E9,  # sceGxmSetVertexStream
+        0x97118913,  # sceGxmReserveVertexDefaultUniformBuffer
+        0x65DD0C84,  # sceGxmSetUniformDataF
+        0xBC059AFC,  # sceGxmDraw
+        0xFE300E2F,  # sceGxmEndScene
+    ]
+
+    stub_base = 0x1400
+    lib_name = 0x1500
+    str_wvp = 0x1510
+    modinfo = 0x1520
+    import_off = 0x1580
+    nids = 0x15A8
+    entries = 0x1600
+    vgxp_off = 0x1680
+    fgxp_off = (vgxp_off + len(vertex_gxp) + 0xF) & ~0xF
+    rx_size = (fgxp_off + len(fragment_gxp) + 0xF) & ~0xF
+
+    # Data segment layout.
+    rw_init = 0x0000
+    rw_ctx_params = 0x0020
+    rw_host_mem = 0x0050
+    host_mem_size = 0x10000
+    rw_ctx_out = rw_host_mem + host_mem_size
+    rw_patcher_params = rw_ctx_out + 0x10
+    rw_patcher_out = rw_patcher_params + 0x80
+    rw_vertex_id = rw_patcher_out + 4
+    rw_fragment_id = rw_vertex_id + 4
+    rw_vertex_program = rw_fragment_id + 4
+    rw_fragment_program = rw_vertex_program + 4
+    rw_wvp = rw_fragment_program + 4
+    rw_uniform = rw_wvp + 4
+    rw_attributes = rw_uniform + 8
+    rw_streams = rw_attributes + 16
+    rw_rt_params = rw_streams + 8
+    rw_rt_out = rw_rt_params + 0x14
+    rw_color_surface = rw_rt_out + 8
+    rw_depth_surface = rw_color_surface + 0x30
+    rw_texture = rw_depth_surface + 0x14
+    rw_identity = (rw_texture + 0x10 + 0xF) & ~0xF
+    rw_positions = rw_identity + 64
+    rw_uvs = rw_positions + 64
+    rw_indices = rw_uvs + 32
+    rw_tex_pixels = (rw_indices + 12 + 0xF) & ~0xF
+    rw_fb = (rw_tex_pixels + 256 + 0xF) & ~0xF
+    rw_size = rw_fb + 64 * 64 * 4
+
+    code = []
+    rx_relocs = []
+
+    def emit(word):
+        code.append(word & 0xFFFFFFFF)
+
+    def imm(rd, value):
+        emit(arm_movw(rd, value & 0xFFFF))
+        emit(arm_movt(rd, (value >> 16) & 0xFFFF))
+
+    def addr(rd, offset, symseg=1):
+        base = len(code) * 4
+        emit(arm_movw(rd, 0))
+        emit(arm_movt(rd, 0))
+        rx_relocs.append(encode_rela(0, symseg, base, offset, R_ARM_MOVW_ABS_NC))
+        rx_relocs.append(encode_rela(0, symseg, base + 4, offset, R_ARM_MOVT_ABS))
+
+    def call(index):
+        emit(arm_bl(len(code) * 4, stub_base + index * 12))
+
+    def check(bit):
+        emit(0xE3500000)                       # cmp r0, #0
+        emit(0x13844000 | arm_encode_imm(bit))  # orrne r4, r4, #bit
+
+    def load_out(rd, offset):
+        addr(12, offset)
+        emit(0xE59C0000 | (rd << 12))          # ldr rd, [r12]
+
+    def str_sp(rd, offset):
+        emit(0xE58D0000 | (rd << 12) | (offset & 0xFFF))
+
+    emit(0xE92D4010)                           # push {r4, lr}
+    emit(0xE3A04000)                           # mov r4, #0
+
+    # sceGxmInitialize(&params)
+    addr(0, rw_init)
+    call(0)
+    check(1)
+
+    # sceGxmCreateContext(&params, &context)
+    addr(0, rw_ctx_params)
+    addr(1, rw_ctx_out)
+    call(1)
+    check(2)
+
+    # sceGxmShaderPatcherCreate(&params, &patcher)
+    addr(0, rw_patcher_params)
+    addr(1, rw_patcher_out)
+    call(2)
+    check(4)
+
+    # Register both GXP programs.
+    load_out(0, rw_patcher_out)
+    addr(1, vgxp_off, 0)
+    addr(2, rw_vertex_id)
+    call(3)
+    check(8)
+    load_out(0, rw_patcher_out)
+    addr(1, fgxp_off, 0)
+    addr(2, rw_fragment_id)
+    call(3)
+    check(16)
+
+    # sceGxmProgramFindParameterByName(vertex_gxp, "wvp")
+    addr(0, vgxp_off, 0)
+    addr(1, str_wvp, 0)
+    call(6)
+    addr(12, rw_wvp)
+    emit(0xE58C0000)                           # str r0, [r12]
+    emit(0xE3500000)                           # cmp r0, #0
+    emit(0x03844000 | arm_encode_imm(32))      # orreq r4, r4, #32 (NULL is failure)
+
+    # sceGxmShaderPatcherCreateVertexProgram(patcher, id, attrs, 2, streams, 2, &out)
+    load_out(0, rw_patcher_out)
+    load_out(1, rw_vertex_id)
+    addr(2, rw_attributes)
+    emit(arm_mov_imm(3, 2))
+    emit(0xE24DD010)                           # sub sp, sp, #16
+    addr(12, rw_streams)
+    str_sp(12, 0)
+    emit(arm_mov_imm(12, 2))
+    str_sp(12, 4)
+    addr(12, rw_vertex_program)
+    str_sp(12, 8)
+    call(4)
+    check(64)
+    emit(0xE28DD010)                           # add sp, sp, #16
+
+    # sceGxmShaderPatcherCreateFragmentProgram(patcher, id, UCHAR4, NONE, NULL, vs, &out)
+    load_out(0, rw_patcher_out)
+    load_out(1, rw_fragment_id)
+    emit(arm_mov_imm(2, 1))
+    emit(arm_mov_imm(3, 0))
+    emit(0xE24DD010)
+    emit(arm_mov_imm(12, 0))
+    str_sp(12, 0)
+    addr(12, vgxp_off, 0)
+    str_sp(12, 4)
+    addr(12, rw_fragment_program)
+    str_sp(12, 8)
+    call(5)
+    check(128)
+    emit(0xE28DD010)
+
+    # sceGxmCreateRenderTarget(&params, &target)
+    addr(0, rw_rt_params)
+    addr(1, rw_rt_out)
+    call(7)
+    check(256)
+
+    # sceGxmColorSurfaceInit(surface, A8B8G8R8, LINEAR, NONE, 32BIT, 64, 64, 64, fb)
+    addr(0, rw_color_surface)
+    emit(arm_mov_imm(1, 0))
+    emit(arm_mov_imm(2, 0))
+    emit(arm_mov_imm(3, 0))
+    emit(0xE24DD018)                           # sub sp, sp, #24
+    emit(arm_mov_imm(12, 0))
+    str_sp(12, 0)
+    emit(arm_mov_imm(12, 64))
+    str_sp(12, 4)
+    str_sp(12, 8)
+    str_sp(12, 12)
+    addr(12, rw_fb)
+    str_sp(12, 16)
+    call(8)
+    check(512)
+    emit(0xE28DD018)
+
+    # sceGxmDepthStencilSurfaceInitDisabled(&surface)
+    addr(0, rw_depth_surface)
+    call(9)
+    check(1024)
+
+    # sceGxmTextureInitLinear(&texture, pixels, U8U8U8U8_ABGR, 2, 2, 0)
+    addr(0, rw_texture)
+    addr(1, rw_tex_pixels)
+    imm(2, 0x0C000000)
+    emit(arm_mov_imm(3, 2))
+    emit(0xE24DD010)
+    emit(arm_mov_imm(12, 2))
+    str_sp(12, 0)
+    emit(arm_mov_imm(12, 0))
+    str_sp(12, 4)
+    call(10)
+    check(2048)
+    emit(0xE28DD010)
+
+    # sceGxmBeginScene(ctx, 0, target, NULL, NULL, NULL, &color, &depth)
+    load_out(0, rw_ctx_out)
+    emit(arm_mov_imm(1, 0))
+    load_out(2, rw_rt_out)
+    emit(arm_mov_imm(3, 0))
+    emit(0xE24DD010)
+    emit(arm_mov_imm(12, 0))
+    str_sp(12, 0)
+    str_sp(12, 4)
+    addr(12, rw_color_surface)
+    str_sp(12, 8)
+    addr(12, rw_depth_surface)
+    str_sp(12, 12)
+    call(11)
+    check(4096)
+    emit(0xE28DD010)
+
+    # sceGxmSetDefaultRegionClipAndViewport(ctx, 64, 64)
+    load_out(0, rw_ctx_out)
+    emit(arm_mov_imm(1, 64))
+    emit(arm_mov_imm(2, 64))
+    call(12)
+
+    # Programs, texture, streams.
+    load_out(0, rw_ctx_out)
+    load_out(1, rw_vertex_program)
+    call(13)
+    load_out(0, rw_ctx_out)
+    load_out(1, rw_fragment_program)
+    call(14)
+    load_out(0, rw_ctx_out)
+    emit(arm_mov_imm(1, 0))
+    addr(2, rw_texture)
+    call(15)
+    load_out(0, rw_ctx_out)
+    emit(arm_mov_imm(1, 0))
+    addr(2, rw_positions)
+    call(16)
+    load_out(0, rw_ctx_out)
+    emit(arm_mov_imm(1, 1))
+    addr(2, rw_uvs)
+    call(16)
+
+    # sceGxmReserveVertexDefaultUniformBuffer(ctx, &uniform)
+    load_out(0, rw_ctx_out)
+    addr(1, rw_uniform)
+    call(17)
+    check(8192)
+
+    # sceGxmSetUniformDataF(uniform, wvp, 0, 16, identity)
+    load_out(0, rw_uniform)
+    load_out(1, rw_wvp)
+    emit(arm_mov_imm(2, 0))
+    emit(arm_mov_imm(3, 16))
+    emit(0xE24DD010)
+    addr(12, rw_identity)
+    str_sp(12, 0)
+    call(18)
+    check(16384)
+    emit(0xE28DD010)
+
+    # sceGxmDraw(ctx, TRIANGLES, U16, indices, 6)
+    load_out(0, rw_ctx_out)
+    emit(arm_mov_imm(1, 0))
+    emit(arm_mov_imm(2, 0))
+    addr(3, rw_indices)
+    emit(0xE24DD010)
+    emit(arm_mov_imm(12, 6))
+    str_sp(12, 0)
+    call(19)
+    check(32768)
+    emit(0xE28DD010)
+
+    # sceGxmEndScene(ctx, NULL, NULL)
+    load_out(0, rw_ctx_out)
+    emit(arm_mov_imm(1, 0))
+    emit(arm_mov_imm(2, 0))
+    call(20)
+    check(65536)
+
+    # The centre pixel must be the texture colour (A8B8G8R8: R G B A).
+    addr(12, rw_fb)
+    imm(2, (32 * 64 + 32) * 4)
+    emit(0xE08C0002)                           # add r0, r12, r2
+    emit(0xE5900000)                           # ldr r0, [r0]
+    imm(1, 0x281E140A)
+    emit(0xE3500000)                           # cmp r0, #0
+    emit(0x01A00001)                           # moveq r0, r1 (null backend: no pixels)
+    emit(0xE1500001)                           # cmp r0, r1
+    emit(0x13844000 | arm_encode_imm(1 << 18)) # orrne r4, r4, #0x40000
+
+    emit(0xE3540000)                           # cmp r4, #0
+    emit(0x03A0002A)                           # moveq r0, #42
+    emit(0x11A00004)                           # movne r0, r4
+    emit(0xE8BD8010)                           # pop {r4, pc}
+
+    assert len(code) * 4 <= stub_base, "draw fixture code overlaps the stubs"
+
+    rx = bytearray(rx_size)
+    rx[:len(code) * 4] = b"".join(struct.pack("<I", w) for w in code)
+    rx[lib_name:lib_name + len(LIB_NAME)] = LIB_NAME
+    rx[str_wvp:str_wvp + 4] = b"wvp\0"
+
+    info = bytearray(MODULE_INFO_SIZE)
+    struct.pack_into("<HH", info, 0x00, 0x0000, 0x0101)
+    info[0x04:0x04 + len(MODULE_NAME)] = MODULE_NAME
+    struct.pack_into("<I", info, 0x2C, import_off)
+    struct.pack_into("<I", info, 0x30, import_off + IMPORT_SIZE)
+    struct.pack_into("<I", info, 0x34, 0x12345678)
+    struct.pack_into("<I", info, 0x44, 0)
+    struct.pack_into("<I", info, 0x48, 0xFFFFFFFF)
+    struct.pack_into("<I", info, 0x5C, 0x03570011)
+    rx[modinfo:modinfo + MODULE_INFO_SIZE] = info
+
+    imp = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp, 0, IMPORT_SIZE, 1, 0, len(funcs), 0, 0)
+    struct.pack_into("<I", imp, IMP_LIBRARY_NID, SCEGXM_NID)
+    rx[import_off:import_off + IMPORT_SIZE] = imp
+    for i, nid in enumerate(funcs):
+        struct.pack_into("<I", rx, nids + i * 4, nid)
+
+    rx_relocs.append(encode_rela(0, 0, import_off + IMP_LIBRARY_NAME, lib_name))
+    rx_relocs.append(encode_rela(0, 0, import_off + IMP_FUNC_NID_TABLE, nids))
+    rx_relocs.append(encode_rela(0, 0, import_off + IMP_FUNC_ENTRY_TABLE, entries))
+    for i in range(len(funcs)):
+        rx_relocs.append(encode_rela(0, 0, entries + i * 4, stub_base + i * 12))
+
+    rx[vgxp_off:vgxp_off + len(vertex_gxp)] = vertex_gxp
+    rx[fgxp_off:fgxp_off + len(fragment_gxp)] = fragment_gxp
+
+    rw = bytearray(rw_size)
+    struct.pack_into("<I", rw, rw_ctx_params + 4, host_mem_size)
+    struct.pack_into("<HHHH", rw, rw_rt_params + 4, 64, 64, 1, 0)
+    struct.pack_into("<HHBBH", rw, rw_attributes, 0, 0, 9, 4, 0)
+    struct.pack_into("<HHBBH", rw, rw_attributes + 8, 1, 0, 9, 2, 4)
+    struct.pack_into("<HH", rw, rw_streams, 16, 0)
+    struct.pack_into("<HH", rw, rw_streams + 4, 8, 0)
+    struct.pack_into("<6H", rw, rw_indices, 0, 1, 2, 0, 2, 3)
+    for i in range(8 * 8):
+        rw[rw_tex_pixels + i * 4:rw_tex_pixels + i * 4 + 4] = bytes((10, 20, 30, 40))
+    struct.pack_into("<16f", rw, rw_identity,
+                     1.0, 0.0, 0.0, 0.0,
+                     0.0, 1.0, 0.0, 0.0,
+                     0.0, 0.0, 1.0, 0.0,
+                     0.0, 0.0, 0.0, 1.0)
+    struct.pack_into("<16f", rw, rw_positions,
+                     -1.0, -1.0, 0.0, 1.0,
+                     1.0, -1.0, 0.0, 1.0,
+                     1.0, 1.0, 0.0, 1.0,
+                     -1.0, 1.0, 0.0, 1.0)
+    struct.pack_into("<8f", rw, rw_uvs,
+                     0.0, 1.0,
+                     1.0, 1.0,
+                     1.0, 0.0,
+                     0.0, 0.0)
+
+    rw_relocs = [encode_rela(1, 1, rw_ctx_params, rw_host_mem)]
+    rela = bytearray(b"".join(rx_relocs) + b"".join(rw_relocs))
+    return assemble_elf(rx, rw, rela, modinfo)
+
+
+def arm_encode_imm(value):
+    """Encode a 32-bit value as an ARM data-processing immediate (rot, imm8)."""
+    for rot in range(16):
+        shift = 2 * rot
+        rotated = ((value << shift) | (value >> (32 - shift))) & 0xFFFFFFFF if shift else value
+        if rotated <= 0xFF:
+            return (rot << 8) | rotated
+    raise ValueError(f"0x{value:x} is not an ARM immediate")
+
+
 def main():
-    if len(sys.argv) != 2:
+    if len(sys.argv) < 2:
         print(__doc__)
         return 1
 
     out_dir = sys.argv[1]
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    shader_dir = (sys.argv[2] if len(sys.argv) > 2 else
+                  os.path.join(repo_root, "external", "Vita3K", "tools", "native-tool",
+                               "src", "shaders"))
     os.makedirs(out_dir, exist_ok=True)
 
     for mode in ("return", "exit", "io", "gxm"):
@@ -523,6 +923,15 @@ def main():
     with open(scene_path, "wb") as f:
         f.write(build_gxm_scene_elf())
     print(f"wrote {scene_path}")
+
+    if os.path.exists(os.path.join(shader_dir, "texture_v.gxp")) and os.path.exists(
+            os.path.join(shader_dir, "texture_f.gxp")):
+        draw_path = os.path.join(out_dir, "guest_gxm_draw.elf")
+        with open(draw_path, "wb") as f:
+            f.write(build_gxm_draw_elf(shader_dir))
+        print(f"wrote {draw_path}")
+    else:
+        print(f"skipping guest_gxm_draw.elf: no GXP shaders in {shader_dir}")
 
     return 0
 

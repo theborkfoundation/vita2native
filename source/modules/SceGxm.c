@@ -2763,13 +2763,15 @@ EXPORT(SceGxm, 0x65DD0C84, int, sceGxmSetUniformDataF, void *uniformBuffer,
        const SceGxmProgramParameter *parameter, unsigned int componentOffset,
        unsigned int componentCount, const float *sourceData)
 {
-    const bool is_float = (parameter->type == SCE_GXM_PARAMETER_TYPE_F16) ||
-                          (parameter->type == SCE_GXM_PARAMETER_TYPE_F32);
+    bool is_float;
     uint32_t alignment, scalar_size, vector_size, vector_index, scalar_index;
     uint32_t vector_mod_align, vector_padding_bytes, offset, scalars_to_copy;
 
-    if (!uniformBuffer || !sourceData)
+    if (!uniformBuffer || !parameter || !sourceData)
         return SCE_GXM_ERROR_INVALID_POINTER;
+
+    is_float = (parameter->type == SCE_GXM_PARAMETER_TYPE_F16) ||
+               (parameter->type == SCE_GXM_PARAMETER_TYPE_F32);
 
     alignment = (is_float && parameter->array_size > 1 && parameter->component_count > 1) ? 8 : 4;
     scalar_size = gxm_parameter_type_size(parameter->type);

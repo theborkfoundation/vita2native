@@ -46,16 +46,16 @@ static void check_host_cpu(void)
 static void guest_signal_handler(int signal, siginfo_t *info, void *context)
 {
     ucontext_t *uc = context;
-    char message[256];
+    char message[320];
     int length;
 
-    (void)info;
-
     length = snprintf(message, sizeof(message),
-                      "vita2native: guest signal %d at pc=0x%08lx lr=0x%08lx sp=0x%08lx\n", signal,
-                      (unsigned long)uc->uc_mcontext.arm_pc,
+                      "vita2native: guest signal %d at pc=0x%08lx lr=0x%08lx sp=0x%08lx "
+                      "fault=0x%08lx\n",
+                      signal, (unsigned long)uc->uc_mcontext.arm_pc,
                       (unsigned long)uc->uc_mcontext.arm_lr,
-                      (unsigned long)uc->uc_mcontext.arm_sp);
+                      (unsigned long)uc->uc_mcontext.arm_sp,
+                      info ? (unsigned long)info->si_addr : 0UL);
     if (length > 0)
         write(STDERR_FILENO, message, (size_t)length);
 
