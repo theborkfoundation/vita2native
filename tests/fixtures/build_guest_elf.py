@@ -1604,6 +1604,167 @@ def build_kernel_timer_elf():
     return assemble_elf(rx, rw, rela, TM_MODINFO)
 
 
+# --- SceKernel thread info fixture -----------------------------------------
+
+TI_STUB_BASE = 0x200
+TI_LIB_NAME = 0x270
+TI_MODINFO = 0x280
+TI_IMPORT = 0x2E0
+TI_NIDS = 0x308
+TI_ENTRIES = 0x330
+TI_RX_SIZE = 0x370
+
+TI_LIB = b"SceLibKernel\0"
+TI_LIB_NID = 0xCAE9ACE6
+
+TI_FUNCS = [
+    0xC53A9848,  # sceKernelGetThreadCurrentPriority
+    0x8D9C5461,  # sceKernelGetThreadInfo
+    0xD5DC26C4,  # sceKernelGetThreadExitStatus
+    0xD6B01013,  # sceKernelGetThreadRunStatus
+    0xE0241FAA,  # sceKernelGetSystemInfo
+    0x84092FD0,  # sceKernelCheckThreadStack
+    0x36833F93,  # sceKernelChangeCurrentThreadAttr
+    0x8C57AC2A,  # sceKernelGetThreadCpuAffinityMask2
+]
+
+TI_RW_INFO = 0x000
+TI_RW_RUN = 0x080
+TI_RW_SYS = 0x0C0
+TI_RW_STATUS = 0x110
+TI_RW_SIZE = 0x120
+
+
+def build_thread_info_elf():
+    """Guest ELF for the thread information and priority queries."""
+    code = []
+    rx_relocs = []
+
+    def emit(word):
+        code.append(word & 0xFFFFFFFF)
+
+    def movw_movt_rw(rd, offset):
+        base = len(code) * 4
+        emit(arm_movw(rd, 0))
+        emit(arm_movt(rd, 0))
+        rx_relocs.append(encode_rela(0, 1, base, offset, R_ARM_MOVW_ABS_NC))
+        rx_relocs.append(encode_rela(0, 1, base + 4, offset, R_ARM_MOVT_ABS))
+
+    def call(index):
+        emit(arm_bl(len(code) * 4, TI_STUB_BASE + index * 12))
+
+    def load_rw(rd, offset):
+        movw_movt_rw(rd, offset)
+        emit(0xE5900000 | (rd << 16) | (rd << 12))
+
+    def check(bit):
+        emit(0xE3500000)             # cmp r0, #0
+        emit(0x13844000 | arm_encode_imm(bit))  # orrne r4, r4, #bit
+
+    def check_nonzero(bit):
+        emit(0xE3500000)             # cmp r0, #0
+        emit(0x03844000 | arm_encode_imm(bit))  # orreq r4, r4, #bit
+
+    def check_word(offset, value, bit):
+        movw_movt_rw(1, offset)
+        emit(0xE5910000)             # ldr r0, [r1]
+        emit(arm_movw(2, value & 0xFFFF))
+        emit(0xE1500002)             # cmp r0, r2
+        emit(0x13844000 | arm_encode_imm(bit))
+
+    emit(0xE92D4010)                 # push {r4, lr}
+    emit(arm_mov_imm(4, 0))          # mov r4, #0
+
+    # current priority is nonzero
+    call(0)
+    check_nonzero(1)
+
+    # thread info for the calling thread: size 0x80, non-empty name
+    emit(arm_mov_imm(0, 0))
+    movw_movt_rw(1, TI_RW_INFO)
+    call(1)
+    check(2)
+    check_word(TI_RW_INFO, 0x80, 4)
+    movw_movt_rw(1, TI_RW_INFO)
+    emit(0xE5D10008)                 # ldrb r0, [r1, #8]
+    check_nonzero(8)
+
+    # exit status reads back as zero for a running thread
+    emit(arm_mov_imm(0, 0))
+    movw_movt_rw(1, TI_RW_STATUS)
+    call(2)
+    check(16)
+    load_rw(0, TI_RW_STATUS)
+    check(32)
+
+    # run status: size 0x34 and a thread id in cpuInfo[0]
+    emit(arm_mov_imm(0, 0))
+    movw_movt_rw(1, TI_RW_RUN)
+    call(3)
+    check(64)
+    check_word(TI_RW_RUN, 0x34, 128)
+    load_rw(0, TI_RW_RUN + 8)
+    check_nonzero(256)
+
+    # system info: size 0x48, active CPU mask 1
+    movw_movt_rw(0, TI_RW_SYS)
+    call(4)
+    check(512)
+    check_word(TI_RW_SYS, 0x48, 1024)
+    check_word(TI_RW_SYS + 4, 1, 2048)
+
+    call(5)
+    check(4096)
+    emit(arm_mov_imm(0, 0))
+    emit(arm_mov_imm(1, 0))
+    call(6)
+    check(8192)
+    call(7)
+    emit(arm_mov_imm(1, 1))
+    emit(0xE1500001)                 # cmp r0, r1
+    emit(0x13844000 | arm_encode_imm(16384))
+
+    emit(0xE1A00004)                 # mov r0, r4
+    emit(0xE3500000)
+    emit(0x03A0002A)                 # moveq r0, #42
+    emit(0xE8BD8010)                 # pop {r4, pc}
+
+    assert len(code) * 4 <= TI_STUB_BASE, "thread info fixture code overlaps the stubs"
+
+    rx = bytearray(TI_RX_SIZE)
+    rx[:len(code) * 4] = b"".join(struct.pack("<I", w) for w in code)
+    rx[TI_LIB_NAME:TI_LIB_NAME + len(TI_LIB)] = TI_LIB
+
+    info = bytearray(MODULE_INFO_SIZE)
+    struct.pack_into("<HH", info, 0x00, 0x0000, 0x0101)
+    info[0x04:0x04 + len(MODULE_NAME)] = MODULE_NAME
+    struct.pack_into("<I", info, 0x2C, TI_IMPORT)
+    struct.pack_into("<I", info, 0x30, TI_IMPORT + IMPORT_SIZE)
+    struct.pack_into("<I", info, 0x34, 0x12345678)
+    struct.pack_into("<I", info, 0x44, 0x00000000)
+    struct.pack_into("<I", info, 0x48, 0xFFFFFFFF)
+    struct.pack_into("<I", info, 0x5C, 0x03570011)
+    rx[TI_MODINFO:TI_MODINFO + MODULE_INFO_SIZE] = info
+
+    imp = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp, 0, IMPORT_SIZE, 1, 0, len(TI_FUNCS), 0, 0)
+    struct.pack_into("<I", imp, IMP_LIBRARY_NID, TI_LIB_NID)
+    rx[TI_IMPORT:TI_IMPORT + IMPORT_SIZE] = imp
+
+    for i, nid in enumerate(TI_FUNCS):
+        struct.pack_into("<I", rx, TI_NIDS + i * 4, nid)
+
+    rx_relocs.append(encode_rela(0, 0, TI_IMPORT + IMP_LIBRARY_NAME, TI_LIB_NAME))
+    rx_relocs.append(encode_rela(0, 0, TI_IMPORT + IMP_FUNC_NID_TABLE, TI_NIDS))
+    rx_relocs.append(encode_rela(0, 0, TI_IMPORT + IMP_FUNC_ENTRY_TABLE, TI_ENTRIES))
+    for i in range(len(TI_FUNCS)):
+        rx_relocs.append(encode_rela(0, 0, TI_ENTRIES + i * 4, TI_STUB_BASE + i * 12))
+
+    rw = bytearray(TI_RW_SIZE)
+    rela = bytearray(b"".join(rx_relocs))
+    return assemble_elf(rx, rw, rela, TI_MODINFO)
+
+
 # --- SceAppUtil fixture ----------------------------------------------------
 
 APPUTIL_STUB_BASE = 0x140
@@ -2258,6 +2419,11 @@ def main():
     with open(timer_path, "wb") as f:
         f.write(build_kernel_timer_elf())
     print(f"wrote {timer_path}")
+
+    thread_path = os.path.join(out_dir, "guest_thread_info.elf")
+    with open(thread_path, "wb") as f:
+        f.write(build_thread_info_elf())
+    print(f"wrote {thread_path}")
 
     if os.path.exists(os.path.join(shader_dir, "texture_v.gxp")) and os.path.exists(
             os.path.join(shader_dir, "texture_f.gxp")):

@@ -94,6 +94,14 @@ static VitaThreadInfo *get_thread_info_for_uid(SceUID thid)
     return ti;
 }
 
+static VitaThreadInfo *get_thread_info_or_current(SceUID thid)
+{
+    if (thid == 0)
+        return SceKernelThreadMgr_get_thread_info();
+
+    return get_thread_info_for_uid(thid);
+}
+
 static void NORETURN thread_entry_wrapper(void *arg)
 {
     VitaThreadInfo *ti = arg;
@@ -102,6 +110,7 @@ static void NORETURN thread_entry_wrapper(void *arg)
     threadTlsSet(g_vita_thread_info_tls_slot_id, ti);
 
     ret = ti->entry(ti->arglen, ti->argp);
+    ti->return_status = ret;
 
     LOG("Thread 0x%x returned with: 0x%x", ti->uid, ret);
 
@@ -117,7 +126,7 @@ static void NORETURN thread_entry_wrapper(void *arg)
 }
 
 static SceUID create_thread(const char *name, SceKernelThreadEntry entry, int initPriority,
-                            SceSize stackSize)
+                            SceSize stackSize, SceUInt attr)
 {
     VitaThreadInfo *ti;
     Result res;
@@ -139,6 +148,7 @@ static SceUID create_thread(const char *name, SceKernelThreadEntry entry, int in
     ti->init_priority = initPriority;
     ti->current_priority = initPriority;
     ti->stack_size = stackSize;
+    ti->attr = attr;
     ti->vita_tls = malloc(SCE_KERNEL_TLS_SIZE);
 
     res = threadCreate(&ti->thread, thread_entry_wrapper, ti, NULL, stackSize, priority, -2);
@@ -188,7 +198,7 @@ EXPORT(SceLibKernel, 0xC5C11EE7, SceUID, sceKernelCreateThread, const char *name
        SceKernelThreadEntry entry, int initPriority, SceSize stackSize, SceUInt attr,
        int cpuAffinityMask, const SceKernelThreadOptParam *option)
 {
-    return create_thread(name, entry, initPriority, stackSize);
+    return create_thread(name, entry, initPriority, stackSize, attr);
 }
 
 EXPORT(SceThreadmgr, 0x1BBDE3D9, int, sceKernelDeleteThread, SceUID thid)
@@ -270,7 +280,7 @@ int SceKernelThreadMgr_main_entry(SceKernelThreadEntry entry, int args, void *ar
     Result res;
 
     thid = create_thread("<main>", entry, SCE_KERNEL_DEFAULT_PRIORITY_USER,
-                         SCE_KERNEL_THREAD_STACK_SIZE_DEFAULT_USER_MAIN);
+                         SCE_KERNEL_THREAD_STACK_SIZE_DEFAULT_USER_MAIN, 0);
     if (thid < 0)
         return thid;
 
@@ -603,7 +613,7 @@ EXPORT(SceLibKernel, 0x04B30CB2, int, sceIoDevctl, const char *dev, unsigned int
 EXPORT(SceLibKernel, 0x8D9C5461, int, sceKernelGetThreadInfo, SceUID thid,
        SceKernelThreadInfo *info)
 {
-    VitaThreadInfo *ti = get_thread_info_for_uid(thid);
+    VitaThreadInfo *ti = get_thread_info_or_current(thid);
 
     if (!ti)
         return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
@@ -620,6 +630,9 @@ EXPORT(SceLibKernel, 0x8D9C5461, int, sceKernelGetThreadInfo, SceUID thid,
     info->stackSize = (SceInt32)ti->stack_size;
     info->initPriority = ti->init_priority;
     info->currentPriority = ti->current_priority;
+    info->initCpuAffinityMask = 1;
+    info->currentCpuAffinityMask = 1;
+    info->exitStatus = ti->return_status;
 
     return 0;
 }
@@ -861,6 +874,151 @@ EXPORT(SceThreadmgr, 0x15C690E0, int, sceKernelCloseCond, SceUID uid)
     return 0;
 }
 
+
+EXPORT(SceLibKernel, 0xC53A9848, int, sceKernelGetThreadCurrentPriority, void)
+{
+    VitaThreadInfo *ti = SceKernelThreadMgr_get_thread_info();
+
+    return ti ? ti->current_priority : 0;
+}
+
+EXPORT(SceLibKernel, 0xD5DC26C4, int, sceKernelGetThreadExitStatus, SceUID thid, int *status)
+{
+    VitaThreadInfo *ti = get_thread_info_or_current(thid);
+
+    if (!ti)
+        return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
+    if (!status)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    *status = ti->return_status;
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0xD3210C08, int, _sceKernelGetThreadExitStatus, SceUID thid, int *status)
+{
+    return sceKernelGetThreadExitStatus(thid, status);
+}
+
+EXPORT(SceLibKernel, 0xD6B01013, int, sceKernelGetThreadRunStatus, SceUID thid,
+       SceKernelThreadRunStatus *status)
+{
+    VitaThreadInfo *ti = thid ? get_thread_info_for_uid(thid) : SceKernelThreadMgr_get_thread_info();
+
+    if (!status)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    if (!ti)
+        return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
+
+    memset(status, 0, sizeof(*status));
+    status->size = sizeof(*status);
+    status->cpuInfo[0].processId = 1;
+    status->cpuInfo[0].threadId = ti->uid;
+    status->cpuInfo[0].priority = ti->current_priority;
+
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0xC7FB5497, int, _sceKernelGetThreadRunStatus, SceUID thid,
+       SceKernelThreadRunStatus *status)
+{
+    return sceKernelGetThreadRunStatus(thid, status);
+}
+
+EXPORT(SceLibKernel, 0xE0241FAA, int, sceKernelGetSystemInfo, SceKernelSystemInfo *info)
+{
+    if (!info)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    memset(info, 0, sizeof(*info));
+    info->size = sizeof(*info);
+    info->activeCpuMask = 1;
+
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0x80544E0C, int, _sceKernelGetSystemInfo, SceKernelSystemInfo *info)
+{
+    return sceKernelGetSystemInfo(info);
+}
+
+EXPORT(SceLibKernel, 0x84092FD0, int, sceKernelCheckThreadStack, void)
+{
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0x4F8A3DA0, int, sceKernelGetThreadStackFreeSize, SceUID thid)
+{
+    VitaThreadInfo *ti = get_thread_info_or_current(thid);
+
+    if (!ti)
+        return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
+
+    return ti->stack_size > 0x1000 ? (int)(ti->stack_size - 0x1000) : 0;
+}
+
+EXPORT(SceLibKernel, 0x36833F93, int, sceKernelChangeCurrentThreadAttr, SceUInt clear_attr,
+       SceUInt set_attr)
+{
+    VitaThreadInfo *ti = SceKernelThreadMgr_get_thread_info();
+
+    if (!ti)
+        return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
+
+    ti->attr = (ti->attr & ~clear_attr) | set_attr;
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0xBD0139F2, int, sceKernelChangeThreadPriority, SceUID thid, int priority)
+{
+    VitaThreadInfo *ti = get_thread_info_or_current(thid);
+
+    if (!ti)
+        return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
+
+    ti->current_priority = priority;
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0xF1AE5654, int, sceKernelGetThreadCpuAffinityMask, SceUID thid)
+{
+    return get_thread_info_or_current(thid) ? 1 : SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
+}
+
+EXPORT(SceThreadmgr, 0x212E6C35, int, _sceKernelGetThreadCpuAffinityMask, SceUID thid)
+{
+    return sceKernelGetThreadCpuAffinityMask(thid);
+}
+
+EXPORT(SceLibKernel, 0x8C57AC2A, int, sceKernelGetThreadCpuAffinityMask2, void)
+{
+    return 1;
+}
+
+EXPORT(SceThreadmgr, 0x15129174, int, sceKernelChangeThreadCpuAffinityMask, SceUID thid,
+       int mask)
+{
+    (void)mask;
+    return get_thread_info_or_current(thid) ? 1 : SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
+}
+
+EXPORT(SceLibKernel, 0xC54941ED, int, sceKernelWaitThreadEndCB, SceUID thid, int *stat,
+       SceUInt *timeout)
+{
+    return sceKernelWaitThreadEnd(thid, stat, timeout);
+}
+
+EXPORT(SceThreadmgr, 0xFA3D4491, int, _sceKernelWaitThreadEndCB, SceUID thid, int *stat,
+       SceUInt *timeout)
+{
+    return sceKernelWaitThreadEnd(thid, stat, timeout);
+}
+
+EXPORT(SceThreadmgr, 0x0373C5E3, int, sceKernelWaitThreadEndCB_089, SceUID thid, int *stat,
+       SceUInt *timeout)
+{
+    return sceKernelWaitThreadEnd(thid, stat, timeout);
+}
 
 DECLARE_LIBRARY(SceThreadmgr, 0x859a24b1);
 DECLARE_LIBRARY(SceThreadmgrCoredumpTime, 0x5E8D0E22);
