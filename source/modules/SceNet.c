@@ -7,6 +7,9 @@
  */
 
 #include <arpa/inet.h>
+#include <stdbool.h>
+#include <netdb.h>
+#include <pthread.h>
 #include <errno.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -397,3 +400,136 @@ EXPORT(SceNet, 0xEEC6D75F, int, sceNetEtherStrton, const char *string, SceNetEth
 }
 
 DECLARE_LIBRARY(SceNet, 0x6bf8b2a2);
+
+/* ------------------------------------------------------------- resolver */
+
+typedef struct {
+    bool used;
+    int last_error;
+} ResolverState;
+
+static ResolverState g_resolvers[8];
+static pthread_mutex_t g_resolver_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static ResolverState *resolver_get(int rid)
+{
+    if (rid < 0 || rid >= (int)(sizeof(g_resolvers) / sizeof(g_resolvers[0])))
+        return NULL;
+
+    return g_resolvers[rid].used ? &g_resolvers[rid] : NULL;
+}
+
+EXPORT(SceNet, 0x6DA29319, int, sceNetResolverCreate, const char *name,
+       SceNetResolverParam *param, int flags)
+{
+    (void)name;
+    (void)param;
+    (void)flags;
+
+    pthread_mutex_lock(&g_resolver_lock);
+    for (int i = 0; i < (int)(sizeof(g_resolvers) / sizeof(g_resolvers[0])); i++) {
+        if (!g_resolvers[i].used) {
+            g_resolvers[i].used = true;
+            g_resolvers[i].last_error = 0;
+            pthread_mutex_unlock(&g_resolver_lock);
+            return i;
+        }
+    }
+    pthread_mutex_unlock(&g_resolver_lock);
+
+    return -1;
+}
+
+EXPORT(SceNet, 0x3559F098, int, sceNetResolverDestroy, int rid)
+{
+    ResolverState *resolver = resolver_get(rid);
+
+    if (!resolver)
+        return -1;
+
+    pthread_mutex_lock(&g_resolver_lock);
+    resolver->used = false;
+    pthread_mutex_unlock(&g_resolver_lock);
+
+    return 0;
+}
+
+EXPORT(SceNet, 0x1EB11857, int, sceNetResolverStartNtoa, int rid, const char *hostname,
+       SceNetInAddr *addr, int timeout, int retry, int flags)
+{
+    ResolverState *resolver = resolver_get(rid);
+    struct addrinfo hints, *result = NULL;
+
+    (void)timeout;
+    (void)retry;
+    (void)flags;
+
+    if (!resolver || !hostname || !addr)
+        return -1;
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+
+    if (getaddrinfo(hostname, NULL, &hints, &result) != 0 || !result) {
+        resolver->last_error = -1;
+        return -1;
+    }
+
+    addr->s_addr = ((struct sockaddr_in *)result->ai_addr)->sin_addr.s_addr;
+    freeaddrinfo(result);
+
+    return 0;
+}
+
+EXPORT(SceNet, 0x0424AE26, int, sceNetResolverStartAton, int rid, const SceNetInAddr *addr,
+       char *hostname, int len, int timeout, int retry, int flags)
+{
+    ResolverState *resolver = resolver_get(rid);
+    struct sockaddr_in in;
+
+    (void)timeout;
+    (void)retry;
+    (void)flags;
+
+    if (!resolver || !addr || !hostname || len <= 0)
+        return -1;
+
+    memset(&in, 0, sizeof(in));
+    in.sin_family = AF_INET;
+    in.sin_addr.s_addr = addr->s_addr;
+
+    if (getnameinfo((const struct sockaddr *)&in, sizeof(in), hostname, (socklen_t)len, NULL, 0,
+                    0) != 0) {
+        resolver->last_error = -1;
+        return -1;
+    }
+
+    return 0;
+}
+
+EXPORT(SceNet, 0x874EF500, int, sceNetResolverGetError, int rid, int *result)
+{
+    ResolverState *resolver = resolver_get(rid);
+
+    if (!resolver || !result)
+        return -1;
+
+    *result = resolver->last_error;
+    return 0;
+}
+
+EXPORT(SceNet, 0x38EBBD57, int, sceNetResolverAbort, int rid, int flags)
+{
+    (void)rid;
+    (void)flags;
+
+    return 0;
+}
+
+EXPORT(SceNet, 0xFEC1166D, int, sceNetClearDnsCache, int flags)
+{
+    (void)flags;
+
+    return 0;
+}
