@@ -46,6 +46,10 @@ static RwLock g_vita_thread_infos_lock;
 typedef struct {
     SceUID uid;
     char name[32];
+    int init_count;
+    int current_count;
+    int waiting;
+    SceUID owner;
     pthread_mutex_t mutex;
 } VitaMutexInfo;
 
@@ -804,6 +808,10 @@ EXPORT(SceLibKernel, 0xED53334A, SceUID, sceKernelCreateMutex, const char *name,
         return SCE_KERNEL_ERROR_NO_MEMORY;
 
     info->uid = SceSysmem_get_next_uid();
+    info->init_count = initCount;
+    info->current_count = initCount;
+    if (initCount > 0)
+        info->owner = current_thread_uid();
     if (name)
         strncpy(info->name, name, sizeof(info->name) - 1);
 
@@ -893,8 +901,12 @@ EXPORT(SceLibKernel, 0x1D8D7945, int, sceKernelLockMutex, SceUID mutexid, int lo
     if (lockCount < 0)
         return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
 
+    info->waiting += lockCount;
     for (int i = 0; i < lockCount; i++)
         pthread_mutex_lock(&info->mutex);
+    info->waiting -= lockCount;
+    info->current_count += lockCount;
+    info->owner = current_thread_uid();
 
     return 0;
 }
@@ -929,6 +941,8 @@ EXPORT(SceLibKernel, 0x72FC1F54, int, sceKernelTryLockMutex, SceUID mutexid, int
     for (int i = 0; i < lockCount; i++) {
         if (pthread_mutex_trylock(&info->mutex) != 0)
             return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
+        info->current_count++;
+        info->owner = current_thread_uid();
     }
 
     return 0;
@@ -945,8 +959,67 @@ EXPORT(SceThreadmgr, 0x1A372EC8, int, sceKernelUnlockMutex, SceUID mutexid, int 
 
     for (int i = 0; i < unlockCount; i++)
         pthread_mutex_unlock(&info->mutex);
+    if (unlockCount > info->current_count)
+        info->current_count = 0;
+    else
+        info->current_count -= unlockCount;
+    if (info->current_count == 0)
+        info->owner = 0;
 
     return 0;
+}
+
+EXPORT(SceLibKernel, 0x9A6C43CA, int, sceKernelGetMutexInfo, SceUID mutexid,
+       SceKernelMutexInfo *info)
+{
+    VitaMutexInfo *mutex = get_mutex_info(mutexid);
+
+    if (!mutex)
+        return SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID;
+    if (!info)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    memset(info, 0, sizeof(*info));
+    info->size = sizeof(*info);
+    info->mutexId = mutex->uid;
+    memcpy(info->name, mutex->name, sizeof(info->name));
+    info->attr = 0;
+    info->initCount = mutex->init_count;
+    info->currentCount = mutex->current_count;
+    info->currentOwnerId = mutex->owner;
+    info->numWaitThreads = mutex->waiting;
+
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0xE8CC3DF0, int, _sceKernelGetMutexInfo, SceUID mutexid,
+       SceKernelMutexInfo *info)
+{
+    return sceKernelGetMutexInfo(mutexid, info);
+}
+
+EXPORT(SceLibKernel, 0x2144890D, int, sceKernelCancelMutex, SceUID mutexid, int new_count,
+       int *num_wait_threads)
+{
+    VitaMutexInfo *mutex = get_mutex_info(mutexid);
+
+    if (!mutex)
+        return SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID;
+    if (new_count < 0)
+        return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
+    if (num_wait_threads)
+        *num_wait_threads = mutex->waiting;
+    mutex->current_count = new_count;
+    if (new_count == 0)
+        mutex->owner = 0;
+
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0x1B74CB89, int, _sceKernelCancelMutex, SceUID mutexid, int new_count,
+       int *num_wait_threads)
+{
+    return sceKernelCancelMutex(mutexid, new_count, num_wait_threads);
 }
 
 EXPORT(SceLibKernel, 0x0A10C1C8, SceUID, sceKernelCreateMsgPipe, const char *name, int type,
