@@ -144,6 +144,11 @@ typedef struct HostGles {
 
     GLuint color_texture;
     GLuint framebuffer;
+
+    /* Contexts created for guest threads other than the creating one. */
+    EGLContext *thread_contexts;
+    EGLSurface *thread_surfaces;
+    unsigned int thread_context_count;
 } HostGles;
 
 /* Returns the GLES implementation, or NULL when the null backend is active. */

@@ -20,6 +20,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include "config.h"
 #include "fs.h"
 #include "gfx.h"
 #include "gxm/texture.h"
@@ -416,17 +417,39 @@ static GLboolean gxm_attribute_normalized(SceGxmAttributeFormat format)
            format == SCE_GXM_ATTRIBUTE_FORMAT_U16N || format == SCE_GXM_ATTRIBUTE_FORMAT_S16N;
 }
 
+/* Keeps the GLSL that the driver rejected, for post-mortem inspection. */
+static void gxm_dump_failed_shader(const char *source, const char *name)
+{
+    char path[PATH_MAX];
+    FILE *file;
+
+    if (snprintf(path, sizeof(path), "%s/failed_%s.glsl", VITA2NATIVE_DUMP_SHADER_PATH, name) >=
+        (int)sizeof(path))
+        return;
+
+    file = fopen(path, "wb");
+    if (!file)
+        return;
+
+    fwrite(source, 1, strlen(source), file);
+    fclose(file);
+}
+
 static void gxm_compile_shader(GLuint shader, const char *source, const char *name)
 {
     GLint ok = 0;
+    GLsizei length = 0;
     char log[1024];
 
+    memset(log, 0, sizeof(log));
     g_gl->glShaderSource(shader, 1, &source, NULL);
     g_gl->glCompileShader(shader);
     g_gl->glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
     if (!ok) {
-        g_gl->glGetShaderInfoLog(shader, sizeof(log), NULL, log);
-        LOG("SceGxm: %s shader compilation failed:\n%s", name, log);
+        g_gl->glGetShaderInfoLog(shader, sizeof(log), &length, log);
+        LOG("SceGxm: %s shader compilation failed (log %d bytes):\n%s", name, (int)length,
+            log);
+        gxm_dump_failed_shader(source, name);
     }
 }
 
@@ -1003,6 +1026,16 @@ static void gxm_flush_state(SceGxmContext *context, GLuint program, uint32_t max
 
     g_gl->glUseProgram(program);
 
+    /* Contexts are created on whichever thread runs the guest, which may not be
+       the one that created the device; make sure the buffers exist regardless
+       of whether GL was current when the context was instantiated. */
+    if (g_gl->glGenBuffers) {
+        if (!context->ubo[0] || !context->ubo[1])
+            g_gl->glGenBuffers(2, context->ubo);
+        if (!context->ssbo[0] || !context->ssbo[1])
+            g_gl->glGenBuffers(2, context->ssbo);
+    }
+
     /* Render-info uniform buffers. */
     {
         struct GXMRenderVertUniformBlock vert = {
@@ -1310,6 +1343,10 @@ EXPORT(SceGxm, 0xE84CE5B4, int, sceGxmCreateContext, const SceGxmContextParams *
 {
     SceGxmContext *ctx;
 
+    /* GL objects are created here, and the guest thread is not the thread that
+       created the device. */
+    host_gpu_thread_enter(g_device);
+
     if (!params || !context)
         return SCE_GXM_ERROR_INVALID_POINTER;
 
@@ -1461,6 +1498,8 @@ EXPORT(SceGxm, 0xB7BBA6D5, int, sceGxmShaderPatcherCreateVertexProgram,
 {
     SceGxmVertexProgram *vp = calloc(1, sizeof(*vp));
 
+    host_gpu_thread_enter(g_device);
+
     if (!vp)
         return SCE_KERNEL_ERROR_NO_MEMORY;
 
@@ -1510,6 +1549,8 @@ EXPORT(SceGxm, 0x4ED2E49D, int, sceGxmShaderPatcherCreateFragmentProgram,
        SceGxmFragmentProgram **fragmentProgram)
 {
     SceGxmFragmentProgram *fp = calloc(1, sizeof(*fp));
+
+    host_gpu_thread_enter(g_device);
 
     (void)shaderPatcher;
     (void)vertexProgram;
@@ -1575,6 +1616,8 @@ EXPORT(SceGxm, 0x207AF96B, int, sceGxmCreateRenderTarget, const SceGxmRenderTarg
        SceGxmRenderTarget **renderTarget)
 {
     SceGxmRenderTarget *rt;
+
+    host_gpu_thread_enter(g_device);
 
     if (!g_gxm_initialized)
         return SCE_GXM_ERROR_UNINITIALIZED;
@@ -2632,6 +2675,8 @@ EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsign
     (void)validRegion;
     (void)vertexSyncObject;
 
+    host_gpu_thread_enter(g_device);
+
     if (!context)
         return SCE_GXM_ERROR_INVALID_POINTER;
     if (context->deferred)
@@ -2851,6 +2896,8 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
     (void)vertexNotification;
     (void)fragmentNotification;
 
+    host_gpu_thread_enter(g_device);
+
     if (!context)
         return SCE_GXM_ERROR_INVALID_POINTER;
     if (context->deferred)
@@ -2934,6 +2981,11 @@ EXPORT(SceGxm, 0xEC5C26B5, int, sceGxmDisplayQueueAddEntry, SceGxmSyncObject *ol
 {
     (void)oldBuffer;
     (void)newBuffer;
+
+    /* The callback is where libvita2d blits the render target to the front
+       buffer, so it runs GL work on this thread. */
+    host_gpu_thread_enter(g_device);
+
     if (g_display_callback && callbackData)
         g_display_callback((void *)callbackData);
     return 0;
@@ -3918,6 +3970,8 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
     uint32_t max_index = 0;
     SceGxmPolygonMode polygon_mode;
 
+    host_gpu_thread_enter(g_device);
+
     if (context->deferred) {
         if (!context->command_list_active)
             return SCE_GXM_ERROR_NOT_WITHIN_COMMAND_LIST;
@@ -3950,6 +4004,8 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
                 max_index = index;
         }
 
+        while (g_gl->glGetError() != GL_NO_ERROR) {
+        }
         gxm_flush_state(context, program, max_index);
     }
 
@@ -4489,6 +4545,8 @@ EXPORT(SceGxm, 0x249D5B00, int, sceGxmCreateDeferredContext,
        const SceGxmDeferredContextParams *params, SceGxmContext **context)
 {
     SceGxmContext *ctx;
+
+    host_gpu_thread_enter(g_device);
 
     if (!params || !context)
         return SCE_GXM_ERROR_INVALID_POINTER;

@@ -8,12 +8,119 @@
  * guest memory.
  */
 #include <dlfcn.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "host_gfx_gl.h"
 #include "host_gfx_internal.h"
+
+/*
+ * EGL contexts are bound to the thread that made them current. Guest threads
+ * are host threads, so every guest thread that renders needs its own context;
+ * contexts created here share all objects with the primary context.
+ */
+typedef struct {
+    HostGles *gles;
+    EGLContext context;
+    EGLSurface surface;  /* this thread's own pbuffer */
+    EGLSurface bound;    /* surface currently made current, if any */
+    bool window;         /* true when this thread owns the window surface */
+} GlThreadState;
+
+static _Thread_local GlThreadState g_thread_state;
+static pthread_mutex_t g_thread_contexts_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static const EGLint g_thread_context_attribs[] = {
+    EGL_CONTEXT_CLIENT_VERSION, 3,
+    EGL_NONE,
+};
+
+static const EGLint g_thread_pbuffer_attribs[] = {
+    EGL_WIDTH,  1,
+    EGL_HEIGHT, 1,
+    EGL_NONE,
+};
+
+static void gl_remember_thread_context(HostGles *g, EGLContext context, EGLSurface surface)
+{
+    EGLContext *contexts;
+    EGLSurface *surfaces;
+
+    pthread_mutex_lock(&g_thread_contexts_lock);
+    contexts = realloc(g->thread_contexts,
+                       (g->thread_context_count + 1) * sizeof(*g->thread_contexts));
+    surfaces = realloc(g->thread_surfaces,
+                       (g->thread_context_count + 1) * sizeof(*g->thread_surfaces));
+    if (contexts && surfaces) {
+        g->thread_contexts = contexts;
+        g->thread_surfaces = surfaces;
+        g->thread_contexts[g->thread_context_count] = context;
+        g->thread_surfaces[g->thread_context_count] = surface;
+        g->thread_context_count++;
+    } else {
+        free(contexts);
+        free(surfaces);
+    }
+    pthread_mutex_unlock(&g_thread_contexts_lock);
+}
+
+static EGLContext gl_thread_context(HostGles *g)
+{
+    EGLContext context;
+    EGLSurface surface;
+
+    if (g_thread_state.gles == g && g_thread_state.context != EGL_NO_CONTEXT)
+        return g_thread_state.context;
+
+    context = g->eglCreateContext(g->display, g->egl_config, g->context,
+                                  g_thread_context_attribs);
+    if (context == EGL_NO_CONTEXT) {
+        fprintf(stderr, "vita2native: eglCreateContext(thread) failed: 0x%x\n",
+                g->eglGetError());
+        return EGL_NO_CONTEXT;
+    }
+
+    /*
+     * Every context needs a drawing surface of its own: a pbuffer can only be
+     * current on one context at a time, so the primary pbuffer cannot be
+     * reused by other threads.
+     */
+    surface = g->eglCreatePbufferSurface(g->display, g->egl_config, g_thread_pbuffer_attribs);
+    if (surface == EGL_NO_SURFACE) {
+        fprintf(stderr, "vita2native: eglCreatePbufferSurface(thread) failed: 0x%x\n",
+                g->eglGetError());
+        g->eglDestroyContext(g->display, context);
+        return EGL_NO_CONTEXT;
+    }
+
+    gl_remember_thread_context(g, context, surface);
+    g_thread_state.gles = g;
+    g_thread_state.context = context;
+    g_thread_state.surface = surface;
+    g_thread_state.bound = EGL_NO_SURFACE;
+    g_thread_state.window = false;
+
+    return context;
+}
+
+static int gl_thread_bind(HostGles *g, EGLSurface surface)
+{
+    EGLContext context = gl_thread_context(g);
+
+    if (context == EGL_NO_CONTEXT)
+        return -1;
+    if (g_thread_state.bound == surface)
+        return 0;
+    if (!g->eglMakeCurrent(g->display, surface, surface, context)) {
+        fprintf(stderr, "vita2native: eglMakeCurrent(thread) failed: 0x%x\n", g->eglGetError());
+        return -1;
+    }
+
+    g_thread_state.bound = surface;
+    return 0;
+}
 
 static void *open_first(const char *const *names)
 {
@@ -62,6 +169,14 @@ static void gles_destroy_impl(HostGles *g)
             g->glDeleteVertexArrays(1, &g->present_vao);
 
         g->eglMakeCurrent(g->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        for (unsigned int i = 0; i < g->thread_context_count; i++) {
+            if (g->thread_surfaces[i] != EGL_NO_SURFACE)
+                g->eglDestroySurface(g->display, g->thread_surfaces[i]);
+            if (g->thread_contexts[i] != EGL_NO_CONTEXT)
+                g->eglDestroyContext(g->display, g->thread_contexts[i]);
+        }
+        free(g->thread_contexts);
+        free(g->thread_surfaces);
         if (g->window_surface != EGL_NO_SURFACE)
             g->eglDestroySurface(g->display, g->window_surface);
         if (g->surface != EGL_NO_SURFACE)
@@ -239,6 +354,12 @@ HostGpuDevice host_gfx_gl_create(const HostGpuConfig *config)
         fprintf(stderr, "vita2native: eglMakeCurrent failed: 0x%x\n", g->eglGetError());
         goto fail;
     }
+
+    g_thread_state.gles = g;
+    g_thread_state.context = g->context;
+    g_thread_state.surface = g->surface;
+    g_thread_state.bound = g->surface;
+    g_thread_state.window = false;
 
     g->gles_lib = open_first(gles_names);
     if (!g->gles_lib)
@@ -469,11 +590,13 @@ int host_gfx_gl_attach_window(HostGpuDevice device, void *native_window)
         return -1;
     }
 
-    if (!g->eglMakeCurrent(g->display, surface, surface, g->context)) {
+    if (gl_thread_bind(g, surface) != 0) {
         fprintf(stderr, "vita2native: eglMakeCurrent(window) failed: 0x%x\n", g->eglGetError());
         g->eglDestroySurface(g->display, surface);
         return -1;
     }
+
+    g_thread_state.window = true;
 
     if (g->window_surface != EGL_NO_SURFACE)
         g->eglDestroySurface(g->display, g->window_surface);
@@ -485,6 +608,22 @@ int host_gfx_gl_attach_window(HostGpuDevice device, void *native_window)
     return 0;
 }
 
+void host_gfx_gl_thread_enter(HostGpuDevice device)
+{
+    HostGles *g = device ? device->impl : NULL;
+
+    if (!g || g->display == EGL_NO_DISPLAY)
+        return;
+
+    if (gl_thread_context(g) == EGL_NO_CONTEXT)
+        return;
+
+    if (g_thread_state.window && g->window_surface != EGL_NO_SURFACE)
+        gl_thread_bind(g, g->window_surface);
+    else
+        gl_thread_bind(g, g_thread_state.surface);
+}
+
 void host_gfx_gl_detach_window(HostGpuDevice device)
 {
     HostGles *g = device->impl;
@@ -492,7 +631,8 @@ void host_gfx_gl_detach_window(HostGpuDevice device)
     if (!g || g->window_surface == EGL_NO_SURFACE)
         return;
 
-    g->eglMakeCurrent(g->display, g->surface, g->surface, g->context);
+    gl_thread_bind(g, g_thread_state.surface);
+    g_thread_state.window = false;
     g->eglDestroySurface(g->display, g->window_surface);
     g->window_surface = EGL_NO_SURFACE;
 }

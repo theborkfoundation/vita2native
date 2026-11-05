@@ -47,6 +47,16 @@ int host_gpu_read_pixels(HostGpuDevice device, int x, int y, int width, int heig
 void host_gpu_finish(HostGpuDevice device);
 
 /*
+ * Establishes a GLES context for the calling thread.
+ *
+ * EGL contexts are per-thread, and guest threads are host threads, so any
+ * guest thread that issues GXM calls must call this first. Threads other than
+ * the one that created the device get a context that shares objects (textures,
+ * buffers, shaders) with the primary one. Calling it repeatedly is cheap.
+ */
+void host_gpu_thread_enter(HostGpuDevice device);
+
+/*
  * Presentation.
  *
  * attach_window() takes a native window handle (an X11 Window, or a Wayland

@@ -1,12 +1,115 @@
 #include <psp2/display.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "host.h"
+#include "log.h"
 #include "module.h"
 #include "modules/SceDisplay.h"
 #include "util.h"
 
 static SceDisplayFrameBuf g_vita_conf_fb;
 static int g_vcount;
+static unsigned int g_frame_count;
+
+/*
+ * Headless frame capture. Set VITA2NATIVE_DUMP_FRAME to a path, optionally
+ * VITA2NATIVE_DUMP_FRAME_AT to the (zero-based) swap index to capture, to get
+ * a BMP of the guest framebuffer. This is how real homebrew output is checked
+ * without a window.
+ */
+static void put_u16(unsigned char *p, unsigned int value)
+{
+    p[0] = (unsigned char)value;
+    p[1] = (unsigned char)(value >> 8);
+}
+
+static void put_u32(unsigned char *p, uint32_t value)
+{
+    p[0] = (unsigned char)value;
+    p[1] = (unsigned char)(value >> 8);
+    p[2] = (unsigned char)(value >> 16);
+    p[3] = (unsigned char)(value >> 24);
+}
+
+static void dump_framebuffer(const SceDisplayFrameBuf *fb)
+{
+    static const char *path;
+    static long capture_at = -1;
+    static bool initialised;
+    const uint8_t *base;
+    unsigned int width;
+    unsigned int height;
+    unsigned int pitch;
+    unsigned int row_size;
+    unsigned char header[54];
+    unsigned char *row;
+    FILE *file;
+
+    if (!initialised) {
+        const char *at = getenv("VITA2NATIVE_DUMP_FRAME_AT");
+
+        initialised = true;
+        path = getenv("VITA2NATIVE_DUMP_FRAME");
+        if (at)
+            capture_at = strtol(at, NULL, 0);
+    }
+
+    if (!path || !fb || !fb->base)
+        return;
+    if (capture_at >= 0 && (long)g_frame_count != capture_at)
+        return;
+
+    width  = fb->width;
+    height = fb->height;
+    pitch  = fb->pitch;
+    if (width == 0 || height == 0 || pitch < width)
+        return;
+
+    file = fopen(path, "wb");
+    if (!file)
+        return;
+
+    base = fb->base;
+    row_size = (width * 3 + 3) & ~3u;
+    row = calloc(1, row_size);
+    if (!row) {
+        fclose(file);
+        return;
+    }
+
+    memset(header, 0, sizeof(header));
+    header[0] = 'B';
+    header[1] = 'M';
+    put_u32(header + 2, 54u + (uint32_t)(row_size * height));
+    put_u32(header + 10, 54);
+    put_u32(header + 14, 40);
+    put_u32(header + 18, width);
+    put_u32(header + 22, height);
+    put_u16(header + 26, 1);
+    put_u16(header + 28, 24);
+    put_u32(header + 34, (uint32_t)(row_size * height));
+    fwrite(header, 1, sizeof(header), file);
+
+    for (unsigned int y = height; y-- > 0;) {
+        const uint32_t *src = (const uint32_t *)(base + (size_t)y * pitch * 4);
+
+        for (unsigned int x = 0; x < width; x++) {
+            uint32_t pixel = src[x];
+
+            /* A8B8G8R8, the only format the guest can present. */
+            row[x * 3 + 0] = (unsigned char)(pixel & 0xFF);
+            row[x * 3 + 1] = (unsigned char)((pixel >> 8) & 0xFF);
+            row[x * 3 + 2] = (unsigned char)((pixel >> 16) & 0xFF);
+        }
+        fwrite(row, 1, row_size, file);
+    }
+
+    free(row);
+    fclose(file);
+    LOG("SceDisplay: captured frame %u to %s", g_frame_count, path);
+}
 
 EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayFrameBuf *pParam,
        SceDisplaySetBufSync sync)
@@ -15,6 +118,10 @@ EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayF
 
     if (pParam)
         g_vita_conf_fb = *pParam;
+
+    if (pParam)
+        dump_framebuffer(pParam);
+    g_frame_count++;
 
     return 0;
 }

@@ -210,6 +210,9 @@ EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayF
 
     (void)sync;
 
+    /* Presentation walks the GLES path on the calling thread. */
+    host_gpu_thread_enter(g_gpu_device);
+
     if (!pParam) {
         pthread_mutex_lock(&g_lock);
         memset(&g_vita_conf_fb, 0, sizeof(g_vita_conf_fb));

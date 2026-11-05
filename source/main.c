@@ -27,6 +27,7 @@
 #include "modules/SceTouch.h"
 
 #if defined(__arm__)
+#include <execinfo.h>
 #include <signal.h>
 #include <sys/auxv.h>
 #include <ucontext.h>
@@ -41,6 +42,31 @@ static void check_host_cpu(void)
     if (!(getauxval(AT_HWCAP) & HWCAP_NEON))
         fatal_error("This CPU does not support NEON.",
                     "A 32-bit ARMv7-A CPU with NEON is required to run Vita code.");
+}
+
+/* Prints the mappings around the faulting address; the guest runs inside a
+   host process, so this is the only reliable way to tell which module or
+   allocation the fault belongs to. */
+static void dump_maps_around(unsigned long address)
+{
+    static const char header[] = "vita2native: mappings around the fault:\n";
+    char line[512];
+    int printed = 0;
+    FILE *maps = fopen("/proc/self/maps", "r");
+
+    (void)address;
+
+    if (!maps)
+        return;
+
+    write(STDERR_FILENO, header, sizeof(header) - 1);
+    while (fgets(line, sizeof(line), maps)) {
+        if (printed++ > 400)
+            break;
+        write(STDERR_FILENO, line, strlen(line));
+    }
+
+    fclose(maps);
 }
 
 static void guest_signal_handler(int signal, siginfo_t *info, void *context)
@@ -58,6 +84,15 @@ static void guest_signal_handler(int signal, siginfo_t *info, void *context)
                       info ? (unsigned long)info->si_addr : 0UL);
     if (length > 0)
         write(STDERR_FILENO, message, (size_t)length);
+
+    dump_maps_around(info ? (unsigned long)info->si_addr : 0UL);
+
+    {
+        void *frames[24];
+        int count = backtrace(frames, (int)ARRAY_SIZE(frames));
+
+        backtrace_symbols_fd(frames, count, STDERR_FILENO);
+    }
 
     _exit(128 + signal);
 }

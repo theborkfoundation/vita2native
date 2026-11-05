@@ -138,6 +138,11 @@ target_link_libraries(vita2native PRIVATE
     m
 )
 
+# Keep symbols in the executable so the guest crash handler can print a useful
+# backtrace.
+target_link_options(vita2native PRIVATE -rdynamic)
+set_target_properties(vita2native PROPERTIES ENABLE_EXPORTS ON)
+
 # Do not use --gc-sections here: the export registry relies on
 # __start_/__stop_ symbols for linker sections, and lld may garbage-collect
 # them unless -z nostart-stop-gc is used.
@@ -167,6 +172,17 @@ if(BUILD_TESTING)
     target_compile_definitions(gfx_smoke PRIVATE _GNU_SOURCE=1)
     target_link_libraries(gfx_smoke PRIVATE ${CMAKE_DL_LIBS} m)
     add_test(NAME gfx_smoke COMMAND gfx_smoke)
+
+    add_executable(gl_thread_smoke
+        tests/gl_thread_smoke.c
+        source/host/host_gfx.c
+        source/host/host_gfx_gl.c
+        source/host/host_gfx_null.c
+    )
+    target_include_directories(gl_thread_smoke PRIVATE include source/host external/khronos/include)
+    target_compile_definitions(gl_thread_smoke PRIVATE _GNU_SOURCE=1)
+    target_link_libraries(gl_thread_smoke PRIVATE pthread ${CMAKE_DL_LIBS} m)
+    add_test(NAME gl_thread_smoke COMMAND gl_thread_smoke)
 
     add_executable(egl_window_smoke
         tests/egl_window_smoke.c

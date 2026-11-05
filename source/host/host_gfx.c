@@ -96,6 +96,14 @@ void host_gpu_finish(HostGpuDevice device)
         host_gfx_gl_finish(device);
 }
 
+void host_gpu_thread_enter(HostGpuDevice device)
+{
+    if (!device || device->backend != HOST_GPU_BACKEND_GLES)
+        return;
+
+    host_gfx_gl_thread_enter(device);
+}
+
 int host_gpu_attach_window(HostGpuDevice device, void *native_window)
 {
     if (!device || device->backend != HOST_GPU_BACKEND_GLES)
