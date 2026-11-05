@@ -408,12 +408,12 @@ EXPORT(SceAppUtil, 0x9651B941, int, sceAppUtilPhotoUmount, void)
     return 0;
 }
 
-EXPORT(SceAppUtil, 0x0AA56143, int, sceAppUtilCacheMount, void)
+EXPORT(SceAppUtilCache, 0x0AA56143, int, sceAppUtilCacheMount, void)
 {
     return 0;
 }
 
-EXPORT(SceAppUtil, 0x72D26BF4, int, sceAppUtilCacheUmount, void)
+EXPORT(SceAppUtilCache, 0x72D26BF4, int, sceAppUtilCacheUmount, void)
 {
     return 0;
 }
@@ -492,3 +492,93 @@ EXPORT(SceAppUtil, 0x96F478D6, int, sceAppUtilBgdlGetStatus, SceAppUtilBgdlStatu
 }
 
 DECLARE_LIBRARY(SceAppUtil, 0x48e01d74);
+DECLARE_LIBRARY(SceAppUtilCache, 0xe96b941b);
+
+/*
+ * The remaining SceAppUtil surface: app-event parsing (LiveArea, NP, Near,
+ * Teleport, ...), DRM/addcont mounts, browser cookies and the PSP save data
+ * bridge. None of those exist on this host, so they report "not available"
+ * instead of pretending to work - but they resolve, so titles that merely
+ * probe them keep running.
+ */
+
+EXPORT(SceAppUtil, 0xC97D5D9E, int, sceAppUtilAddCookieWebBrowser, void *param)
+{
+    (void)param;
+    return SCE_APPUTIL_ERROR_PARAMETER;
+}
+
+EXPORT(SceAppUtil, 0x4FAAD133, int, sceAppUtilResetCookieWebBrowser, void)
+{
+    return 0;
+}
+
+EXPORT(SceAppUtil, 0x53B2C020, int, sceAppUtilAddcontMount, void *param)
+{
+    (void)param;
+    return SCE_APPUTIL_ERROR_PARAMETER;
+}
+
+EXPORT(SceAppUtil, 0x1B36AF8C, int, sceAppUtilAddcontUmount, void *param)
+{
+    (void)param;
+    return 0;
+}
+
+EXPORT(SceAppUtil, 0x2DB7BE3B, int, sceAppUtilDrmOpen, void *param)
+{
+    (void)param;
+    return SCE_APPUTIL_ERROR_PARAMETER;
+}
+
+EXPORT(SceAppUtil, 0x6A140498, int, sceAppUtilDrmClose, void *param)
+{
+    (void)param;
+    return SCE_APPUTIL_ERROR_PARAMETER;
+}
+
+EXPORT(SceAppUtil, 0x9942071D, int, sceAppUtilPspSaveDataGetDirNameList, void *param)
+{
+    (void)param;
+    return SCE_APPUTIL_ERROR_PARAMETER;
+}
+
+EXPORT(SceAppUtil, 0x7402C6EA, int, sceAppUtilPspSaveDataLoad, void *param)
+{
+    (void)param;
+    return SCE_APPUTIL_ERROR_PARAMETER;
+}
+
+EXPORT(SceAppUtil, 0xE6057A85, int, sceAppUtilSaveDataSlotSearch, void *work_buf,
+       const void *cond, void *result, SceAppUtilSaveDataMountPoint *mount_point)
+{
+    (void)work_buf;
+    (void)cond;
+    (void)result;
+    (void)mount_point;
+
+    /* Slots can be read individually with SlotGetParam; enumeration needs the
+       search condition/result layouts, which are not in the public headers. */
+    return SCE_APPUTIL_ERROR_PARAMETER;
+}
+
+#define APP_EVENT_PARSER(nid, name)                                                                \
+    EXPORT(SceAppUtil, nid, int, name, const SceAppUtilAppEventParam *event_param, void *out)       \
+    {                                                                                              \
+        (void)event_param;                                                                         \
+        (void)out;                                                                                 \
+        return SCE_APPUTIL_ERROR_APPEVENT_PARSE_INVALID_DATA;                                      \
+    }
+
+APP_EVENT_PARSER(0x0B04C067, sceAppUtilAppEventParseGameCustomData)
+APP_EVENT_PARSER(0x22297D59, sceAppUtilAppEventParseIncomingDialog)
+APP_EVENT_PARSER(0x77380601, sceAppUtilAppEventParseNearGift)
+APP_EVENT_PARSER(0xF6B75651, sceAppUtilAppEventParseNpActivity)
+APP_EVENT_PARSER(0x6BED9B58, sceAppUtilAppEventParseNpAppDataMessage)
+APP_EVENT_PARSER(0x28C7D4F6, sceAppUtilAppEventParseNpBasicJoinablePresence)
+APP_EVENT_PARSER(0xA2496814, sceAppUtilAppEventParseNpInviteMessage)
+APP_EVENT_PARSER(0x2AF42D6A, sceAppUtilAppEventParseScreenShotNotification)
+APP_EVENT_PARSER(0xA58E6FCE, sceAppUtilAppEventParseSessionInvitation)
+APP_EVENT_PARSER(0x665A8B7E, sceAppUtilAppEventParseTeleport)
+APP_EVENT_PARSER(0x8DEE696B, sceAppUtilAppEventParseTriggerUtil)
+APP_EVENT_PARSER(0x8ED716F5, sceAppUtilAppEventParseWebBrowser)
