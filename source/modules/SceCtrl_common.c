@@ -103,6 +103,94 @@ EXPORT(SceCtrl, 0x433D71F4, int, sceCtrlSetButtonIntercept, int intercept)
     return 0;
 }
 
+/* SceCtrlData2 has the same size and layout as SceCtrlData. */
+EXPORT(SceCtrl, 0x15F81E8C, int, sceCtrlPeekBufferPositive2, int port, SceCtrlData *pad_data,
+       int count)
+{
+    return sceCtrlPeekBufferPositive(port, pad_data, count);
+}
+
+EXPORT(SceCtrl, 0xC4226A3E, int, sceCtrlReadBufferPositive2, int port, SceCtrlData *pad_data,
+       int count)
+{
+    return sceCtrlReadBufferPositive(port, pad_data, count);
+}
+
+EXPORT(SceCtrl, 0x860BF292, int, sceCtrlPeekBufferPositiveExt2, int port, SceCtrlData *pad_data,
+       int count)
+{
+    return sceCtrlPeekBufferPositiveExt(port, pad_data, count);
+}
+
+EXPORT(SceCtrl, 0xA7178860, int, sceCtrlReadBufferPositiveExt2, int port, SceCtrlData *pad_data,
+       int count)
+{
+    return sceCtrlReadBufferPositiveExt(port, pad_data, count);
+}
+
+EXPORT(SceCtrl, 0x81A89660, int, sceCtrlPeekBufferNegative2, int port, SceCtrlData *pad_data,
+       int count)
+{
+    return sceCtrlPeekBufferNegative(port, pad_data, count);
+}
+
+EXPORT(SceCtrl, 0x27A0C5FB, int, sceCtrlReadBufferNegative2, int port, SceCtrlData *pad_data,
+       int count)
+{
+    return sceCtrlReadBufferNegative(port, pad_data, count);
+}
+
+EXPORT(SceCtrl, 0xB8844141, int, sceCtrlGetWirelessControllerInfo, void *info)
+{
+    if (info)
+        memset(info, 0, 16);
+
+    return 0;
+}
+
+EXPORT(SceCtrl, 0x0A06B7E4, int, sceCtrlRegisterBdRMCCallback, void)
+{
+    return 0;
+}
+
+EXPORT(SceCtrl, 0x103EB2B0, int, sceCtrlUnregisterBdRMCCallback, void)
+{
+    return 0;
+}
+
+EXPORT(SceCtrl, 0x031BE396, int, sceCtrlSingleControllerMode, int enable)
+{
+    (void)enable;
+
+    return 0;
+}
+
+EXPORT(SceCtrl, 0x8A187F98, int, sceCtrlSetButtonRemappingInfo, int port, const void *info)
+{
+    (void)port;
+    (void)info;
+
+    return 0;
+}
+
+EXPORT(SceCtrl, 0xE9CB69C8, int, sceCtrlSetRapidFire, int port, int index,
+       const SceCtrlRapidFireRule *rule)
+{
+    (void)port;
+    (void)index;
+    (void)rule;
+
+    return 0;
+}
+
+EXPORT(SceCtrl, 0xD8294C9C, int, sceCtrlClearRapidFire, int port, int index)
+{
+    (void)port;
+    (void)index;
+
+    return 0;
+}
+
 EXPORT(SceCtrl, 0xA59454D3, int, sceCtrlPeekBufferPositiveExt, int port, SceCtrlData *pad_data,
        int count)
 {
