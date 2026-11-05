@@ -2005,6 +2005,325 @@ def build_kernel_event_elf():
     return assemble_elf(rx, rw, rela, EV_MODINFO)
 
 
+# --- Thread callbacks and message pipes ------------------------------------
+
+TE_CALLBACK_OFFSET = 0x380
+TE_STUB_BASE = 0x3C0
+TE_LIB1_NAME = 0x460
+TE_LIB2_NAME = 0x470
+TE_MODINFO = 0x480
+TE_IMPORT1 = 0x4E0
+TE_IMPORT2 = 0x504
+TE_NIDS1 = 0x530
+TE_ENTRIES1 = 0x548
+TE_NIDS2 = 0x560
+TE_ENTRIES2 = 0x588
+TE_RX_SIZE = 0x5C0
+
+TE_LIB1 = b"SceLibKernel\0"
+TE_LIB2 = b"SceThreadmgr\0"
+TE_LIB1_NID = 0xCAE9ACE6
+TE_LIB2_NID = 0x859A24B1
+
+TE_KERNEL_FUNCS = [
+    0x0A10C1C8,  # sceKernelCreateMsgPipe
+    0x94D506F7,  # sceKernelSendMsgPipeVector
+    0x4E81DD5C,  # sceKernelReceiveMsgPipe
+    0x5615B006,  # sceKernelTryReceiveMsgPipe
+    0xEF14BA37,  # sceKernelCancelMsgPipe
+    0x88DD1BC8,  # sceKernelGetCallbackInfo
+]
+
+TE_THREADMGR_FUNCS = [
+    0xB19CF7E9,  # sceKernelCreateCallback
+    0xA4683592,  # sceKernelNotifyCallback
+    0xE53E41F6,  # sceKernelCheckCallback
+    0x038644D5,  # sceKernelGetCallbackCount
+    0xD469676B,  # sceKernelDeleteCallback
+    0x4046D16B,  # sceKernelGetMsgPipeInfo
+    0x0E1CB9F6,  # sceKernelOpenMsgPipe
+    0x1305A065,  # sceKernelCloseMsgPipe
+    0xE78BCCF7,  # sceKernelDeleteMsgPipe
+]
+
+TE_RW_CB_ID = 0x000
+TE_RW_MP_ID = 0x004
+TE_RW_RESULT = 0x008
+TE_RW_CALLBACK_DATA = 0x010
+TE_RW_CB_INFO = 0x020
+TE_RW_MP_INFO = 0x060
+TE_RW_VECTOR = 0x0A0
+TE_RW_BUFFER = 0x0C0
+TE_RW_CB_NAME = 0x100
+TE_RW_MP_NAME = 0x104
+TE_RW_PART1 = 0x108
+TE_RW_PART2 = 0x10C
+TE_RW_SIZE = 0x120
+
+
+def build_thread_extra_elf():
+    """Guest ELF for thread callbacks and the message-pipe vector family."""
+    code = []
+    rx_relocs = []
+    callback_offset = TE_CALLBACK_OFFSET
+
+    def emit(word):
+        code.append(word & 0xFFFFFFFF)
+
+    def movw_movt(rd, offset, symseg):
+        base = len(code) * 4
+        emit(arm_movw(rd, 0))
+        emit(arm_movt(rd, 0))
+        rx_relocs.append(encode_rela(0, symseg, base, offset, R_ARM_MOVW_ABS_NC))
+        rx_relocs.append(encode_rela(0, symseg, base + 4, offset, R_ARM_MOVT_ABS))
+
+    def movw_movt_rw(rd, offset):
+        movw_movt(rd, offset, 1)
+
+    def movw_movt_code(rd, offset):
+        movw_movt(rd, offset, 0)
+
+    def call(index):
+        emit(arm_bl(len(code) * 4, TE_STUB_BASE + index * 12))
+
+    def load_rw(rd, offset):
+        movw_movt_rw(rd, offset)
+        emit(0xE5900000 | (rd << 16) | (rd << 12))
+
+    def store_rw(rs, offset):
+        movw_movt_rw(12, offset)
+        emit(0xE58C0000 | (rs << 12))
+
+    def check(bit):
+        emit(0xE3500000)
+        emit(0x13844000 | arm_encode_imm(bit))
+
+    def check_nonzero(bit):
+        emit(0xE3500000)
+        emit(0x03844000 | arm_encode_imm(bit))
+
+    def check_negative(bit):
+        emit(0xE3500000)
+        emit(0xA3844000 | arm_encode_imm(bit))
+
+    def check_word(offset, value, bit):
+        movw_movt_rw(1, offset)
+        emit(0xE5910000)
+        emit(arm_movw(2, value & 0xFFFF))
+        emit(arm_movt(2, (value >> 16) & 0xFFFF))
+        emit(0xE1500002)
+        emit(0x13844000 | arm_encode_imm(bit))
+
+    def check_word_pointer(offset, pointer_offset, bit):
+        movw_movt_rw(1, offset)
+        emit(0xE5910000)
+        movw_movt_rw(2, pointer_offset)
+        emit(0xE1500002)
+        emit(0x13844000 | arm_encode_imm(bit))
+
+    emit(0xE92D4010)                 # push {r4, lr}
+    emit(arm_mov_imm(4, 0))
+
+    # sceKernelCreateCallback("cb", 0, guest_callback, &callback_data)
+    movw_movt_rw(0, TE_RW_CB_NAME)
+    emit(arm_mov_imm(1, 0))
+    movw_movt_code(2, callback_offset)
+    movw_movt_rw(3, TE_RW_CALLBACK_DATA)
+    call(6)
+    store_rw(0, TE_RW_CB_ID)
+    check_nonzero(1)
+
+    # notify with argument 0x1234, then run the callback
+    load_rw(0, TE_RW_CB_ID)
+    emit(arm_movw(1, 0x1234))
+    call(7)
+    check(2)
+    call(8)
+    check_nonzero(4)
+    check_word(TE_RW_CALLBACK_DATA, 0x1234, 8)
+    check_word(TE_RW_CALLBACK_DATA + 4, 1, 16)
+
+    # pending count is reset after the callback ran
+    load_rw(0, TE_RW_CB_ID)
+    call(9)
+    emit(0xE3500000)
+    emit(0x13844000 | arm_encode_imm(32))
+
+    # callback info: size and callbackId
+    load_rw(0, TE_RW_CB_ID)
+    movw_movt_rw(1, TE_RW_CB_INFO)
+    call(5)
+    check(64)
+    check_word(TE_RW_CB_INFO, 0x3C, 128)
+    movw_movt_rw(1, TE_RW_CB_INFO + 4)
+    emit(0xE5911000)
+    movw_movt_rw(2, TE_RW_CB_ID)
+    emit(0xE5922000)
+    emit(0xE1510002)
+    emit(0x13844000 | arm_encode_imm(256))
+
+    # delete the callback
+    load_rw(0, TE_RW_CB_ID)
+    call(10)
+    check(512)
+
+    # msgpipe: 256-byte buffer, send two vector pieces ("AB" + "CD")
+    movw_movt_rw(0, TE_RW_MP_NAME)
+    emit(arm_mov_imm(1, 0x40))
+    emit(arm_mov_imm(2, 12))
+    emit(arm_movw(3, 0x100))
+    emit(0xE24DD008)
+    emit(arm_mov_imm(12, 0))
+    emit(0xE58DC000)
+    call(0)
+    emit(0xE28DD008)
+    store_rw(0, TE_RW_MP_ID)
+    check_nonzero(1024)
+
+    load_rw(0, TE_RW_MP_ID)
+    movw_movt_rw(1, TE_RW_VECTOR)
+    emit(arm_mov_imm(2, 2))
+    emit(arm_mov_imm(3, 0))
+    emit(0xE24DD008)
+    movw_movt_rw(12, TE_RW_RESULT)
+    emit(0xE58DC000)
+    emit(arm_mov_imm(12, 0))
+    emit(0xE58DC004)
+    call(1)
+    emit(0xE28DD008)
+    check(2048)
+    check_word(TE_RW_RESULT, 4, 4096)
+
+    # receive four bytes and verify the stream order
+    load_rw(0, TE_RW_MP_ID)
+    movw_movt_rw(1, TE_RW_BUFFER)
+    emit(arm_mov_imm(2, 4))
+    emit(arm_mov_imm(3, 0))
+    emit(0xE24DD008)
+    movw_movt_rw(12, TE_RW_RESULT)
+    emit(0xE58DC000)
+    emit(arm_mov_imm(12, 0))
+    emit(0xE58DC004)
+    call(2)
+    emit(0xE28DD008)
+    check(8192)
+    check_word(TE_RW_RESULT, 4, 16384)
+    check_word(TE_RW_BUFFER, 0x44434241, 32768)
+
+    # an empty pipe must fail the non-blocking receive
+    load_rw(0, TE_RW_MP_ID)
+    movw_movt_rw(1, TE_RW_BUFFER)
+    emit(arm_mov_imm(2, 4))
+    emit(arm_mov_imm(3, 0))
+    emit(0xE24DD008)
+    emit(arm_mov_imm(12, 0))
+    emit(0xE58DC000)
+    call(3)
+    emit(0xE28DD008)
+    check_negative(65536)
+
+    # message-pipe info reports the full buffer as free again
+    load_rw(0, TE_RW_MP_ID)
+    movw_movt_rw(1, TE_RW_MP_INFO)
+    call(11)
+    check(131072)
+    check_word(TE_RW_MP_INFO, 0x3C, 262144)
+    check_word(TE_RW_MP_INFO + 44, 0x100, 524288)
+    check_word(TE_RW_MP_INFO + 48, 0x100, 1048576)
+
+    # open/close by name, cancel, then delete
+    movw_movt_rw(0, TE_RW_MP_NAME)
+    call(12)
+    check_nonzero(2097152)
+    load_rw(0, TE_RW_MP_ID)
+    call(13)
+    check(4194304)
+    load_rw(0, TE_RW_MP_ID)
+    emit(arm_mov_imm(1, 0))
+    emit(arm_mov_imm(2, 0))
+    call(4)
+    check(8388608)
+    load_rw(0, TE_RW_MP_ID)
+    call(14)
+    check(16777216)
+
+    emit(0xE1A00004)
+    emit(0xE3500000)
+    emit(0x03A0002A)
+    emit(0xE8BD8010)
+
+    assert len(code) * 4 <= callback_offset, f"thread fixture code overlaps the callback ({len(code) * 4:#x})"
+    assert callback_offset + 16 <= TE_STUB_BASE, "callback overlaps the stubs"
+
+    rx = bytearray(TE_RX_SIZE)
+    rx[:len(code) * 4] = b"".join(struct.pack("<I", w) for w in code)
+
+    # Guest callback: store (arg, count) through userData and return 0.
+    callback_code = [
+        0xE5832000,                 # str r2, [r3]
+        0xE5831004,                 # str r1, [r3, #4]
+        0xE3A00000,                 # mov r0, #0
+        0xE12FFF1E,                 # bx lr
+    ]
+    rx[callback_offset:callback_offset + len(callback_code) * 4] = b"".join(
+        struct.pack("<I", w) for w in callback_code)
+    rx[TE_LIB1_NAME:TE_LIB1_NAME + len(TE_LIB1)] = TE_LIB1
+    rx[TE_LIB2_NAME:TE_LIB2_NAME + len(TE_LIB2)] = TE_LIB2
+
+    info = bytearray(MODULE_INFO_SIZE)
+    struct.pack_into("<HH", info, 0x00, 0x0000, 0x0101)
+    info[0x04:0x04 + len(MODULE_NAME)] = MODULE_NAME
+    struct.pack_into("<I", info, 0x2C, TE_IMPORT1)
+    struct.pack_into("<I", info, 0x30, TE_IMPORT2 + IMPORT_SIZE)
+    struct.pack_into("<I", info, 0x34, 0x12345678)
+    struct.pack_into("<I", info, 0x44, 0x00000000)
+    struct.pack_into("<I", info, 0x48, 0xFFFFFFFF)
+    struct.pack_into("<I", info, 0x5C, 0x03570011)
+    rx[TE_MODINFO:TE_MODINFO + MODULE_INFO_SIZE] = info
+
+    imp1 = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp1, 0, IMPORT_SIZE, 1, 0, len(TE_KERNEL_FUNCS), 0, 0)
+    struct.pack_into("<I", imp1, IMP_LIBRARY_NID, TE_LIB1_NID)
+    rx[TE_IMPORT1:TE_IMPORT1 + IMPORT_SIZE] = imp1
+
+    imp2 = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp2, 0, IMPORT_SIZE, 1, 0, len(TE_THREADMGR_FUNCS), 0, 0)
+    struct.pack_into("<I", imp2, IMP_LIBRARY_NID, TE_LIB2_NID)
+    rx[TE_IMPORT2:TE_IMPORT2 + IMPORT_SIZE] = imp2
+
+    for i, nid in enumerate(TE_KERNEL_FUNCS):
+        struct.pack_into("<I", rx, TE_NIDS1 + i * 4, nid)
+    for i, nid in enumerate(TE_THREADMGR_FUNCS):
+        struct.pack_into("<I", rx, TE_NIDS2 + i * 4, nid)
+
+    rx_relocs.append(encode_rela(0, 0, TE_IMPORT1 + IMP_LIBRARY_NAME, TE_LIB1_NAME))
+    rx_relocs.append(encode_rela(0, 0, TE_IMPORT1 + IMP_FUNC_NID_TABLE, TE_NIDS1))
+    rx_relocs.append(encode_rela(0, 0, TE_IMPORT1 + IMP_FUNC_ENTRY_TABLE, TE_ENTRIES1))
+    rx_relocs.append(encode_rela(0, 0, TE_IMPORT2 + IMP_LIBRARY_NAME, TE_LIB2_NAME))
+    rx_relocs.append(encode_rela(0, 0, TE_IMPORT2 + IMP_FUNC_NID_TABLE, TE_NIDS2))
+    rx_relocs.append(encode_rela(0, 0, TE_IMPORT2 + IMP_FUNC_ENTRY_TABLE, TE_ENTRIES2))
+
+    for i in range(len(TE_KERNEL_FUNCS)):
+        rx_relocs.append(encode_rela(0, 0, TE_ENTRIES1 + i * 4, TE_STUB_BASE + i * 12))
+    for i in range(len(TE_THREADMGR_FUNCS)):
+        rx_relocs.append(encode_rela(0, 0, TE_ENTRIES2 + i * 4,
+                                     TE_STUB_BASE + (len(TE_KERNEL_FUNCS) + i) * 12))
+
+    rw = bytearray(TE_RW_SIZE)
+    rw[TE_RW_CB_NAME:TE_RW_CB_NAME + 3] = b"cb\0"
+    rw[TE_RW_MP_NAME:TE_RW_MP_NAME + 3] = b"mp\0"
+    rw[TE_RW_PART1:TE_RW_PART1 + 2] = b"AB"
+    rw[TE_RW_PART2:TE_RW_PART2 + 2] = b"CD"
+    struct.pack_into("<II", rw, TE_RW_VECTOR, 0, 2)
+    struct.pack_into("<II", rw, TE_RW_VECTOR + 8, 0, 2)
+    rw_relocs = [
+        encode_rela(1, 1, TE_RW_VECTOR, TE_RW_PART1),
+        encode_rela(1, 1, TE_RW_VECTOR + 8, TE_RW_PART2),
+    ]
+    rela = bytearray(b"".join(rx_relocs) + b"".join(rw_relocs))
+    return assemble_elf(rx, rw, rela, TE_MODINFO)
+
+
 # --- SceAppUtil fixture ----------------------------------------------------
 
 APPUTIL_STUB_BASE = 0x140
@@ -2668,6 +2987,10 @@ def main():
     event_path = os.path.join(out_dir, "guest_kernel_event.elf")
     with open(event_path, "wb") as f:
         f.write(build_kernel_event_elf())
+
+    thread_extra_path = os.path.join(out_dir, "guest_thread_extra.elf")
+    with open(thread_extra_path, "wb") as f:
+        f.write(build_thread_extra_elf())
     print(f"wrote {event_path}")
 
     if os.path.exists(os.path.join(shader_dir, "texture_v.gxp")) and os.path.exists(

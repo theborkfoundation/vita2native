@@ -33,6 +33,9 @@
 #define HOST_HIGHEST_PRIORITY 28
 #define HOST_LOWEST_PRIORITY  59
 
+#define SCE_KERNEL_THREAD_EVENT_TYPE_START 0x04
+#define SCE_KERNEL_THREAD_EVENT_TYPE_END   0x08
+
 static s32 g_vita_thread_info_tls_slot_id;
 static SceUID g_main_thread_uid;
 
@@ -54,16 +57,60 @@ typedef struct {
     uint32_t used;
     uint32_t head;
     uint32_t tail;
+    uint32_t send_waiters;
+    uint32_t receive_waiters;
+    int refs;
     Mutex lock;
     CondVar not_empty;
     CondVar not_full;
 } VitaMsgPipeInfo;
+
+#define VITA_CALLBACK_SLOTS 32
+
+struct SceKernelThreadEventHandlerOpt {
+    void *handler;
+    void *common;
+    int reserved0;
+    int reserved1;
+};
+
+typedef int (*VitaThreadEventHandler)(SceUInt32 event_type, SceUID thread_id, SceUInt32 reserved,
+                                      void *common);
+
+typedef struct {
+    bool used;
+    SceUID uid;
+    SceUID thread_id;
+    uint32_t attr;
+    char name[32];
+    SceKernelCallbackFunction callback;
+    void *user_data;
+    SceUID notifier_id;
+    int notify_count;
+    int notify_arg;
+} VitaCallbackInfo;
+
+typedef struct {
+    bool used;
+    SceUID uid;
+    SceUID thread_mask;
+    uint32_t event_mask;
+    char name[32];
+    VitaThreadEventHandler handler;
+    void *common;
+} VitaThreadEventHandlerInfo;
 
 DICT_DEF2(vita_mutex_info_dict, SceUID, M_DEFAULT_OPLIST, VitaMutexInfo *, M_POD_OPLIST)
 DICT_DEF2(vita_msgpipe_info_dict, SceUID, M_DEFAULT_OPLIST, VitaMsgPipeInfo *, M_POD_OPLIST)
 static vita_mutex_info_dict_t g_vita_mutex_infos;
 static vita_msgpipe_info_dict_t g_vita_msgpipe_infos;
 static RwLock g_vita_sync_objects_lock;
+
+static VitaCallbackInfo g_vita_callbacks[VITA_CALLBACK_SLOTS];
+static pthread_mutex_t g_vita_callbacks_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static VitaThreadEventHandlerInfo g_vita_thread_event_handlers[VITA_CALLBACK_SLOTS];
+static pthread_mutex_t g_vita_thread_event_handlers_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static inline int vita_priority_to_host_priority(int priority)
 {
@@ -102,6 +149,65 @@ static VitaThreadInfo *get_thread_info_or_current(SceUID thid)
     return get_thread_info_for_uid(thid);
 }
 
+static SceUID current_thread_uid(void)
+{
+    VitaThreadInfo *ti = SceKernelThreadMgr_get_thread_info();
+
+    return ti ? ti->uid : 0;
+}
+
+static void thread_event_notify(SceUInt32 event_type, SceUID thread_id)
+{
+    VitaThreadEventHandlerInfo handlers[VITA_CALLBACK_SLOTS];
+    int count = 0;
+
+    pthread_mutex_lock(&g_vita_thread_event_handlers_lock);
+    for (int i = 0; i < VITA_CALLBACK_SLOTS; i++) {
+        VitaThreadEventHandlerInfo *info = &g_vita_thread_event_handlers[i];
+
+        if (!info->used || !(info->event_mask & event_type))
+            continue;
+        if (info->thread_mask != 0 && info->thread_mask != thread_id)
+            continue;
+
+        handlers[count++] = *info;
+    }
+    pthread_mutex_unlock(&g_vita_thread_event_handlers_lock);
+
+    for (int i = 0; i < count; i++) {
+        if (handlers[i].handler)
+            handlers[i].handler(event_type, thread_id, 0, handlers[i].common);
+    }
+}
+
+static int run_pending_callbacks(SceUID thread_id)
+{
+    int processed = 0;
+
+    for (int i = 0; i < VITA_CALLBACK_SLOTS; i++) {
+        VitaCallbackInfo cb;
+        bool run = false;
+
+        pthread_mutex_lock(&g_vita_callbacks_lock);
+        if (g_vita_callbacks[i].used && g_vita_callbacks[i].thread_id == thread_id &&
+            g_vita_callbacks[i].notify_count > 0) {
+            cb = g_vita_callbacks[i];
+            g_vita_callbacks[i].notify_count = 0;
+            g_vita_callbacks[i].notifier_id = 0;
+            run = true;
+        }
+        pthread_mutex_unlock(&g_vita_callbacks_lock);
+
+        if (!run)
+            continue;
+        processed++;
+        if (cb.callback)
+            cb.callback((int)cb.notifier_id, cb.notify_count, cb.notify_arg, cb.user_data);
+    }
+
+    return processed;
+}
+
 static void NORETURN thread_entry_wrapper(void *arg)
 {
     VitaThreadInfo *ti = arg;
@@ -109,8 +215,12 @@ static void NORETURN thread_entry_wrapper(void *arg)
 
     threadTlsSet(g_vita_thread_info_tls_slot_id, ti);
 
+    thread_event_notify(SCE_KERNEL_THREAD_EVENT_TYPE_START, ti->uid);
+
     ret = ti->entry(ti->arglen, ti->argp);
     ti->return_status = ret;
+
+    thread_event_notify(SCE_KERNEL_THREAD_EVENT_TYPE_END, ti->uid);
 
     LOG("Thread 0x%x returned with: 0x%x", ti->uid, ret);
 
@@ -328,6 +438,255 @@ EXPORT(SceThreadmgr, 0xBACA6891, void *, sceKernelGetThreadTLSAddr, SceUID thid,
     return NULL;
 }
 
+/* Thread callbacks. */
+
+static VitaCallbackInfo *callback_lookup(SceUID uid)
+{
+    for (int i = 0; i < VITA_CALLBACK_SLOTS; i++) {
+        if (g_vita_callbacks[i].used && g_vita_callbacks[i].uid == uid)
+            return &g_vita_callbacks[i];
+    }
+
+    return NULL;
+}
+
+EXPORT(SceThreadmgr, 0xB19CF7E9, SceUID, sceKernelCreateCallback, const char *name,
+       SceUInt32 attr, SceKernelCallbackFunction callback, void *user_data)
+{
+    SceUID uid = 0;
+
+    pthread_mutex_lock(&g_vita_callbacks_lock);
+    for (int i = 0; i < VITA_CALLBACK_SLOTS; i++) {
+        VitaCallbackInfo *info = &g_vita_callbacks[i];
+
+        if (info->used)
+            continue;
+
+        memset(info, 0, sizeof(*info));
+        info->used = true;
+        info->uid = SceSysmem_get_next_uid();
+        info->thread_id = current_thread_uid();
+        info->attr = attr;
+        info->callback = callback;
+        info->user_data = user_data;
+        if (name)
+            strncpy(info->name, name, sizeof(info->name) - 1);
+        uid = info->uid;
+        break;
+    }
+    pthread_mutex_unlock(&g_vita_callbacks_lock);
+
+    return uid ? uid : SCE_KERNEL_ERROR_NO_MEMORY;
+}
+
+EXPORT(SceThreadmgr, 0xD469676B, int, sceKernelDeleteCallback, SceUID callback_id)
+{
+    int ret = SCE_KERNEL_ERROR_UNKNOWN_CALLBACK_ID;
+
+    pthread_mutex_lock(&g_vita_callbacks_lock);
+    VitaCallbackInfo *info = callback_lookup(callback_id);
+
+    if (info) {
+        memset(info, 0, sizeof(*info));
+        ret = 0;
+    }
+    pthread_mutex_unlock(&g_vita_callbacks_lock);
+
+    return ret;
+}
+
+EXPORT(SceThreadmgr, 0xA4683592, int, sceKernelNotifyCallback, SceUID callback_id,
+       int notify_arg)
+{
+    int ret = SCE_KERNEL_ERROR_UNKNOWN_CALLBACK_ID;
+
+    pthread_mutex_lock(&g_vita_callbacks_lock);
+    VitaCallbackInfo *info = callback_lookup(callback_id);
+
+    if (info) {
+        if (info->notify_count < 0x7FFFFFFF)
+            info->notify_count++;
+        info->notify_arg = notify_arg;
+        info->notifier_id = current_thread_uid();
+        ret = 0;
+    }
+    pthread_mutex_unlock(&g_vita_callbacks_lock);
+
+    return ret;
+}
+
+EXPORT(SceThreadmgr, 0x30741EF2, int, sceKernelCancelCallback, SceUID callback_id)
+{
+    int ret = SCE_KERNEL_ERROR_UNKNOWN_CALLBACK_ID;
+
+    pthread_mutex_lock(&g_vita_callbacks_lock);
+    VitaCallbackInfo *info = callback_lookup(callback_id);
+
+    if (info) {
+        info->notify_count = 0;
+        info->notify_arg = 0;
+        info->notifier_id = 0;
+        ret = 0;
+    }
+    pthread_mutex_unlock(&g_vita_callbacks_lock);
+
+    return ret;
+}
+
+EXPORT(SceThreadmgr, 0x038644D5, int, sceKernelGetCallbackCount, SceUID callback_id)
+{
+    int count = SCE_KERNEL_ERROR_UNKNOWN_CALLBACK_ID;
+
+    pthread_mutex_lock(&g_vita_callbacks_lock);
+    VitaCallbackInfo *info = callback_lookup(callback_id);
+
+    if (info)
+        count = info->notify_count;
+    pthread_mutex_unlock(&g_vita_callbacks_lock);
+
+    return count;
+}
+
+static int callback_get_info(SceUID callback_id, SceKernelCallbackInfo *info)
+{
+    int ret = SCE_KERNEL_ERROR_UNKNOWN_CALLBACK_ID;
+
+    if (!info)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    pthread_mutex_lock(&g_vita_callbacks_lock);
+    VitaCallbackInfo *cb = callback_lookup(callback_id);
+
+    if (cb) {
+        memset(info, 0, sizeof(*info));
+        info->size = sizeof(*info);
+        info->callbackId = cb->uid;
+        memcpy(info->name, cb->name, sizeof(info->name));
+        info->threadId = cb->thread_id;
+        info->callback = cb->callback;
+        info->common = cb->user_data;
+        info->notifyCount = cb->notify_count;
+        info->notifyArg = cb->notify_arg;
+        ret = 0;
+    }
+    pthread_mutex_unlock(&g_vita_callbacks_lock);
+
+    return ret;
+}
+
+EXPORT(SceLibKernel, 0x88DD1BC8, int, sceKernelGetCallbackInfo, SceUID callback_id,
+       SceKernelCallbackInfo *info)
+{
+    return callback_get_info(callback_id, info);
+}
+
+EXPORT(SceThreadmgr, 0x86761234, int, _sceKernelGetCallbackInfo, SceUID callback_id,
+       SceKernelCallbackInfo *info)
+{
+    return callback_get_info(callback_id, info);
+}
+
+EXPORT(SceThreadmgr, 0xE53E41F6, int, sceKernelCheckCallback, void)
+{
+    return run_pending_callbacks(current_thread_uid());
+}
+
+EXPORT(SceThreadmgr, 0x2682E6ED, int, _sceKernelExitCallback, void)
+{
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0x76FB37E9, int, sceKernelRegisterCallbackToEvent, SceUID callback_id,
+       SceUID event_id)
+{
+    (void)callback_id;
+    (void)event_id;
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0x18462B11, int, sceKernelUnregisterCallbackFromEvent, SceUID callback_id,
+       SceUID event_id)
+{
+    (void)callback_id;
+    (void)event_id;
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0x888A7361, int, sceKernelUnregisterCallbackFromEventAll, SceUID callback_id)
+{
+    (void)callback_id;
+    return 0;
+}
+
+/* Thread event handlers. */
+
+static int register_thread_event_handler(const char *name, SceUID thread_mask, SceUInt32 event_mask,
+                                         VitaThreadEventHandler handler, void *common)
+{
+    SceUID uid = 0;
+
+    if (!handler || !(event_mask & (SCE_KERNEL_THREAD_EVENT_TYPE_START |
+                                    SCE_KERNEL_THREAD_EVENT_TYPE_END)))
+        return SCE_KERNEL_ERROR_THREAD_EVENT_ERROR;
+
+    pthread_mutex_lock(&g_vita_thread_event_handlers_lock);
+    for (int i = 0; i < VITA_CALLBACK_SLOTS; i++) {
+        VitaThreadEventHandlerInfo *info = &g_vita_thread_event_handlers[i];
+
+        if (info->used)
+            continue;
+
+        memset(info, 0, sizeof(*info));
+        info->used = true;
+        info->uid = SceSysmem_get_next_uid();
+        info->thread_mask = thread_mask;
+        info->event_mask = event_mask;
+        info->handler = handler;
+        info->common = common;
+        if (name)
+            strncpy(info->name, name, sizeof(info->name) - 1);
+        uid = info->uid;
+        break;
+    }
+    pthread_mutex_unlock(&g_vita_thread_event_handlers_lock);
+
+    return uid ? (int)uid : SCE_KERNEL_ERROR_NO_MEMORY;
+}
+
+EXPORT(SceLibKernel, 0x6D8C0F13, int, sceKernelRegisterThreadEventHandler, const char *name,
+       SceUID thread_mask, SceUInt32 event_mask, VitaThreadEventHandler handler, void *common)
+{
+    return register_thread_event_handler(name, thread_mask, event_mask, handler, common);
+}
+
+EXPORT(SceThreadmgr, 0xCE6B49D8, int, _sceKernelRegisterThreadEventHandler, const char *name,
+       SceUID thread_mask, SceUInt32 event_mask,
+       const struct SceKernelThreadEventHandlerOpt *opt)
+{
+    if (!opt)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    return register_thread_event_handler(name, thread_mask, event_mask, opt->handler, opt->common);
+}
+
+EXPORT(SceThreadmgr, 0x2C8ED6F0, int, sceKernelUnregisterThreadEventHandler, SceUID handler_id)
+{
+    int ret = SCE_KERNEL_ERROR_UNKNOWN_THREAD_EVENT_ID;
+
+    pthread_mutex_lock(&g_vita_thread_event_handlers_lock);
+    for (int i = 0; i < VITA_CALLBACK_SLOTS; i++) {
+        if (g_vita_thread_event_handlers[i].used && g_vita_thread_event_handlers[i].uid == handler_id) {
+            memset(&g_vita_thread_event_handlers[i], 0,
+                   sizeof(g_vita_thread_event_handlers[i]));
+            ret = 0;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_vita_thread_event_handlers_lock);
+
+    return ret;
+}
+
 /* Serialization objects. */
 
 static VitaMutexInfo *get_mutex_info(SceUID uid)
@@ -471,10 +830,11 @@ EXPORT(SceLibKernel, 0x0A10C1C8, SceUID, sceKernelCreateMsgPipe, const char *nam
         return SCE_KERNEL_ERROR_NO_MEMORY;
 
     info->uid = SceSysmem_get_next_uid();
+    info->refs = 1;
     if (name)
         strncpy(info->name, name, sizeof(info->name) - 1);
     info->buffer = malloc(bufSize ? bufSize : 1);
-    info->capacity = bufSize;
+    info->capacity = bufSize ? bufSize : 1;
     if (!info->buffer) {
         free(info);
         return SCE_KERNEL_ERROR_NO_MEMORY;
@@ -511,7 +871,7 @@ EXPORT(SceThreadmgr, 0xE78BCCF7, int, sceKernelDeleteMsgPipe, SceUID uid)
 }
 
 static int msgpipe_send(VitaMsgPipeInfo *info, const void *message, unsigned int size,
-                        unsigned int *result)
+                        unsigned int *result, bool wait)
 {
     const uint8_t *src = message;
 
@@ -519,8 +879,15 @@ static int msgpipe_send(VitaMsgPipeInfo *info, const void *message, unsigned int
         return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
 
     mutexLock(&info->lock);
-    while (info->capacity - info->used < size)
-        condvarWait(&info->not_full, &info->lock);
+    if (wait) {
+        info->send_waiters++;
+        while (info->capacity - info->used < size)
+            condvarWait(&info->not_full, &info->lock);
+        info->send_waiters--;
+    } else if (info->capacity - info->used < size) {
+        mutexUnlock(&info->lock);
+        return SCE_KERNEL_ERROR_MSG_PIPE_FULL;
+    }
 
     for (unsigned int i = 0; i < size; i++) {
         info->buffer[(info->head + i) % info->capacity] = src[i];
@@ -537,14 +904,21 @@ static int msgpipe_send(VitaMsgPipeInfo *info, const void *message, unsigned int
 }
 
 static int msgpipe_receive(VitaMsgPipeInfo *info, void *message, unsigned int size,
-                           unsigned int *result)
+                           unsigned int *result, bool wait)
 {
     uint8_t *dst = message;
     unsigned int count;
 
     mutexLock(&info->lock);
-    while (!info->used)
-        condvarWait(&info->not_empty, &info->lock);
+    if (wait) {
+        info->receive_waiters++;
+        while (!info->used)
+            condvarWait(&info->not_empty, &info->lock);
+        info->receive_waiters--;
+    } else if (!info->used) {
+        mutexUnlock(&info->lock);
+        return SCE_KERNEL_ERROR_MSG_PIPE_EMPTY;
+    }
 
     count = info->used < size ? info->used : size;
     for (unsigned int i = 0; i < count; i++)
@@ -561,6 +935,71 @@ static int msgpipe_receive(VitaMsgPipeInfo *info, void *message, unsigned int si
     return 0;
 }
 
+typedef struct {
+    const void *message;
+    SceSize size;
+} VitaMsgPipeVector;
+
+static int msgpipe_send_vector(SceUID uid, const VitaMsgPipeVector *vec, unsigned int count,
+                               void *result_ptr, bool wait)
+{
+    VitaMsgPipeInfo *info = get_msgpipe_info(uid);
+    unsigned int total = 0;
+    int ret = 0;
+
+    if (!info)
+        return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
+    if (!vec && count)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    for (unsigned int i = 0; i < count; i++) {
+        unsigned int sent = 0;
+
+        if (!vec[i].message && vec[i].size)
+            return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+        ret = msgpipe_send(info, vec[i].message, vec[i].size, &sent, wait);
+        if (ret < 0)
+            break;
+        total += sent;
+    }
+
+    if (result_ptr)
+        *(unsigned int *)result_ptr = total;
+
+    return ret;
+}
+
+static int msgpipe_receive_vector(SceUID uid, const VitaMsgPipeVector *vec, unsigned int count,
+                                  void *result_ptr, bool wait)
+{
+    VitaMsgPipeInfo *info = get_msgpipe_info(uid);
+    unsigned int total = 0;
+    int ret = 0;
+
+    if (!info)
+        return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
+    if (!vec && count)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    for (unsigned int i = 0; i < count; i++) {
+        unsigned int received = 0;
+
+        if (!vec[i].message && vec[i].size)
+            return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+        ret = msgpipe_receive(info, (void *)vec[i].message, vec[i].size, &received, wait);
+        if (ret < 0)
+            break;
+        total += received;
+        if (received < vec[i].size)
+            break;
+    }
+
+    if (result_ptr)
+        *(unsigned int *)result_ptr = total;
+
+    return ret;
+}
+
 EXPORT(SceLibKernel, 0x0CA71EA2, int, sceKernelSendMsgPipe, SceUID uid, void *message,
        unsigned int size, int unk1, void *unk2, unsigned int *timeout)
 {
@@ -571,7 +1010,50 @@ EXPORT(SceLibKernel, 0x0CA71EA2, int, sceKernelSendMsgPipe, SceUID uid, void *me
     if (!info)
         return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
 
-    return msgpipe_send(info, message, size, unk2);
+    return msgpipe_send(info, message, size, unk2, true);
+}
+
+EXPORT(SceLibKernel, 0xA5CA74AC, int, sceKernelSendMsgPipeCB, SceUID uid, void *message,
+       unsigned int size, int unk1, void *unk2, unsigned int *timeout)
+{
+    run_pending_callbacks(current_thread_uid());
+    return sceKernelSendMsgPipe(uid, message, size, unk1, unk2, timeout);
+}
+
+EXPORT(SceLibKernel, 0x94D506F7, int, sceKernelSendMsgPipeVector, SceUID uid,
+       const VitaMsgPipeVector *vec, unsigned int count, int unk1, void *unk2,
+       unsigned int *timeout)
+{
+    (void)unk1;
+    (void)timeout;
+    return msgpipe_send_vector(uid, vec, count, unk2, true);
+}
+
+EXPORT(SceLibKernel, 0x9C6F7F79, int, sceKernelSendMsgPipeVectorCB, SceUID uid,
+       const VitaMsgPipeVector *vec, unsigned int count, int unk1, void *unk2,
+       unsigned int *timeout)
+{
+    run_pending_callbacks(current_thread_uid());
+    return sceKernelSendMsgPipeVector(uid, vec, count, unk1, unk2, timeout);
+}
+
+EXPORT(SceLibKernel, 0xDFC670E0, int, sceKernelTrySendMsgPipe, SceUID uid, void *message,
+       SceSize size, int unk1, void *unk2)
+{
+    VitaMsgPipeInfo *info = get_msgpipe_info(uid);
+
+    (void)unk1;
+    if (!info)
+        return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
+
+    return msgpipe_send(info, message, size, unk2, false);
+}
+
+EXPORT(SceLibKernel, 0x60DB346F, int, sceKernelTrySendMsgPipeVector, SceUID uid,
+       const VitaMsgPipeVector *vec, SceSize count, int unk1, void *unk2)
+{
+    (void)unk1;
+    return msgpipe_send_vector(uid, vec, count, unk2, false);
 }
 
 EXPORT(SceLibKernel, 0x4E81DD5C, int, sceKernelReceiveMsgPipe, SceUID uid, void *message,
@@ -584,7 +1066,166 @@ EXPORT(SceLibKernel, 0x4E81DD5C, int, sceKernelReceiveMsgPipe, SceUID uid, void 
     if (!info)
         return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
 
-    return msgpipe_receive(info, message, size, unk2);
+    return msgpipe_receive(info, message, size, unk2, true);
+}
+
+EXPORT(SceLibKernel, 0x33AF829B, int, sceKernelReceiveMsgPipeCB, SceUID uid, void *message,
+       unsigned int size, int unk1, void *unk2, unsigned int *timeout)
+{
+    run_pending_callbacks(current_thread_uid());
+    return sceKernelReceiveMsgPipe(uid, message, size, unk1, unk2, timeout);
+}
+
+EXPORT(SceLibKernel, 0x9F899087, int, sceKernelReceiveMsgPipeVector, SceUID uid,
+       const VitaMsgPipeVector *vec, unsigned int count, int unk1, void *unk2,
+       unsigned int *timeout)
+{
+    (void)unk1;
+    (void)timeout;
+    return msgpipe_receive_vector(uid, vec, count, unk2, true);
+}
+
+EXPORT(SceLibKernel, 0xBE5B3E27, int, sceKernelReceiveMsgPipeVectorCB, SceUID uid,
+       const VitaMsgPipeVector *vec, unsigned int count, int unk1, void *unk2,
+       unsigned int *timeout)
+{
+    run_pending_callbacks(current_thread_uid());
+    return sceKernelReceiveMsgPipeVector(uid, vec, count, unk1, unk2, timeout);
+}
+
+EXPORT(SceLibKernel, 0x5615B006, int, sceKernelTryReceiveMsgPipe, SceUID uid, void *message,
+       SceSize size, int unk1, void *unk2)
+{
+    VitaMsgPipeInfo *info = get_msgpipe_info(uid);
+
+    (void)unk1;
+    if (!info)
+        return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
+
+    return msgpipe_receive(info, message, size, unk2, false);
+}
+
+EXPORT(SceLibKernel, 0x86ECC0FF, int, sceKernelTryReceiveMsgPipeVector, SceUID uid,
+       const VitaMsgPipeVector *vec, SceSize count, int unk1, void *unk2)
+{
+    (void)unk1;
+    return msgpipe_receive_vector(uid, vec, count, unk2, false);
+}
+
+EXPORT(SceThreadmgr, 0xCE769C83, int, _sceKernelCancelMsgPipe, SceUID uid, int *send_waiters,
+       int *receive_waiters)
+{
+    VitaMsgPipeInfo *info = get_msgpipe_info(uid);
+
+    if (!info)
+        return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
+
+    mutexLock(&info->lock);
+    if (send_waiters)
+        *send_waiters = (int)info->send_waiters;
+    if (receive_waiters)
+        *receive_waiters = (int)info->receive_waiters;
+    condvarWakeAll(&info->not_empty);
+    condvarWakeAll(&info->not_full);
+    mutexUnlock(&info->lock);
+
+    return 0;
+}
+
+EXPORT(SceLibKernel, 0xEF14BA37, int, sceKernelCancelMsgPipe, SceUID uid, int *send_waiters,
+       int *receive_waiters)
+{
+    return _sceKernelCancelMsgPipe(uid, send_waiters, receive_waiters);
+}
+
+EXPORT(SceThreadmgr, 0x0E1CB9F6, SceUID, sceKernelOpenMsgPipe, const char *name)
+{
+    VitaMsgPipeInfo *info = NULL;
+    vita_msgpipe_info_dict_it_t it;
+
+    if (!name)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    rwlockReadLock(&g_vita_sync_objects_lock);
+    for (vita_msgpipe_info_dict_it(it, g_vita_msgpipe_infos);
+         !vita_msgpipe_info_dict_end_p(it); vita_msgpipe_info_dict_next(it)) {
+        VitaMsgPipeInfo *candidate = vita_msgpipe_info_dict_ref(it)->value;
+
+        if (strncmp(candidate->name, name, sizeof(candidate->name)) == 0) {
+            mutexLock(&candidate->lock);
+            candidate->refs++;
+            mutexUnlock(&candidate->lock);
+            info = candidate;
+            break;
+        }
+    }
+    rwlockReadUnlock(&g_vita_sync_objects_lock);
+
+    return info ? info->uid : SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
+}
+
+EXPORT(SceThreadmgr, 0x1305A065, int, sceKernelCloseMsgPipe, SceUID uid)
+{
+    VitaMsgPipeInfo *info = get_msgpipe_info(uid);
+
+    if (!info)
+        return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
+
+    mutexLock(&info->lock);
+    if (info->refs > 0)
+        info->refs--;
+    mutexUnlock(&info->lock);
+
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0x4046D16B, int, sceKernelGetMsgPipeInfo, SceUID uid,
+       SceKernelMppInfo *info)
+{
+    VitaMsgPipeInfo *pipe = get_msgpipe_info(uid);
+
+    if (!pipe)
+        return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
+    if (!info)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    mutexLock(&pipe->lock);
+    memset(info, 0, sizeof(*info));
+    info->size = sizeof(*info);
+    info->mppId = pipe->uid;
+    memcpy(info->name, pipe->name, sizeof(info->name));
+    info->attr = 0;
+    info->bufSize = (int)pipe->capacity;
+    info->freeSize = (int)(pipe->capacity - pipe->used);
+    info->numSendWaitThreads = (int)pipe->send_waiters;
+    info->numReceiveWaitThreads = (int)pipe->receive_waiters;
+    mutexUnlock(&pipe->lock);
+
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0x7AE31060, int, _sceKernelGetMsgPipeInfo, SceUID uid,
+       SceKernelMppInfo *info)
+{
+    return sceKernelGetMsgPipeInfo(uid, info);
+}
+
+EXPORT(SceLibKernel, 0xD7E10BB1, SceUID, sceKernelCreateMsgPipeWithLR, const char *name, int type,
+       int attr, unsigned int buf_size, void *option)
+{
+    return sceKernelCreateMsgPipe(name, type, attr, buf_size, option);
+}
+
+EXPORT(SceThreadmgr, 0x2AAC8BFD, SceUID, _sceKernelCreateMsgPipeWithLR, const char *name,
+       int type, int attr, unsigned int buf_size, void *option)
+{
+    return sceKernelCreateMsgPipe(name, type, attr, buf_size, option);
+}
+
+EXPORT(SceThreadmgr, 0x70E2A6D2, SceUID, sceKernelGetMsgPipeCreatorId, SceUID uid)
+{
+    (void)uid;
+    return 1;
 }
 
 EXPORT(SceLibKernel, 0x6E903AB2, int, sceIoChstatByFd, SceUID fd, const SceIoStat *stat,
