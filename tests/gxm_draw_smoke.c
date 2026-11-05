@@ -9,6 +9,7 @@
  * Usage: gxm_draw_smoke <shader-dir>
  */
 #include <assert.h>
+#include <errno.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -18,9 +19,11 @@
 #include <string.h>
 
 #include <sys/mman.h>
+#include <sys/stat.h>
 
 #include <psp2/gxm.h>
 
+#include "fs.h"
 #include "gfx.h"
 #include "gxm/util.h"
 #include "modules/SceGxm.h"
@@ -286,6 +289,15 @@ static uint32_t *begin_frame(Scene *scene)
     return scene->pixels;
 }
 
+static void begin_frame_with_surface(Scene *scene, SceGxmColorSurface *surface)
+{
+    assert(sceGxmBeginScene(scene->context, 0, scene->target, NULL, NULL, NULL, surface, NULL) == 0);
+    sceGxmSetDefaultRegionClipAndViewport(scene->context, WIDTH, HEIGHT);
+    sceGxmSetRegionClip(scene->context, SCE_GXM_REGION_CLIP_NONE, 0, 0, WIDTH - 1, HEIGHT - 1);
+    sceGxmSetCullMode(scene->context, SCE_GXM_CULL_NONE);
+    sceGxmSetFrontPolygonMode(scene->context, SCE_GXM_POLYGON_MODE_TRIANGLE_FILL);
+}
+
 static void end_frame(Scene *scene)
 {
     assert(sceGxmEndScene(scene->context, NULL, NULL) == 0);
@@ -330,6 +342,13 @@ int main(int argc, char **argv)
     device = host_gpu_create(&gpu_config);
     if (!device)
         return 1;
+
+    /* Enable the on-disk GLSL cache under a stable path so a second run hits it. */
+    {
+        char cache_root[] = "/tmp/v2n-gxm-shader-cache";
+        if (mkdir(cache_root, 0755) == 0 || errno == EEXIST)
+            host_fs_init(cache_root, NULL);
+    }
 
     printf("GPU: %s\n", host_gpu_description(device));
     if (host_gpu_backend(device) != HOST_GPU_BACKEND_GLES) {
@@ -618,6 +637,44 @@ int main(int argc, char **argv)
         goto done;
     }
     printf("packed S8D24 depth/stencil: ok\n");
+
+    /* 6b: tiled colour surface round-trips through a tiled texture. */
+    {
+        SceGxmColorSurface tiled_surface;
+        SceGxmTexture tiled_texture;
+        uint8_t *tiled_pixels = low_alloc(WIDTH * HEIGHT * 4);
+
+        assert(tiled_pixels);
+        assert(sceGxmColorSurfaceInit(&tiled_surface, SCE_GXM_COLOR_FORMAT_A8B8G8R8,
+                                      SCE_GXM_COLOR_SURFACE_TILED,
+                                      SCE_GXM_COLOR_SURFACE_SCALE_NONE,
+                                      SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, WIDTH, HEIGHT, WIDTH,
+                                      tiled_pixels) == 0);
+
+        set_solid_color(solid_pixels, 12, 34, 56, 78);
+        begin_frame_with_surface(&scene, &tiled_surface);
+        draw_quad(&scene, &solid_texture);
+        end_frame(&scene);
+
+        assert(sceGxmTextureInitTiled(&tiled_texture, tiled_pixels,
+                                      SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, WIDTH, HEIGHT, 0) == 0);
+        sceGxmTextureSetMinFilter(&tiled_texture, SCE_GXM_TEXTURE_FILTER_POINT);
+        sceGxmTextureSetMagFilter(&tiled_texture, SCE_GXM_TEXTURE_FILTER_POINT);
+        sceGxmTextureSetUAddrMode(&tiled_texture, SCE_GXM_TEXTURE_ADDR_CLAMP);
+        sceGxmTextureSetVAddrMode(&tiled_texture, SCE_GXM_TEXTURE_ADDR_CLAMP);
+
+        begin_frame(&scene);
+        draw_quad(&scene, &tiled_texture);
+        end_frame(&scene);
+
+        if (!pixel_is(scene.pixels, WIDTH / 2, HEIGHT / 2, 12, 34, 56, 78)) {
+            const uint8_t *p = (const uint8_t *)&scene.pixels[(HEIGHT / 2) * WIDTH + WIDTH / 2];
+            fprintf(stderr, "tiled surface round-trip gave %02x %02x %02x %02x\n", p[0], p[1],
+                    p[2], p[3]);
+            goto done;
+        }
+        printf("tiled colour surface: ok\n");
+    }
 
     /* 7: a deferred context records a draw that the immediate context replays. */
     {

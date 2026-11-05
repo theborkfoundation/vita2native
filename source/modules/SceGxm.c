@@ -11,12 +11,16 @@
  * At sceGxmEndScene the color target is read back into the guest's
  * SceGxmColorSurface, which is what sceDisplaySetFrameBuf presents.
  */
+#include <limits.h>
 #include <math.h>
 #include <psp2/gxm.h>
 #include <psp2/kernel/error.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
+#include "fs.h"
 #include "gfx.h"
 #include "gxm/texture.h"
 #include "gxm/util.h"
@@ -419,32 +423,184 @@ static void gxm_compile_shader(GLuint shader, const char *source, const char *na
     }
 }
 
+/*
+ * GLSL ES source cache.
+ *
+ * Recompiling GXP -> SPIR-V -> GLSL for every launch is expensive on the
+ * low-end ARM32 boards this fork targets. The generated text only depends on
+ * the GXP bytes, the stage and (for vertex shaders) the attribute bindings, so
+ * it is cached under <vfs root>/cache/shaders. Driver-level shader objects are
+ * not portable and are never cached.
+ */
+#define GXM_SHADER_CACHE_VERSION 1u
+
+static uint32_t gxm_hash_bytes(uint32_t hash, const void *data, size_t size);
+
+static uint32_t gxm_shader_cache_hash(const SceGxmProgram *program, GLenum stage,
+                                      const SceGxmVertexAttribute *attributes, unsigned int count)
+{
+    uint32_t hash = 2166136261u;
+    uint32_t version = GXM_SHADER_CACHE_VERSION;
+    uint32_t size = program->size;
+    uint8_t stage_byte = stage == GL_VERTEX_SHADER ? 0 : 1;
+
+    if (!size || size > (1u << 20))
+        size = 0;
+
+    hash = gxm_hash_bytes(hash, &version, sizeof(version));
+    hash = gxm_hash_bytes(hash, &stage_byte, sizeof(stage_byte));
+    hash = gxm_hash_bytes(hash, &size, sizeof(size));
+    hash = gxm_hash_bytes(hash, program, size);
+    if (attributes && count)
+        hash = gxm_hash_bytes(hash, attributes, count * sizeof(*attributes));
+
+    return hash;
+}
+
+static bool gxm_shader_cache_path(uint32_t hash, char *path, size_t path_size, bool create_dirs)
+{
+    const char *root = host_fs_root();
+    char dir[PATH_MAX];
+
+    if (!root || !root[0])
+        return false;
+
+    if (snprintf(dir, sizeof(dir), "%s/cache", root) >= (int)sizeof(dir))
+        return false;
+    if (create_dirs)
+        mkdir(dir, 0755);
+
+    if (snprintf(dir, sizeof(dir), "%s/cache/shaders", root) >= (int)sizeof(dir))
+        return false;
+    if (create_dirs)
+        mkdir(dir, 0755);
+
+    return snprintf(path, path_size, "%s/cache/shaders/%08x.glsl", root, hash) < (int)path_size;
+}
+
+static char *gxm_shader_cache_read(uint32_t hash)
+{
+    char path[PATH_MAX];
+    struct stat st;
+    FILE *file;
+    char *text;
+
+    if (!gxm_shader_cache_path(hash, path, sizeof(path), false))
+        return NULL;
+    if (stat(path, &st) != 0 || st.st_size <= 0 || st.st_size > (4 << 20))
+        return NULL;
+
+    file = fopen(path, "rb");
+    if (!file)
+        return NULL;
+
+    text = malloc((size_t)st.st_size + 1);
+    if (!text) {
+        fclose(file);
+        return NULL;
+    }
+
+    if (fread(text, 1, (size_t)st.st_size, file) != (size_t)st.st_size) {
+        free(text);
+        fclose(file);
+        return NULL;
+    }
+
+    fclose(file);
+    text[st.st_size] = '\0';
+
+    if (strncmp(text, "#version", 8) != 0) {
+        free(text);
+        return NULL;
+    }
+
+    return text;
+}
+
+static void gxm_shader_cache_write(uint32_t hash, const char *text)
+{
+    char path[PATH_MAX];
+    FILE *file;
+
+    if (!gxm_shader_cache_path(hash, path, sizeof(path), true))
+        return;
+
+    file = fopen(path, "wb");
+    if (!file)
+        return;
+
+    fwrite(text, 1, strlen(text), file);
+    fclose(file);
+}
+
+static void gxm_shader_cache_remove(uint32_t hash)
+{
+    char path[PATH_MAX];
+
+    if (gxm_shader_cache_path(hash, path, sizeof(path), false))
+        remove(path);
+}
+
+static GLuint gxm_create_compiled_shader(GLenum stage, const char *name, const char *glsl,
+                                        bool *compiled)
+{
+    GLuint shader = g_gl->glCreateShader(stage);
+    GLint ok = 0;
+
+    gxm_compile_shader(shader, glsl, name);
+    g_gl->glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+    *compiled = ok != 0;
+
+    return shader;
+}
+
 static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, const char *name,
                                    const SceGxmVertexAttribute *attributes, unsigned int count)
 {
-    uint32_t *spirv = NULL;
-    uint32_t num_instr = 0;
-    char *glsl = NULL;
+    uint32_t cache_hash = gxm_shader_cache_hash(program, stage, attributes, count);
+    char *glsl = gxm_shader_cache_read(cache_hash);
+    bool compiled = false;
     GLuint shader;
 
-    if (!convert_gxp_to_spirv_c(&spirv, &num_instr, program, name, false, false, false, false,
-                                attributes, count, false, false, NULL)) {
-        LOG("SceGxm: GXP -> SPIR-V failed for %s", name);
-        return 0;
+    if (glsl) {
+        shader = gxm_create_compiled_shader(stage, name, glsl, &compiled);
+        if (compiled) {
+            LOG("SceGxm: shader cache hit %08x (%s)", cache_hash, name);
+            free(glsl);
+            return shader;
+        }
+
+        LOG("SceGxm: cached shader %08x failed to compile, regenerating", cache_hash);
+        g_gl->glDeleteShader(shader);
+        gxm_shader_cache_remove(cache_hash);
+        free(glsl);
     }
 
-    if (spirv_to_glsl_es(spirv, num_instr, &glsl) != 0) {
+    {
+        uint32_t *spirv = NULL;
+        uint32_t num_instr = 0;
+
+        if (!convert_gxp_to_spirv_c(&spirv, &num_instr, program, name, false, false, false, false,
+                                    attributes, count, false, false, NULL)) {
+            LOG("SceGxm: GXP -> SPIR-V failed for %s", name);
+            return 0;
+        }
+
+        if (spirv_to_glsl_es(spirv, num_instr, &glsl) != 0) {
+            free(spirv);
+            LOG("SceGxm: SPIR-V -> GLSL ES failed for %s", name);
+            return 0;
+        }
+
         free(spirv);
-        LOG("SceGxm: SPIR-V -> GLSL ES failed for %s", name);
-        return 0;
     }
 
-    free(spirv);
+    LOG("SceGxm: shader cache miss %08x (%s)", cache_hash, name);
+    shader = gxm_create_compiled_shader(stage, name, glsl, &compiled);
+    if (compiled)
+        gxm_shader_cache_write(cache_hash, glsl);
 
-    shader = g_gl->glCreateShader(stage);
-    gxm_compile_shader(shader, glsl, name);
     free(glsl);
-
     return shader;
 }
 
@@ -2457,6 +2613,28 @@ static uint32_t gxm_color_format_bytes(SceGxmColorFormat format)
     }
 }
 
+/*
+ * Byte offset of a colour surface pixel. Tiled surfaces use the same 32x32
+ * row-major tile layout as SCE_GXM_TEXTURE_TILED, so a surface written here
+ * can be sampled back through a tiled texture. Swizzled colour surfaces are
+ * still treated as linear.
+ */
+static size_t gxm_color_pixel_offset(const SceGxmColorSurfaceInner *surface, uint32_t x,
+                                     uint32_t y, uint32_t bytes_per_pixel)
+{
+    uint32_t stride = surface->strideInPixels ? surface->strideInPixels : surface->width;
+
+    if (surface->surfaceType == SCE_GXM_COLOR_SURFACE_TILED) {
+        uint32_t tiles_per_row = (stride + 31) >> 5;
+        uint32_t tile = (x >> 5) + tiles_per_row * (y >> 5);
+        uint32_t index = (tile << 10) | (x & 31) | ((y & 31) << 5);
+
+        return (size_t)index * bytes_per_pixel;
+    }
+
+    return ((size_t)y * stride + x) * bytes_per_pixel;
+}
+
 static void gxm_write_color_pixel(uint8_t *dst, const uint8_t rgba[4], SceGxmColorFormat format)
 {
     uint32_t base = format & SCE_GXM_COLOR_BASE_FORMAT_MASK;
@@ -2549,7 +2727,7 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
        const SceGxmNotification *vertexNotification, const SceGxmNotification *fragmentNotification)
 {
     const SceGxmColorSurfaceInner *surface;
-    uint32_t width, height, stride;
+    uint32_t width, height;
     uint8_t *rgba;
 
     (void)vertexNotification;
@@ -2578,7 +2756,6 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
         height = surface->height < context->render_target->params.height
                      ? surface->height
                      : context->render_target->params.height;
-        stride = surface->strideInPixels ? surface->strideInPixels : width;
 
         rgba = malloc((size_t)width * height * 4);
         if (!rgba)
@@ -2593,11 +2770,13 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
 
             for (uint32_t y = 0; y < height; y++) {
                 const uint8_t *src = rgba + (size_t)(height - 1 - y) * width * 4;
-                uint8_t *dst = (uint8_t *)surface->data + (size_t)y * stride * bytes_per_pixel;
 
-                for (uint32_t x = 0; x < width; x++)
-                    gxm_write_color_pixel(dst + (size_t)x * bytes_per_pixel, src + (size_t)x * 4,
-                                          surface->colorFormat);
+                for (uint32_t x = 0; x < width; x++) {
+                    uint8_t *dst = (uint8_t *)surface->data +
+                                   gxm_color_pixel_offset(surface, x, y, bytes_per_pixel);
+
+                    gxm_write_color_pixel(dst, src + (size_t)x * 4, surface->colorFormat);
+                }
             }
         }
 

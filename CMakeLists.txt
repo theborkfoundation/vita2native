@@ -207,6 +207,7 @@ if(BUILD_TESTING)
         source/host/host_gfx_gl.c
         source/host/host_gfx_null.c
         source/host/host_thread.c
+        source/host/host_fs.c
         source/gxm_texture.c
         source/gxm_texture_pvrtc.cpp
         external/Vita3K/vita3k/renderer/src/texture/pvrt-dec.cpp
