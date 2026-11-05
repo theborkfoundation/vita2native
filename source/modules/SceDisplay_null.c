@@ -312,6 +312,14 @@ EXPORT(SceDisplay, 0xFEFEB240, int, _sceDisplayGetResolutionInfoInternal, void *
 DECLARE_LIBRARY(SceDisplay, 0x5ed8f994);
 DECLARE_LIBRARY(SceDisplayUser, 0x4faacd11);
 
+void SceDisplay_get_window_size(int *width, int *height)
+{
+    if (width)
+        *width = 960;
+    if (height)
+        *height = 544;
+}
+
 int SceDisplay_init(HostGpuDevice device)
 {
     (void)device;

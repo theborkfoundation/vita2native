@@ -137,6 +137,10 @@ target_include_directories(vita2native PRIVATE
 # The amalgamation is third-party code with its own warning hygiene.
 set_source_files_properties(external/sqlite/sqlite3.c PROPERTIES COMPILE_OPTIONS "-w")
 
+if(NOT VITA2NATIVE_HEADLESS)
+    target_compile_definitions(vita2native PRIVATE VITA2NATIVE_HAVE_SDL2=1)
+endif()
+
 target_compile_options(vita2native PRIVATE
     -Wall
     -Wextra
@@ -424,6 +428,16 @@ if(BUILD_TESTING)
     target_include_directories(dialog_smoke PRIVATE include external/vita-headers/include)
     target_compile_definitions(dialog_smoke PRIVATE _GNU_SOURCE=1)
     add_test(NAME dialog_smoke COMMAND dialog_smoke)
+
+    add_executable(touch_smoke
+        tests/touch_smoke.c
+        source/modules/SceTouch_linux.c
+        source/host/host_thread.c
+    )
+    target_include_directories(touch_smoke PRIVATE include external/vita-headers/include)
+    target_compile_definitions(touch_smoke PRIVATE _GNU_SOURCE=1)
+    target_link_libraries(touch_smoke PRIVATE pthread m)
+    add_test(NAME touch_smoke COMMAND touch_smoke)
 
     add_executable(ngs_smoke
         tests/ngs_smoke.c

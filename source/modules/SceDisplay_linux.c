@@ -470,6 +470,20 @@ static void display_try_enable_egl(void)
     LOG("SceDisplay: EGL window presentation enabled");
 }
 
+void SceDisplay_get_window_size(int *width, int *height)
+{
+    int w = VITA_FB_WIDTH;
+    int h = VITA_FB_HEIGHT;
+
+    if (g_window)
+        SDL_GetWindowSize(g_window, &w, &h);
+
+    if (width)
+        *width = w > 0 ? w : VITA_FB_WIDTH;
+    if (height)
+        *height = h > 0 ? h : VITA_FB_HEIGHT;
+}
+
 int SceDisplay_init(HostGpuDevice device)
 {
     pthread_condattr_t attr;
