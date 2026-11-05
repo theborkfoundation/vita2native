@@ -94,7 +94,10 @@
     X(PFNGLCLEARDEPTHFPROC, glClearDepthf)                                                         \
     X(PFNGLCLEARSTENCILPROC, glClearStencil)                                                       \
     X(PFNGLBLITFRAMEBUFFERPROC, glBlitFramebuffer)                                                 \
-    X(PFNGLRENDERBUFFERSTORAGEMULTISAMPLEPROC, glRenderbufferStorageMultisample)
+    X(PFNGLRENDERBUFFERSTORAGEMULTISAMPLEPROC, glRenderbufferStorageMultisample)                   \
+    X(PFNGLGENVERTEXARRAYSPROC, glGenVertexArrays)                                                  \
+    X(PFNGLBINDVERTEXARRAYPROC, glBindVertexArray)                                                  \
+    X(PFNGLDELETEVERTEXARRAYSPROC, glDeleteVertexArrays)
 
 typedef struct HostGles {
     void *egl_lib;
@@ -118,9 +121,22 @@ typedef struct HostGles {
     PFNEGLCREATECONTEXTPROC eglCreateContext;
     PFNEGLDESTROYCONTEXTPROC eglDestroyContext;
     PFNEGLCREATEPBUFFERSURFACEPROC eglCreatePbufferSurface;
+    PFNEGLCREATEWINDOWSURFACEPROC eglCreateWindowSurface;
+    PFNEGLSWAPBUFFERSPROC eglSwapBuffers;
+    PFNEGLQUERYSURFACEPROC eglQuerySurface;
+    PFNEGLSWAPINTERVALPROC eglSwapInterval;
     PFNEGLDESTROYSURFACEPROC eglDestroySurface;
     PFNEGLMAKECURRENTPROC eglMakeCurrent;
     PFNEGLRELEASETHREADPROC eglReleaseThread;
+
+    EGLConfig egl_config;
+    bool window_capable;
+    EGLSurface window_surface;
+    GLuint present_program;
+    GLuint present_texture;
+    GLuint present_vao;
+    int present_tex_width;
+    int present_tex_height;
 
 #define HOST_GL_FIELD(type, name) type name;
     HOST_GL_FUNCTIONS(HOST_GL_FIELD)

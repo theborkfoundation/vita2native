@@ -96,6 +96,33 @@ void host_gpu_finish(HostGpuDevice device)
         host_gfx_gl_finish(device);
 }
 
+int host_gpu_attach_window(HostGpuDevice device, void *native_window)
+{
+    if (!device || device->backend != HOST_GPU_BACKEND_GLES)
+        return -1;
+
+    return host_gfx_gl_attach_window(device, native_window);
+}
+
+void host_gpu_detach_window(HostGpuDevice device)
+{
+    if (!device)
+        return;
+
+    if (device->backend == HOST_GPU_BACKEND_GLES)
+        host_gfx_gl_detach_window(device);
+}
+
+void host_gpu_present_framebuffer(HostGpuDevice device, const void *rgba, int width, int height,
+                                  int stride_in_pixels)
+{
+    if (!device)
+        return;
+
+    if (device->backend == HOST_GPU_BACKEND_GLES)
+        host_gfx_gl_present_framebuffer(device, rgba, width, height, stride_in_pixels);
+}
+
 HostGpuMemBlock host_gpu_memblock_create(void *cpu_addr, size_t size)
 {
     HostGpuMemBlock block = malloc(sizeof(*block));

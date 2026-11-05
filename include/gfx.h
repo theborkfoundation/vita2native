@@ -46,6 +46,24 @@ int host_gpu_read_pixels(HostGpuDevice device, int x, int y, int width, int heig
 
 void host_gpu_finish(HostGpuDevice device);
 
+/*
+ * Presentation.
+ *
+ * attach_window() takes a native window handle (an X11 Window, or a Wayland
+ * wl_egl_window on platforms that support it) and makes an EGL window surface
+ * current. Returns 0 on success, -1 when the backend or platform cannot
+ * present to a window (the caller should fall back to CPU presentation).
+ */
+int host_gpu_attach_window(HostGpuDevice device, void *native_window);
+void host_gpu_detach_window(HostGpuDevice device);
+
+/*
+ * Uploads an RGBA8 guest framebuffer (stride in pixels) and swaps the window.
+ * Pass rgba == NULL to present a black frame. No-op without a window surface.
+ */
+void host_gpu_present_framebuffer(HostGpuDevice device, const void *rgba, int width, int height,
+                                  int stride_in_pixels);
+
 HostGpuMemBlock host_gpu_memblock_create(void *cpu_addr, size_t size);
 void host_gpu_memblock_destroy(HostGpuMemBlock block);
 

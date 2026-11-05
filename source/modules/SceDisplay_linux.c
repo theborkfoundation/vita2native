@@ -1,7 +1,9 @@
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
+#include <SDL_syswm.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -32,6 +34,10 @@ static bool g_presenter_ready;
 static int g_presenter_result;
 static bool g_initialized;
 static int g_vcount;
+
+static HostGpuDevice g_gpu_device;
+static bool g_egl_present;
+static bool g_window_closed;
 
 static void presenter_cleanup(void)
 {
@@ -106,28 +112,33 @@ static void *presenter_thread(void *arg)
     while (true) {
         SDL_Event event;
         SceDisplayFrameBuf fb;
+        bool egl_present;
 
         SDL_PumpEvents();
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT) {
                 pthread_mutex_lock(&g_lock);
                 g_presenter_run = false;
+                g_window_closed = true;
                 pthread_mutex_unlock(&g_lock);
             }
         }
 
         pthread_mutex_lock(&g_lock);
-        while (g_presenter_run && !g_vita_conf_fb.base) {
-            struct timespec deadline;
+        egl_present = g_egl_present;
+        if (!egl_present) {
+            while (g_presenter_run && !g_vita_conf_fb.base) {
+                struct timespec deadline;
 
-            clock_gettime(CLOCK_REALTIME, &deadline);
-            deadline.tv_nsec += 16 * 1000 * 1000;
-            if (deadline.tv_nsec >= 1000000000L) {
-                deadline.tv_sec++;
-                deadline.tv_nsec -= 1000000000L;
+                clock_gettime(CLOCK_REALTIME, &deadline);
+                deadline.tv_nsec += 16 * 1000 * 1000;
+                if (deadline.tv_nsec >= 1000000000L) {
+                    deadline.tv_sec++;
+                    deadline.tv_nsec -= 1000000000L;
+                }
+
+                pthread_cond_timedwait(&g_frame_cond, &g_lock, &deadline);
             }
-
-            pthread_cond_timedwait(&g_frame_cond, &g_lock, &deadline);
         }
 
         if (!g_presenter_run) {
@@ -137,6 +148,20 @@ static void *presenter_thread(void *arg)
 
         fb = g_vita_conf_fb;
         pthread_mutex_unlock(&g_lock);
+
+        if (egl_present) {
+            /*
+             * Presentation happens in sceDisplaySetFrameBuf on the thread that
+             * owns the EGL context. This thread only paces the vblank clock.
+             */
+            SDL_Delay(16);
+
+            pthread_mutex_lock(&g_lock);
+            g_vcount++;
+            pthread_cond_broadcast(&g_vblank_cond);
+            pthread_mutex_unlock(&g_lock);
+            continue;
+        }
 
         if (!fb.base || fb.width == 0 || fb.height == 0) {
             SDL_Delay(16);
@@ -181,15 +206,34 @@ static void *presenter_thread(void *arg)
 EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayFrameBuf *pParam,
        SceDisplaySetBufSync sync)
 {
+    bool egl_present;
+
     (void)sync;
 
-    if (!pParam)
+    if (!pParam) {
+        pthread_mutex_lock(&g_lock);
+        memset(&g_vita_conf_fb, 0, sizeof(g_vita_conf_fb));
+        egl_present = g_egl_present && !g_window_closed;
+        pthread_mutex_unlock(&g_lock);
+
+        if (egl_present)
+            host_gpu_present_framebuffer(g_gpu_device, NULL, 0, 0, 0);
         return 0;
+    }
 
     pthread_mutex_lock(&g_lock);
     g_vita_conf_fb = *pParam;
-    pthread_cond_broadcast(&g_frame_cond);
+    egl_present = g_egl_present && !g_window_closed;
     pthread_mutex_unlock(&g_lock);
+
+    if (egl_present) {
+        host_gpu_present_framebuffer(g_gpu_device, pParam->base, (int)pParam->width,
+                                     (int)pParam->height, (int)pParam->pitch);
+    } else {
+        pthread_mutex_lock(&g_lock);
+        pthread_cond_broadcast(&g_frame_cond);
+        pthread_mutex_unlock(&g_lock);
+    }
 
     return 0;
 }
@@ -212,7 +256,8 @@ EXPORT(SceDisplayUser, 0x42AE6BBC, int, sceDisplayGetFrameBuf, SceDisplayFrameBu
 EXPORT(SceDisplay, 0x5795E898, int, sceDisplayWaitVblankStart, void)
 {
     pthread_mutex_lock(&g_lock);
-    pthread_cond_wait(&g_vblank_cond, &g_lock);
+    if (g_presenter_run)
+        pthread_cond_wait(&g_vblank_cond, &g_lock);
     pthread_mutex_unlock(&g_lock);
 
     return 0;
@@ -325,15 +370,43 @@ EXPORT(SceDisplay, 0x98436A80, int, sceDisplayUnregisterVblankStartCallback, Sce
 DECLARE_LIBRARY(SceDisplay, 0x5ed8f994);
 DECLARE_LIBRARY(SceDisplayUser, 0x4faacd11);
 
+static void display_try_enable_egl(void)
+{
+    SDL_SysWMinfo info;
+
+    if (!g_gpu_device || !g_window)
+        return;
+
+    SDL_VERSION(&info.version);
+    if (!SDL_GetWindowWMInfo(g_window, &info))
+        return;
+
+    if (info.subsystem != SDL_SYSWM_X11) {
+        LOG("SceDisplay: only X11 windows support EGL presentation, using SDL");
+        return;
+    }
+
+    if (host_gpu_attach_window(g_gpu_device, (void *)(uintptr_t)info.info.x11.window) != 0) {
+        LOG("SceDisplay: EGL window presentation unavailable, using SDL");
+        return;
+    }
+
+    pthread_mutex_lock(&g_lock);
+    g_egl_present = true;
+    pthread_mutex_unlock(&g_lock);
+
+    LOG("SceDisplay: EGL window presentation enabled");
+}
+
 int SceDisplay_init(HostGpuDevice device)
 {
     pthread_condattr_t attr;
     int ret;
 
-    (void)device;
-
     if (g_initialized)
         return 0;
+
+    g_gpu_device = device;
 
     pthread_condattr_init(&attr);
     pthread_cond_init(&g_frame_cond, &attr);
@@ -361,6 +434,8 @@ int SceDisplay_init(HostGpuDevice device)
     if (ret != 0)
         return ret;
 
+    display_try_enable_egl();
+
     g_initialized = true;
 
     return 0;
@@ -370,6 +445,10 @@ int SceDisplay_finish(void)
 {
     if (!g_initialized)
         return 0;
+
+    /* Detach while the SDL window still exists. */
+    if (g_egl_present)
+        host_gpu_detach_window(g_gpu_device);
 
     pthread_mutex_lock(&g_lock);
     g_presenter_run = false;
@@ -383,6 +462,8 @@ int SceDisplay_finish(void)
     pthread_cond_destroy(&g_vblank_cond);
 
     g_initialized = false;
+    g_egl_present = false;
+    g_window_closed = false;
 
     return 0;
 }

@@ -77,9 +77,11 @@ static void install_guest_signal_handlers(void)
 }
 #endif
 
+static bool g_headless;
+
 static int launch(SceKernelThreadEntry entry)
 {
-    HostGpuConfig gpu_config = {960, 544, true};
+    HostGpuConfig gpu_config = { 960, 544, g_headless };
     HostGpuDevice device;
     int ret;
 
@@ -176,8 +178,17 @@ int main(int argc, char *argv[])
     void *entry;
     int ret;
 
-    if (argc > 1)
-        exe_path = argv[1];
+    if (argc > 1) {
+        for (int i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--headless") == 0)
+                g_headless = true;
+            else if (argv[i][0] != '-')
+                exe_path = argv[i];
+        }
+    }
+
+    if (!g_headless && !getenv("DISPLAY") && !getenv("WAYLAND_DISPLAY"))
+        g_headless = true;
 
     create_vita2native_paths();
 

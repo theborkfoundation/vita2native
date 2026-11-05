@@ -162,6 +162,17 @@ if(BUILD_TESTING)
     target_link_libraries(gfx_smoke PRIVATE ${CMAKE_DL_LIBS} m)
     add_test(NAME gfx_smoke COMMAND gfx_smoke)
 
+    add_executable(egl_window_smoke
+        tests/egl_window_smoke.c
+        source/host/host_gfx.c
+        source/host/host_gfx_gl.c
+        source/host/host_gfx_null.c
+    )
+    target_include_directories(egl_window_smoke PRIVATE include source/host external/khronos/include)
+    target_compile_definitions(egl_window_smoke PRIVATE _GNU_SOURCE=1)
+    target_link_libraries(egl_window_smoke PRIVATE ${CMAKE_DL_LIBS} m)
+    add_test(NAME egl_window_smoke COMMAND egl_window_smoke)
+
     add_executable(shader_smoke
         tests/shader_smoke.c
         source/spirv_cross_glsl_es.cpp
