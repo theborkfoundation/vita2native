@@ -1,4 +1,5 @@
 #include <m-dict.h>
+#include <errno.h>
 #include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/error.h>
@@ -10,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
+#include <time.h>
 
 #include "host.h"
 #include "log.h"
@@ -642,6 +644,212 @@ EXPORT(SceProcessmgr, 0x4B879059, int, sceKernelLibcGettimeofday, SceKernelTimev
 }
 
 /* SceLibKernel declared in SceLibKernel.c */
+/* --------------------------------------------------- condition variables */
+
+typedef struct {
+    SceUID uid;
+    char name[32];
+    SceUInt attr;
+    SceUID mutex_id;
+    int waiting;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+} VitaCondInfo;
+
+DICT_DEF2(vita_cond_dict, SceUID, M_DEFAULT_OPLIST, VitaCondInfo *, M_POD_OPLIST)
+static vita_cond_dict_t g_conds;
+static RwLock g_conds_lock;
+
+static void sync_deadline_from_us(struct timespec *ts, unsigned int microseconds)
+{
+    clock_gettime(CLOCK_MONOTONIC, ts);
+    ts->tv_sec += (time_t)(microseconds / 1000000u);
+    ts->tv_nsec += (long)(microseconds % 1000000u) * 1000L;
+    if (ts->tv_nsec >= 1000000000L) {
+        ts->tv_nsec -= 1000000000L;
+        ts->tv_sec++;
+    }
+}
+
+static VitaCondInfo *cond_lookup(SceUID uid)
+{
+    VitaCondInfo *cond;
+
+    rwlockReadLock(&g_conds_lock);
+    cond = *vita_cond_dict_get(g_conds, uid);
+    rwlockReadUnlock(&g_conds_lock);
+
+    return cond;
+}
+
+EXPORT(SceLibKernel, 0x50572FDA, SceUID, sceKernelCreateCond, const char *name, SceUInt attr,
+       SceUID mutex_id, const SceKernelCondOptParam *option)
+{
+    VitaCondInfo *cond;
+
+    (void)option;
+
+    cond = calloc(1, sizeof(*cond));
+    if (!cond)
+        return SCE_KERNEL_ERROR_NO_MEMORY;
+
+    cond->uid = SceSysmem_get_next_uid();
+    cond->attr = attr;
+    cond->mutex_id = mutex_id;
+    if (name)
+        strncpy(cond->name, name, sizeof(cond->name) - 1);
+
+    pthread_mutex_init(&cond->mutex, NULL);
+    pthread_condattr_t cond_attr;
+    pthread_condattr_init(&cond_attr);
+    pthread_condattr_setclock(&cond_attr, CLOCK_MONOTONIC);
+    pthread_cond_init(&cond->cond, &cond_attr);
+    pthread_condattr_destroy(&cond_attr);
+
+    rwlockWriteLock(&g_conds_lock);
+    vita_cond_dict_set_at(g_conds, cond->uid, cond);
+    rwlockWriteUnlock(&g_conds_lock);
+
+    return cond->uid;
+}
+
+EXPORT(SceThreadmgr, 0x879E6EBD, int, sceKernelDeleteCond, SceUID uid)
+{
+    VitaCondInfo *cond = cond_lookup(uid);
+
+    if (!cond)
+        return SCE_KERNEL_ERROR_UNKNOWN_COND_ID;
+
+    rwlockWriteLock(&g_conds_lock);
+    vita_cond_dict_erase(g_conds, uid);
+    rwlockWriteUnlock(&g_conds_lock);
+
+    pthread_mutex_lock(&cond->mutex);
+    pthread_cond_broadcast(&cond->cond);
+    pthread_mutex_unlock(&cond->mutex);
+
+    pthread_cond_destroy(&cond->cond);
+    pthread_mutex_destroy(&cond->mutex);
+    free(cond);
+
+    return 0;
+}
+
+static int cond_wait(VitaCondInfo *cond, unsigned int *timeout)
+{
+    int result = 0;
+
+    /* The caller holds the associated mutex; release it while waiting. */
+    if (sceKernelUnlockMutex(cond->mutex_id, 1) != 0)
+        return SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID;
+
+    pthread_mutex_lock(&cond->mutex);
+    cond->waiting++;
+    if (timeout) {
+        struct timespec ts;
+
+        sync_deadline_from_us(&ts, *timeout);
+        if (pthread_cond_timedwait(&cond->cond, &cond->mutex, &ts) == ETIMEDOUT)
+            result = SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+    } else {
+        pthread_cond_wait(&cond->cond, &cond->mutex);
+    }
+    cond->waiting--;
+    pthread_mutex_unlock(&cond->mutex);
+
+    sceKernelLockMutex(cond->mutex_id, 1, NULL);
+
+    return result;
+}
+
+EXPORT(SceLibKernel, 0xC88D44AD, int, sceKernelWaitCond, SceUID uid, unsigned int *timeout)
+{
+    VitaCondInfo *cond = cond_lookup(uid);
+
+    if (!cond)
+        return SCE_KERNEL_ERROR_UNKNOWN_COND_ID;
+
+    return cond_wait(cond, timeout);
+}
+
+EXPORT(SceLibKernel, 0x4CE42CE2, int, sceKernelWaitCondCB, SceUID uid, unsigned int *timeout)
+{
+    return sceKernelWaitCond(uid, timeout);
+}
+
+EXPORT(SceThreadmgr, 0x6ED2E2DC, int, sceKernelSignalCond, SceUID uid)
+{
+    VitaCondInfo *cond = cond_lookup(uid);
+
+    if (!cond)
+        return SCE_KERNEL_ERROR_UNKNOWN_COND_ID;
+
+    pthread_mutex_lock(&cond->mutex);
+    pthread_cond_signal(&cond->cond);
+    pthread_mutex_unlock(&cond->mutex);
+
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0xC2E7AC22, int, sceKernelSignalCondAll, SceUID uid)
+{
+    VitaCondInfo *cond = cond_lookup(uid);
+
+    if (!cond)
+        return SCE_KERNEL_ERROR_UNKNOWN_COND_ID;
+
+    pthread_mutex_lock(&cond->mutex);
+    pthread_cond_broadcast(&cond->cond);
+    pthread_mutex_unlock(&cond->mutex);
+
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0x1269F4EC, int, sceKernelSignalCondTo, SceUID uid, SceUID thread_id)
+{
+    (void)thread_id;
+
+    return sceKernelSignalCond(uid);
+}
+
+EXPORT(SceLibKernel, 0x6864DCE2, int, sceKernelGetCondInfo, SceUID uid, SceKernelCondInfo *info)
+{
+    VitaCondInfo *cond = cond_lookup(uid);
+
+    if (!cond)
+        return SCE_KERNEL_ERROR_UNKNOWN_COND_ID;
+    if (!info)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    memset(info, 0, sizeof(*info));
+    info->size = sizeof(*info);
+    info->condId = cond->uid;
+    memcpy(info->name, cond->name, sizeof(info->name));
+    info->attr = cond->attr;
+    info->mutexId = cond->mutex_id;
+
+    pthread_mutex_lock(&cond->mutex);
+    info->numWaitThreads = cond->waiting;
+    pthread_mutex_unlock(&cond->mutex);
+
+    return 0;
+}
+
+EXPORT(SceThreadmgr, 0x76BDA02F, SceUID, sceKernelOpenCond, const char *name)
+{
+    (void)name;
+
+    return SCE_KERNEL_ERROR_UNKNOWN_COND_ID;
+}
+
+EXPORT(SceThreadmgr, 0x15C690E0, int, sceKernelCloseCond, SceUID uid)
+{
+    (void)uid;
+
+    return 0;
+}
+
+
 DECLARE_LIBRARY(SceThreadmgr, 0x859a24b1);
 DECLARE_LIBRARY(SceThreadmgrCoredumpTime, 0x5E8D0E22);
 DECLARE_LIBRARY(SceProcessmgr, 0x2dd91812);
@@ -656,6 +864,8 @@ int SceKernelThreadMgr_init(void)
     rwlockInit(&g_vita_thread_infos_lock);
     vita_mutex_info_dict_init(g_vita_mutex_infos);
     vita_msgpipe_info_dict_init(g_vita_msgpipe_infos);
+    vita_cond_dict_init(g_conds);
+    rwlockInit(&g_conds_lock);
     rwlockInit(&g_vita_sync_objects_lock);
 
     return 0;
@@ -667,6 +877,8 @@ int SceKernelThreadMgr_finish(void)
     vita_thread_info_dict_clear(g_vita_thread_infos);
     vita_mutex_info_dict_clear(g_vita_mutex_infos);
     vita_msgpipe_info_dict_clear(g_vita_msgpipe_infos);
+    vita_cond_dict_clear(g_conds);
+    rwlockDestroy(&g_conds_lock);
 
     return 0;
 }

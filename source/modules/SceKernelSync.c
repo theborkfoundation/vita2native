@@ -24,6 +24,7 @@
 #include "host.h"
 #include "log.h"
 #include "module.h"
+#include "modules/SceKernelThreadMgr.h"
 #include "modules/SceSysmem.h"
 #include "util.h"
 

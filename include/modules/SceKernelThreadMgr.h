@@ -27,6 +27,7 @@ int SceKernelThreadMgr_finish(void);
 /* Semaphores, event flags and lightweight mutexes. */
 int SceKernelSync_init(void);
 int SceKernelSync_finish(void);
+
 VitaThreadInfo *SceKernelThreadMgr_get_thread_info(void);
 int SceKernelThreadMgr_main_entry(SceKernelThreadEntry entry, int args, void *argp);
 
