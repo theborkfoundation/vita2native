@@ -1024,6 +1024,175 @@ def build_io_async_elf():
     return assemble_elf(rx, rw, rela, IO_MODINFO)
 
 
+# --- SceLibKernel runtime fixture -------------------------------------------
+
+KR_STUB_BASE = 0x200
+KR_LIB_NAME = 0x270
+KR_MODINFO = 0x280
+KR_IMPORT = 0x2E0
+KR_NIDS = 0x308
+KR_ENTRIES = 0x328
+KR_RX_SIZE = 0x350
+
+KR_LIB = b"SceLibKernel\0"
+KR_LIB_NID = 0xCAE9ACE6
+
+KR_FUNCS = [
+    0x2E84A93B,  # sceKernelAtomicAddAndGet32
+    0x9B43E667,  # sceKernelAtomicGetAndSet32
+    0x1124A1D4,  # sceKernelAtomicCompareAndSet32
+    0xCA3294F1,  # sceKernelAtomicDecIfPositive32
+    0xB110C123,  # sceKernelGetProcessTimeWide
+    0x8AF15B5F,  # sceKernelGetSystemTime
+    0xB2700165,  # sceKernelGetRandomNumber
+    0x261E2C34,  # sceKernelGetOpenPsId
+]
+
+KR_RW_VALUE = 0x000
+KR_RW_CLOCK = 0x008
+KR_RW_RANDOM = 0x010
+KR_RW_PSID = 0x020
+KR_RW_SIZE = 0x040
+
+
+def build_kernel_runtime_elf():
+    """Guest ELF for atomics, clocks, RNG and OpenPsId."""
+    code = []
+    rx_relocs = []
+
+    def emit(word):
+        code.append(word & 0xFFFFFFFF)
+
+    def movw_movt_rw(rd, offset):
+        base = len(code) * 4
+        emit(arm_movw(rd, 0))
+        emit(arm_movt(rd, 0))
+        rx_relocs.append(encode_rela(0, 1, base, offset, R_ARM_MOVW_ABS_NC))
+        rx_relocs.append(encode_rela(0, 1, base + 4, offset, R_ARM_MOVT_ABS))
+
+    def call(index):
+        emit(arm_bl(len(code) * 4, KR_STUB_BASE + index * 12))
+
+    def check(bit):
+        emit(0xE3500000)             # cmp r0, #0
+        emit(0x13844000 | arm_encode_imm(bit))  # orrne r4, r4, #bit
+
+    def check_zero(bit):
+        emit(0xE3500000)             # cmp r0, #0
+        emit(0x03844000 | arm_encode_imm(bit))  # orreq r4, r4, #bit
+
+    def check_equal(value, bit):
+        emit(arm_movw(2, value & 0xFFFF))
+        if value > 0xFFFF:
+            emit(arm_movt(2, value >> 16))
+        emit(0xE1500002)             # cmp r0, r2
+        emit(0x13844000 | arm_encode_imm(bit))  # orrne r4, r4, #bit
+
+    emit(0xE92D4010)                 # push {r4, lr}
+    emit(arm_mov_imm(4, 0))          # mov r4, #0
+
+    # store 5 at value
+    movw_movt_rw(0, KR_RW_VALUE)
+    emit(arm_mov_imm(1, 5))
+    emit(0xE5801000)                 # str r1, [r0]
+
+    # sceKernelAtomicAddAndGet32(&value, 3) == 8
+    movw_movt_rw(0, KR_RW_VALUE)
+    emit(arm_mov_imm(1, 3))
+    call(0)
+    check_equal(8, 1)
+
+    # sceKernelAtomicGetAndSet32(&value, 10) == 8
+    movw_movt_rw(0, KR_RW_VALUE)
+    emit(arm_mov_imm(1, 10))
+    call(1)
+    check_equal(8, 2)
+
+    # sceKernelAtomicCompareAndSet32(&value, 10, 20) == 10
+    movw_movt_rw(0, KR_RW_VALUE)
+    emit(arm_mov_imm(1, 10))
+    emit(arm_mov_imm(2, 20))
+    call(2)
+    check_equal(10, 4)
+
+    # sceKernelAtomicDecIfPositive32(&value) == 19
+    movw_movt_rw(0, KR_RW_VALUE)
+    call(3)
+    check_equal(19, 8)
+
+    # sceKernelGetProcessTimeWide() != 0 (64-bit return in r0:r1)
+    call(4)
+    emit(0xE1800001)                 # orr r0, r0, r1
+    check_zero(16)
+
+    # sceKernelGetSystemTime(&clock), then the clock must be nonzero
+    movw_movt_rw(0, KR_RW_CLOCK)
+    call(5)
+    check(32)
+    movw_movt_rw(1, KR_RW_CLOCK)
+    emit(0xE5910000)                 # ldr r0, [r1]
+    emit(0xE5912004)                 # ldr r2, [r1, #4]
+    emit(0xE1800002)                 # orr r0, r0, r2
+    check_zero(64)
+
+    # sceKernelGetRandomNumber(&random, 16), first word must be nonzero
+    movw_movt_rw(0, KR_RW_RANDOM)
+    emit(arm_mov_imm(1, 16))
+    call(6)
+    check(128)
+    movw_movt_rw(1, KR_RW_RANDOM)
+    emit(0xE5910000)                 # ldr r0, [r1]
+    check_zero(256)
+
+    # sceKernelGetOpenPsId(&psid), first byte must be 0x10
+    movw_movt_rw(0, KR_RW_PSID)
+    call(7)
+    check(512)
+    movw_movt_rw(1, KR_RW_PSID)
+    emit(0xE5D10000)                 # ldrb r0, [r1]
+    check_equal(0x10, 1024)
+
+    emit(0xE1A00004)                 # mov r0, r4
+    emit(0xE3500000)                 # cmp r0, #0
+    emit(0x03A0002A)                 # moveq r0, #42
+    emit(0xE8BD8010)                 # pop {r4, pc}
+
+    assert len(code) * 4 <= KR_STUB_BASE, "kernel runtime fixture code overlaps the stubs"
+
+    rx = bytearray(KR_RX_SIZE)
+    rx[:len(code) * 4] = b"".join(struct.pack("<I", w) for w in code)
+    rx[KR_LIB_NAME:KR_LIB_NAME + len(KR_LIB)] = KR_LIB
+
+    info = bytearray(MODULE_INFO_SIZE)
+    struct.pack_into("<HH", info, 0x00, 0x0000, 0x0101)
+    info[0x04:0x04 + len(MODULE_NAME)] = MODULE_NAME
+    struct.pack_into("<I", info, 0x2C, KR_IMPORT)
+    struct.pack_into("<I", info, 0x30, KR_IMPORT + IMPORT_SIZE)
+    struct.pack_into("<I", info, 0x34, 0x12345678)
+    struct.pack_into("<I", info, 0x44, 0x00000000)
+    struct.pack_into("<I", info, 0x48, 0xFFFFFFFF)
+    struct.pack_into("<I", info, 0x5C, 0x03570011)
+    rx[KR_MODINFO:KR_MODINFO + MODULE_INFO_SIZE] = info
+
+    imp = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp, 0, IMPORT_SIZE, 1, 0, len(KR_FUNCS), 0, 0)
+    struct.pack_into("<I", imp, IMP_LIBRARY_NID, KR_LIB_NID)
+    rx[KR_IMPORT:KR_IMPORT + IMPORT_SIZE] = imp
+
+    for i, nid in enumerate(KR_FUNCS):
+        struct.pack_into("<I", rx, KR_NIDS + i * 4, nid)
+
+    rx_relocs.append(encode_rela(0, 0, KR_IMPORT + IMP_LIBRARY_NAME, KR_LIB_NAME))
+    rx_relocs.append(encode_rela(0, 0, KR_IMPORT + IMP_FUNC_NID_TABLE, KR_NIDS))
+    rx_relocs.append(encode_rela(0, 0, KR_IMPORT + IMP_FUNC_ENTRY_TABLE, KR_ENTRIES))
+    for i in range(len(KR_FUNCS)):
+        rx_relocs.append(encode_rela(0, 0, KR_ENTRIES + i * 4, KR_STUB_BASE + i * 12))
+
+    rw = bytearray(KR_RW_SIZE)
+    rela = bytearray(b"".join(rx_relocs))
+    return assemble_elf(rx, rw, rela, KR_MODINFO)
+
+
 # --- SceAppUtil fixture ----------------------------------------------------
 
 APPUTIL_STUB_BASE = 0x140
@@ -1663,6 +1832,11 @@ def main():
     with open(io_async_path, "wb") as f:
         f.write(build_io_async_elf())
     print(f"wrote {io_async_path}")
+
+    runtime_path = os.path.join(out_dir, "guest_kernel_runtime.elf")
+    with open(runtime_path, "wb") as f:
+        f.write(build_kernel_runtime_elf())
+    print(f"wrote {runtime_path}")
 
     if os.path.exists(os.path.join(shader_dir, "texture_v.gxp")) and os.path.exists(
             os.path.join(shader_dir, "texture_f.gxp")):
