@@ -1,6 +1,7 @@
 #ifndef SCE_SYSMEM_H
 #define SCE_SYSMEM_H
 
+#include <psp2/kernel/sysmem.h>
 #include <psp2/types.h>
 
 #include "gfx.h"
@@ -8,8 +9,10 @@
 typedef struct VitaMemBlockInfo {
     uint32_t index;
     SceUID uid;
+    char name[32];
     void *base;
     uint32_t size;
+    SceKernelMemBlockType type;
     HostGpuMemBlock gpu_memblock;
 } VitaMemBlockInfo;
 

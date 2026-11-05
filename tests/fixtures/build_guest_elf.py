@@ -2803,6 +2803,204 @@ def build_module_export_host_elf():
     return assemble_elf(rx, rw, rela, ME_MODINFO)
 
 
+# --- SceSysmem fixture -----------------------------------------------------
+
+SM_STUB_BASE = 0x280
+SM_LIB_NAME = 0x330
+SM_MODINFO = 0x340
+SM_IMPORT = 0x3A0
+SM_NIDS = 0x3D0
+SM_ENTRIES = 0x400
+SM_RX_SIZE = 0x440
+
+SM_LIB = b"SceSysmem\0"
+SM_LIB_NID = 0x37FE725A
+SM_FUNCS = [
+    0xB9D5EBDE,  # sceKernelAllocMemBlock
+    0xB8EF5818,  # sceKernelGetMemBlockBase
+    0xA33B99D1,  # sceKernelFindMemBlockByAddr
+    0x4010AD65,  # sceKernelGetMemBlockInfoByAddr
+    0x006F3DB4,  # sceKernelGetMemBlockInfoByRange
+    0x8EB8DFBB,  # sceKernelOpenMemBlock
+    0xB680E3A0,  # sceKernelCloseMemBlock
+    0xA91E15EE,  # sceKernelFreeMemBlock
+    0xE2D7E137,  # sceKernelAllocMemBlockForVM
+    0x4EA13FEA,  # sceKernelFreeMemBlockForVM
+    0x19D2A81A,  # sceKernelSyncVMDomain
+]
+
+SM_RW_UID = 0x000
+SM_RW_BASE = 0x004
+SM_RW_INFO = 0x008
+SM_RW_VM_UID = 0x020
+SM_RW_NAME = 0x040
+SM_RW_VM_NAME = 0x048
+SM_RW_SIZE = 0x060
+SM_NAME = b"sysmem-test\0"
+SM_VM_NAME = b"vm-test\0"
+SM_TYPE_USER_RW = 0x0C20D060
+
+
+def build_sysmem_elf():
+    """Guest ELF for the memory-block query, VM and open-by-name surface."""
+    code = []
+    rx_relocs = []
+
+    def emit(word):
+        code.append(word & 0xFFFFFFFF)
+
+    def movw_movt_rw(rd, offset):
+        base = len(code) * 4
+        emit(arm_movw(rd, 0))
+        emit(arm_movt(rd, 0))
+        rx_relocs.append(encode_rela(0, 1, base, offset, R_ARM_MOVW_ABS_NC))
+        rx_relocs.append(encode_rela(0, 1, base + 4, offset, R_ARM_MOVT_ABS))
+
+    def call(index):
+        emit(arm_bl(len(code) * 4, SM_STUB_BASE + index * 12))
+
+    def load_rw(rd, offset):
+        movw_movt_rw(rd, offset)
+        emit(0xE5900000 | (rd << 16) | (rd << 12))
+
+    def store_rw(rs, offset):
+        movw_movt_rw(12, offset)
+        emit(0xE58C0000 | (rs << 12))
+
+    def check(bit):
+        emit(0xE3500000)
+        emit(0x13844000 | arm_encode_imm(bit))
+
+    def check_nonzero(bit):
+        emit(0xE3500000)
+        emit(0x03844000 | arm_encode_imm(bit))
+
+    def check_word(offset, value, bit):
+        movw_movt_rw(1, offset)
+        emit(0xE5910000)
+        emit(arm_movw(2, value & 0xFFFF))
+        emit(arm_movt(2, (value >> 16) & 0xFFFF))
+        emit(0xE1500002)
+        emit(0x13844000 | arm_encode_imm(bit))
+
+    def check_field_equals_id(field_offset, id_offset, bit):
+        movw_movt_rw(1, field_offset)
+        emit(0xE5911000)
+        load_rw(2, id_offset)
+        emit(0xE1510002)
+        emit(0x13844000 | arm_encode_imm(bit))
+
+    emit(0xE92D4010)
+    emit(arm_mov_imm(4, 0))
+
+    # alloc a 4 KiB USER_RW block
+    movw_movt_rw(0, SM_RW_NAME)
+    emit(arm_movw(1, SM_TYPE_USER_RW & 0xFFFF))
+    emit(arm_movt(1, (SM_TYPE_USER_RW >> 16) & 0xFFFF))
+    emit(arm_movw(2, 0x1000))
+    emit(arm_mov_imm(3, 0))
+    call(0)
+    store_rw(0, SM_RW_UID)
+    check_nonzero(1)
+
+    # base, find-by-addr, info-by-addr
+    load_rw(0, SM_RW_UID)
+    movw_movt_rw(1, SM_RW_BASE)
+    call(1)
+    check(2)
+    load_rw(0, SM_RW_BASE)
+    emit(arm_mov_imm(1, 0))
+    call(2)
+    check_nonzero(4)
+    load_rw(0, SM_RW_BASE)
+    movw_movt_rw(1, SM_RW_INFO)
+    call(3)
+    check(8)
+    check_word(SM_RW_INFO, 0x18, 16)
+    check_word(SM_RW_INFO + 8, 0x1000, 32)
+    check_word(SM_RW_INFO + 12, 0xD0, 64)
+    check_word(SM_RW_INFO + 20, SM_TYPE_USER_RW, 128)
+    check_field_equals_id(SM_RW_INFO + 4, SM_RW_BASE, 256)
+
+    # range query covers the first half of the block
+    load_rw(0, SM_RW_BASE)
+    emit(arm_movw(1, 0x800))
+    movw_movt_rw(2, SM_RW_INFO)
+    call(4)
+    check(512)
+    check_word(SM_RW_INFO + 8, 0x1000, 1024)
+
+    # open by name, close, sync VM
+    movw_movt_rw(0, SM_RW_NAME)
+    emit(arm_mov_imm(1, 0))
+    call(5)
+    check_nonzero(2048)
+    load_rw(0, SM_RW_UID)
+    call(6)
+    check(4096)
+    load_rw(0, SM_RW_UID)
+    load_rw(1, SM_RW_BASE)
+    emit(arm_movw(2, 0x1000))
+    call(10)
+    check(8192)
+
+    # VM allocation helper
+    movw_movt_rw(0, SM_RW_VM_NAME)
+    emit(arm_movw(1, 0x1000))
+    call(8)
+    store_rw(0, SM_RW_VM_UID)
+    check_nonzero(16384)
+    load_rw(0, SM_RW_VM_UID)
+    call(9)
+    check(32768)
+
+    load_rw(0, SM_RW_UID)
+    call(7)
+    check(65536)
+
+    emit(0xE1A00004)
+    emit(0xE3500000)
+    emit(0x03A0002A)
+    emit(0xE8BD8010)
+
+    assert len(code) * 4 <= SM_STUB_BASE, f"sysmem fixture code overlaps stubs ({len(code) * 4:#x})"
+
+    rx = bytearray(SM_RX_SIZE)
+    rx[:len(code) * 4] = b"".join(struct.pack("<I", w) for w in code)
+    rx[SM_LIB_NAME:SM_LIB_NAME + len(SM_LIB)] = SM_LIB
+
+    info = bytearray(MODULE_INFO_SIZE)
+    struct.pack_into("<HH", info, 0x00, 0x0000, 0x0101)
+    info[0x04:0x04 + len(MODULE_NAME)] = MODULE_NAME
+    struct.pack_into("<I", info, 0x2C, SM_IMPORT)
+    struct.pack_into("<I", info, 0x30, SM_IMPORT + IMPORT_SIZE)
+    struct.pack_into("<I", info, 0x34, 0x12345678)
+    struct.pack_into("<I", info, 0x44, 0x00000000)
+    struct.pack_into("<I", info, 0x48, 0xFFFFFFFF)
+    struct.pack_into("<I", info, 0x5C, 0x03570011)
+    rx[SM_MODINFO:SM_MODINFO + MODULE_INFO_SIZE] = info
+
+    imp = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp, 0, IMPORT_SIZE, 1, 0, len(SM_FUNCS), 0, 0)
+    struct.pack_into("<I", imp, IMP_LIBRARY_NID, SM_LIB_NID)
+    rx[SM_IMPORT:SM_IMPORT + IMPORT_SIZE] = imp
+
+    for i, nid in enumerate(SM_FUNCS):
+        struct.pack_into("<I", rx, SM_NIDS + i * 4, nid)
+
+    rx_relocs.append(encode_rela(0, 0, SM_IMPORT + IMP_LIBRARY_NAME, SM_LIB_NAME))
+    rx_relocs.append(encode_rela(0, 0, SM_IMPORT + IMP_FUNC_NID_TABLE, SM_NIDS))
+    rx_relocs.append(encode_rela(0, 0, SM_IMPORT + IMP_FUNC_ENTRY_TABLE, SM_ENTRIES))
+    for i in range(len(SM_FUNCS)):
+        rx_relocs.append(encode_rela(0, 0, SM_ENTRIES + i * 4, SM_STUB_BASE + i * 12))
+
+    rw = bytearray(SM_RW_SIZE)
+    rw[SM_RW_NAME:SM_RW_NAME + len(SM_NAME)] = SM_NAME
+    rw[SM_RW_VM_NAME:SM_RW_VM_NAME + len(SM_VM_NAME)] = SM_VM_NAME
+    rela = bytearray(b"".join(rx_relocs))
+    return assemble_elf(rx, rw, rela, SM_MODINFO)
+
+
 # --- SceAppUtil fixture ----------------------------------------------------
 
 APPUTIL_STUB_BASE = 0x140
@@ -3487,6 +3685,10 @@ def main():
         f.write(build_export_library())
     with open(os.path.join(out_dir, "imp.suprx"), "wb") as f:
         f.write(build_import_module())
+
+    sysmem_path = os.path.join(out_dir, "guest_sysmem.elf")
+    with open(sysmem_path, "wb") as f:
+        f.write(build_sysmem_elf())
     print(f"wrote {event_path}")
 
     if os.path.exists(os.path.join(shader_dir, "texture_v.gxp")) and os.path.exists(

@@ -3,6 +3,7 @@
 #include <psp2/kernel/sysmem.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "modules/SceSysmem.h"
 #include "gfx.h"
@@ -58,10 +59,11 @@ EXPORT(SceSysmem, 0xB9D5EBDE, SceUID, sceKernelAllocMemBlock, const char *name,
 
     memset(block, 0, sizeof(*block));
     block->uid = SceSysmem_get_next_uid();
+    if (name)
+        strncpy(block->name, name, sizeof(block->name) - 1);
     block->base = base;
     block->size = size;
-
-    (void)type;
+    block->type = type;
     block->gpu_memblock = host_gpu_memblock_create(block->base, block->size);
     if (!block->gpu_memblock) {
         free(block->base);
@@ -182,16 +184,108 @@ EXPORT(SceSysmem, 0x87CC580B, int, sceKernelGetFreeMemorySize, SceKernelFreeMemo
 
 EXPORT(SceSysmem, 0x8EB8DFBB, int, sceKernelOpenMemBlock, const char *name, int flags)
 {
-    (void)name;
-    (void)flags;
+    VitaMemBlockInfo *block = NULL;
+    vita_memblock_info_dict_it_t it;
 
-    /* Named memory sharing between modules is not supported. */
-    return SCE_KERNEL_ERROR_INVALID_UID;
+    (void)flags;
+    if (!name)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    rwlockReadLock(&g_vita_memblock_infos_lock);
+    for (vita_memblock_info_dict_it(it, g_vita_memblock_infos);
+         !vita_memblock_info_dict_end_p(it); vita_memblock_info_dict_next(it)) {
+        VitaMemBlockInfo *candidate = vita_memblock_info_dict_ref(it)->value;
+
+        if (strncmp(candidate->name, name, sizeof(candidate->name)) == 0) {
+            block = candidate;
+            break;
+        }
+    }
+    rwlockReadUnlock(&g_vita_memblock_infos_lock);
+
+    return block ? (int)block->uid : SCE_KERNEL_ERROR_INVALID_UID;
 }
 
 EXPORT(SceSysmem, 0xB680E3A0, int, sceKernelCloseMemBlock, SceUID uid)
 {
-    (void)uid;
+    return get_memblock_info_for_uid(uid) ? 0 : SCE_KERNEL_ERROR_INVALID_UID;
+}
 
+EXPORT(SceSysmem, 0xA33B99D1, SceUID, sceKernelFindMemBlockByAddr, const void *addr,
+       SceSize size)
+{
+    VitaMemBlockInfo *block = SceSysmem_get_vita_memblock_info_for_addr(addr);
+
+    if (!block)
+        return SCE_KERNEL_ERROR_INVALID_UID;
+    if (size && (uintptr_t)addr + size > (uintptr_t)block->base + block->size)
+        return SCE_KERNEL_ERROR_INVALID_UID;
+
+    return block->uid;
+}
+
+static int memblock_fill_info(VitaMemBlockInfo *block, SceKernelMemBlockInfo *info)
+{
+    if (!info)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    memset(info, 0, sizeof(*info));
+    info->size = sizeof(*info);
+    info->mappedBase = block->base;
+    info->mappedSize = block->size;
+    info->memoryType = SCE_KERNEL_MEMORY_TYPE_NORMAL;
+    info->access = SCE_KERNEL_MEMORY_ACCESS_R | SCE_KERNEL_MEMORY_ACCESS_W;
+    info->type = block->type;
+
+    return 0;
+}
+
+EXPORT(SceSysmem, 0x4010AD65, int, sceKernelGetMemBlockInfoByAddr, void *base,
+       SceKernelMemBlockInfo *info)
+{
+    VitaMemBlockInfo *block = SceSysmem_get_vita_memblock_info_for_addr(base);
+
+    return block ? memblock_fill_info(block, info) : SCE_KERNEL_ERROR_INVALID_UID;
+}
+
+EXPORT(SceSysmem, 0x006F3DB4, int, sceKernelGetMemBlockInfoByRange, void *base, SceSize size,
+       SceKernelMemBlockInfo *info)
+{
+    VitaMemBlockInfo *block = SceSysmem_get_vita_memblock_info_for_addr(base);
+
+    if (!block)
+        return SCE_KERNEL_ERROR_INVALID_UID;
+    if ((uintptr_t)base + size > (uintptr_t)block->base + block->size)
+        return SCE_KERNEL_ERROR_INVALID_UID;
+
+    return memblock_fill_info(block, info);
+}
+
+EXPORT(SceSysmem, 0xE2D7E137, SceUID, sceKernelAllocMemBlockForVM, const char *name, SceSize size)
+{
+    return sceKernelAllocMemBlock(name, SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, size, NULL);
+}
+
+EXPORT(SceSysmem, 0x4EA13FEA, int, sceKernelFreeMemBlockForVM, SceUID uid)
+{
+    return sceKernelFreeMemBlock(uid);
+}
+
+EXPORT(SceSysmem, 0x19D2A81A, int, sceKernelSyncVMDomain, SceUID uid, void *data, SceSize size)
+{
+    VitaMemBlockInfo *block = get_memblock_info_for_uid(uid);
+
+    (void)data;
+    (void)size;
+    return block ? 0 : SCE_KERNEL_ERROR_INVALID_UID;
+}
+
+EXPORT(SceSysmem, 0x9CA3EB2B, int, sceKernelOpenVMDomain, void)
+{
+    return 0;
+}
+
+EXPORT(SceSysmem, 0xD6CA56CA, int, sceKernelCloseVMDomain, void)
+{
     return 0;
 }
