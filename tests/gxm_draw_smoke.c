@@ -487,6 +487,27 @@ int main(int argc, char **argv)
     }
     printf("region clip: ok\n");
 
+    /* 2b: the colour surface clip restricts the writeback area. */
+    memset(scene.pixels, 0, WIDTH * HEIGHT * 4);
+    set_solid_color(solid_pixels, 255, 0, 0, 255);
+    begin_frame_with_surface(&scene, &scene.color_surface);
+    draw_quad(&scene, &solid_texture);
+    end_frame(&scene);
+
+    set_solid_color(solid_pixels, 0, 0, 255, 255);
+    sceGxmColorSurfaceSetClip(&scene.color_surface, 0, 0, WIDTH / 2 - 1, HEIGHT / 2 - 1);
+    begin_frame_with_surface(&scene, &scene.color_surface);
+    draw_quad(&scene, &solid_texture);
+    end_frame(&scene);
+    sceGxmColorSurfaceSetClip(&scene.color_surface, 0, 0, WIDTH - 1, HEIGHT - 1);
+
+    if (!pixel_is(scene.pixels, 4, 4, 0, 0, 255, 255) ||
+        !pixel_is(scene.pixels, WIDTH - 4, HEIGHT - 4, 255, 0, 0, 255)) {
+        fprintf(stderr, "colour surface clip failed\n");
+        goto done;
+    }
+    printf("colour surface clip: ok\n");
+
     /* 3: 2x2 nearest-sampled texture produces at least four distinct colours. */
     begin_frame(&scene);
     draw_quad(&scene, &quad_texture);

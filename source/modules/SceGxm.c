@@ -2846,11 +2846,20 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
         /* GL's origin is bottom-left; Vita surfaces are top-left. */
         {
             uint32_t bytes_per_pixel = gxm_color_format_bytes(surface->colorFormat);
+            uint32_t clip_x0 = surface->clipXMin;
+            uint32_t clip_y0 = surface->clipYMin;
+            uint32_t clip_x1 = surface->clipXMax;
+            uint32_t clip_y1 = surface->clipYMax;
 
-            for (uint32_t y = 0; y < height; y++) {
+            if (clip_x1 >= width)
+                clip_x1 = width - 1;
+            if (clip_y1 >= height)
+                clip_y1 = height - 1;
+
+            for (uint32_t y = clip_y0; y <= clip_y1; y++) {
                 const uint8_t *src = rgba + (size_t)(height - 1 - y) * width * 4;
 
-                for (uint32_t x = 0; x < width; x++) {
+                for (uint32_t x = clip_x0; x <= clip_x1; x++) {
                     uint8_t *dst = (uint8_t *)surface->data +
                                    gxm_color_pixel_offset(surface, x, y, bytes_per_pixel);
 
