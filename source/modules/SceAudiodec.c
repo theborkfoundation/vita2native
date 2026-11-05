@@ -80,8 +80,9 @@ EXPORT(SceAudiodecUser, 0xDB712ABC, int, sceAudiodecGetContextSize, SceAudiodecC
     if (!ctrl)
         return SCE_AUDIODEC_ERROR_INVALID_PTR;
 
-    /* Everything lives on the host; the guest work area can stay small. */
-    ctrl->size = sizeof(*ctrl);
+    /* Everything lives on the host, so no guest work area is needed. The
+       caller's control block is left untouched: its `size` field describes
+       the structure itself. */
     return 0;
 }
 

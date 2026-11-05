@@ -435,7 +435,15 @@ EXPORT(SceAtrac, 0x68DFC199, int, sceAtracGetContentInfo, int handle,
     content_info->frameSample = stream->frame_samples;
     content_info->fixedEncBlockSize = stream->bytes_per_frame;
     content_info->fixedEncBlockSample = stream->frame_samples;
-    content_info->bitRate = (SceUInt32)stream->codec.channels;
+    {
+        uint32_t samples = (uint32_t)stream->codec.frameSamples *
+                           (uint32_t)stream->codec.framesInSuperframe;
+
+        content_info->bitRate =
+            samples ? (uint32_t)(((uint64_t)stream->codec.superframeSize * 8ull *
+                                  (uint64_t)stream->codec.samplingRate) / samples)
+                    : 0;
+    }
     content_info->endSample = stream->total_frames
                                   ? (int)(stream->total_frames * stream->frame_samples)
                                   : -1;
