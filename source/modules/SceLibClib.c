@@ -419,6 +419,26 @@ EXPORT(SceLibKernel, 0x37691BF8, void, __stack_chk_fail, void)
     abort();
 }
 
+EXPORT(SceLibKernel, 0x4458BCF3, uint32_t, SceKernelStackChkGuard, void)
+{
+    return 0x0DEADBEEu;
+}
+
+EXPORT(SceLibKernel, 0xEC287338, void, sceKernelStackChkFail, void)
+{
+    abort();
+}
+
+EXPORT(SceLibKernel, 0x1EA375E6, uint32_t, sceLibSspStackChkGuard, void)
+{
+    return 0x0DEADBEEu;
+}
+
+EXPORT(SceLibKernel, 0x39AD080B, void, sceLibSspStackChkFail, void)
+{
+    abort();
+}
+
 EXPORT(SceLibKernel, 0x4373B548, int, __sce_aeabi_idiv0, void)
 {
     return 0;
