@@ -146,6 +146,18 @@ EXPORT(SceLibKernel, 0x1BD67366, SceUID, sceKernelCreateSema, const char *name, 
     return sema->uid;
 }
 
+EXPORT(SceThreadmgr, 0x0D76458E, SceUID, _sceKernelCreateSema, const char *name, SceUInt attr,
+       int init_count, int max_count, SceKernelSemaOptParam *option)
+{
+    return sceKernelCreateSema(name, attr, init_count, max_count, option);
+}
+
+EXPORT(SceThreadmgr, 0xBD06F27C, SceUID, _sceKernelCreateSema_16XX, const char *name, SceUInt attr,
+       int init_count, int max_count, SceKernelSemaOptParam *option)
+{
+    return sceKernelCreateSema(name, attr, init_count, max_count, option);
+}
+
 EXPORT(SceThreadmgr, 0xDB32948A, int, sceKernelDeleteSema, SceUID uid)
 {
     VitaSemaInfo *sema = sema_lookup(uid);
@@ -206,6 +218,18 @@ EXPORT(SceLibKernel, 0x174692B4, int, sceKernelWaitSemaCB, SceUID uid, int signa
     return sceKernelWaitSema(uid, signal, timeout);
 }
 
+EXPORT(SceThreadmgr, 0x45389B6B, int, _sceKernelWaitSema, SceUID uid, int signal,
+       SceUInt *timeout)
+{
+    return sceKernelWaitSema(uid, signal, timeout);
+}
+
+EXPORT(SceThreadmgr, 0xF8E06784, int, _sceKernelWaitSemaCB, SceUID uid, int signal,
+       SceUInt *timeout)
+{
+    return sceKernelWaitSemaCB(uid, signal, timeout);
+}
+
 EXPORT(SceThreadmgr, 0x866EF048, int, sceKernelPollSema, SceUID uid, int signal)
 {
     VitaSemaInfo *sema = sema_lookup(uid);
@@ -246,6 +270,12 @@ EXPORT(SceLibKernel, 0x66D6BF05, int, sceKernelCancelSema, SceUID uid, int set_c
     return 0;
 }
 
+EXPORT(SceThreadmgr, 0x1CAF805D, int, _sceKernelCancelSema, SceUID uid, int set_count,
+       int *num_wait_threads)
+{
+    return sceKernelCancelSema(uid, set_count, num_wait_threads);
+}
+
 EXPORT(SceLibKernel, 0x595D3FA6, int, sceKernelGetSemaInfo, SceUID uid, SceKernelSemaInfo *info)
 {
     VitaSemaInfo *sema = sema_lookup(uid);
@@ -269,6 +299,12 @@ EXPORT(SceLibKernel, 0x595D3FA6, int, sceKernelGetSemaInfo, SceUID uid, SceKerne
     pthread_mutex_unlock(&sema->mutex);
 
     return 0;
+}
+
+EXPORT(SceThreadmgr, 0x0402C633, int, _sceKernelGetSemaInfo, SceUID uid,
+       SceKernelSemaInfo *info)
+{
+    return sceKernelGetSemaInfo(uid, info);
 }
 
 EXPORT(SceThreadmgr, 0xCBE235C7, SceUID, sceKernelOpenSema, const char *name)
@@ -410,6 +446,12 @@ EXPORT(SceLibKernel, 0x8516D040, SceUID, sceKernelCreateEventFlag, const char *n
     return evf->uid;
 }
 
+EXPORT(SceThreadmgr, 0x38AA5E8E, SceUID, _sceKernelCreateEventFlag, const char *name, int attr,
+       int init_pattern, SceKernelEventFlagOptParam *option)
+{
+    return sceKernelCreateEventFlag(name, attr, init_pattern, option);
+}
+
 EXPORT(SceThreadmgr, 0x5840162C, int, sceKernelDeleteEventFlag, SceUID uid)
 {
     VitaEventFlagInfo *evf = event_flag_lookup(uid);
@@ -479,6 +521,24 @@ EXPORT(SceLibKernel, 0xE737B1DF, int, sceKernelWaitEventFlagCB, SceUID uid, unsi
     return sceKernelWaitEventFlag(uid, bits, wait, out_bits, timeout);
 }
 
+EXPORT(SceThreadmgr, 0xFCE2F728, int, _sceKernelWaitEventFlag, SceUID uid, unsigned int bits,
+       unsigned int wait, unsigned int *out_bits, SceUInt *timeout)
+{
+    return sceKernelWaitEventFlag(uid, bits, wait, out_bits, timeout);
+}
+
+EXPORT(SceThreadmgr, 0x401E0C68, int, _sceKernelWaitEventFlagCB, SceUID uid, unsigned int bits,
+       unsigned int wait, unsigned int *out_bits, SceUInt *timeout)
+{
+    return sceKernelWaitEventFlagCB(uid, bits, wait, out_bits, timeout);
+}
+
+EXPORT(SceThreadmgr, 0xDAB1B1C8, int, _sceKernelPollEventFlag, SceUID uid, unsigned int bits,
+       unsigned int wait, unsigned int *out_bits)
+{
+    return sceKernelPollEventFlag(uid, bits, wait, out_bits);
+}
+
 EXPORT(SceLibKernel, 0x1FBB0FE1, int, sceKernelPollEventFlag, int uid, unsigned int bits,
        unsigned int wait, unsigned int *out_bits)
 {
@@ -513,6 +573,20 @@ EXPORT(SceLibKernel, 0x8BA4C0C1, int, sceKernelGetEventFlagInfo, SceUID uid,
     pthread_mutex_unlock(&evf->mutex);
 
     return 0;
+}
+
+EXPORT(SceThreadmgr, 0x106C216F, int, _sceKernelGetEventFlagInfo, SceUID uid,
+       SceKernelEventFlagInfo *info)
+{
+    return sceKernelGetEventFlagInfo(uid, info);
+}
+
+int sceKernelCancelEventFlag(SceUID uid, unsigned int set_pattern, int *num_wait_threads);
+
+EXPORT(SceThreadmgr, 0xF76F3056, int, _sceKernelCancelEventFlag, SceUID uid,
+       unsigned int set_pattern, int *num_wait_threads)
+{
+    return sceKernelCancelEventFlag(uid, set_pattern, num_wait_threads);
 }
 
 EXPORT(SceLibKernel, 0x2A12D9B7, int, sceKernelCancelEventFlag, SceUID uid, unsigned int set_pattern,

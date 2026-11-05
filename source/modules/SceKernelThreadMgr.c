@@ -748,6 +748,12 @@ EXPORT(SceLibKernel, 0xED53334A, SceUID, sceKernelCreateMutex, const char *name,
     return info->uid;
 }
 
+EXPORT(SceThreadmgr, 0x92667AE5, SceUID, _sceKernelCreateMutex, const char *name, SceUInt attr,
+       int init_count, SceKernelMutexOptParam *option)
+{
+    return sceKernelCreateMutex(name, attr, init_count, option);
+}
+
 EXPORT(SceThreadmgr, 0xCB78710D, int, sceKernelDeleteMutex, SceUID mutexid)
 {
     VitaMutexInfo *info = get_mutex_info(mutexid);
@@ -779,6 +785,20 @@ EXPORT(SceLibKernel, 0x1D8D7945, int, sceKernelLockMutex, SceUID mutexid, int lo
         pthread_mutex_lock(&info->mutex);
 
     return 0;
+}
+
+int sceKernelLockMutexCB(SceUID mutexid, int lock_count, SceUInt *timeout);
+
+EXPORT(SceThreadmgr, 0x7FA945AD, int, _sceKernelLockMutex, SceUID mutexid, int lock_count,
+       SceUInt *timeout)
+{
+    return sceKernelLockMutex(mutexid, lock_count, timeout);
+}
+
+EXPORT(SceThreadmgr, 0xDB9F5333, int, _sceKernelLockMutexCB, SceUID mutexid, int lock_count,
+       SceUInt *timeout)
+{
+    return sceKernelLockMutexCB(mutexid, lock_count, timeout);
 }
 
 EXPORT(SceLibKernel, 0x2BDAA524, int, sceKernelLockMutexCB, SceUID mutexid, int lockCount,
@@ -1348,6 +1368,15 @@ static VitaCondInfo *cond_lookup(SceUID uid)
     return cond;
 }
 
+SceUID sceKernelCreateCond(const char *name, SceUInt attr, SceUID mutex_id,
+                           const SceKernelCondOptParam *option);
+
+EXPORT(SceThreadmgr, 0xCC14FA59, SceUID, _sceKernelCreateCond, const char *name, SceUInt attr,
+       SceUID mutex_id, const SceKernelCondOptParam *option)
+{
+    return sceKernelCreateCond(name, attr, mutex_id, option);
+}
+
 EXPORT(SceLibKernel, 0x50572FDA, SceUID, sceKernelCreateCond, const char *name, SceUInt attr,
        SceUID mutex_id, const SceKernelCondOptParam *option)
 {
@@ -1438,6 +1467,16 @@ EXPORT(SceLibKernel, 0xC88D44AD, int, sceKernelWaitCond, SceUID uid, unsigned in
     return cond_wait(cond, timeout);
 }
 
+EXPORT(SceThreadmgr, 0x040795C7, int, _sceKernelWaitCond, SceUID uid, unsigned int *timeout)
+{
+    return sceKernelWaitCond(uid, timeout);
+}
+
+EXPORT(SceThreadmgr, 0x452B0AB3, int, _sceKernelWaitCondCB, SceUID uid, unsigned int *timeout)
+{
+    return sceKernelWaitCondCB(uid, timeout);
+}
+
 EXPORT(SceLibKernel, 0x4CE42CE2, int, sceKernelWaitCondCB, SceUID uid, unsigned int *timeout)
 {
     return sceKernelWaitCond(uid, timeout);
@@ -1515,6 +1554,12 @@ EXPORT(SceThreadmgr, 0x15C690E0, int, sceKernelCloseCond, SceUID uid)
     return 0;
 }
 
+
+EXPORT(SceThreadmgr, 0x05C51CE1, int, _sceKernelGetCondInfo, SceUID uid,
+       SceKernelCondInfo *info)
+{
+    return sceKernelGetCondInfo(uid, info);
+}
 
 EXPORT(SceLibKernel, 0xC53A9848, int, sceKernelGetThreadCurrentPriority, void)
 {
