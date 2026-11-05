@@ -342,6 +342,11 @@ EXPORT(SceLibKernel, 0xF08DE149, int, sceKernelStartThread, SceUID thid, SceSize
     return start_thread(thid, arglen, argp);
 }
 
+EXPORT(SceThreadmgr, 0xC30B1745, int, _sceKernelStartThread, SceUID thid, SceSize arglen, void *argp)
+{
+    return sceKernelStartThread(thid, arglen, argp);
+}
+
 EXPORT(SceThreadmgrCoredumpTime, 0x0C8A38E1, int NORETURN, sceKernelExitThread, int status)
 {
     VitaThreadInfo *ti = SceKernelThreadMgr_get_thread_info();
@@ -354,6 +359,14 @@ EXPORT(SceThreadmgr, 0x1D17DECF, int NORETURN, sceKernelExitDeleteThread, int st
 {
     sceKernelExitThread(status);
     // TODO: Delete
+}
+
+int sceKernelWaitThreadEnd(SceUID thid, int *stat, SceUInt *timeout);
+
+EXPORT(SceThreadmgr, 0xEA5C52F5, int, _sceKernelWaitThreadEnd, SceUID thid, int *stat,
+       SceUInt *timeout)
+{
+    return sceKernelWaitThreadEnd(thid, stat, timeout);
 }
 
 EXPORT(SceLibKernel, 0xDDB395A9, int, sceKernelWaitThreadEnd, SceUID thid, int *stat,
@@ -424,6 +437,21 @@ EXPORT(SceThreadmgr, 0x4B675D05, int, sceKernelDelayThread, SceUInt delay)
 {
     host_sleep_ns((s64)delay * 1000);
     return 0;
+}
+
+EXPORT(SceThreadmgr, 0x9C0180E1, int, sceKernelDelayThreadCB, SceUInt delay)
+{
+    return sceKernelDelayThread(delay);
+}
+
+EXPORT(SceThreadmgr, 0x97C4A7C4, int, sceKernelDelayThread200, SceUInt delay)
+{
+    return sceKernelDelayThread(delay);
+}
+
+EXPORT(SceThreadmgr, 0x34938242, int, sceKernelDelayThreadCB200, SceUInt delay)
+{
+    return sceKernelDelayThread(delay);
 }
 
 EXPORT(SceThreadmgr, 0xBACA6891, void *, sceKernelGetThreadTLSAddr, SceUID thid, int key)
@@ -1380,6 +1408,12 @@ EXPORT(SceLibKernel, 0x8D9C5461, int, sceKernelGetThreadInfo, SceUID thid,
     info->exitStatus = ti->return_status;
 
     return 0;
+}
+
+EXPORT(SceThreadmgr, 0xB373D8A1, int, _sceKernelGetThreadInfo, SceUID thid,
+       SceKernelThreadInfo *info)
+{
+    return sceKernelGetThreadInfo(thid, info);
 }
 
 EXPORT(SceThreadmgr, 0x9DCB4B7A, SceUID, sceKernelGetProcessId, void)
