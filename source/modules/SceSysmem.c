@@ -142,3 +142,56 @@ VitaMemBlockInfo *SceSysmem_get_vita_memblock_info_for_addr(const void *addr)
 
     return block;
 }
+
+EXPORT(SceSysmem, 0xD0D4F729, int, sceKernelGetModel, void)
+{
+    return SCE_KERNEL_MODEL_VITA;
+}
+
+EXPORT(SceSysmem, 0xA2CB322F, int, sceKernelGetModelForCDialog, void)
+{
+    return SCE_KERNEL_MODEL_VITA;
+}
+
+EXPORT(SceSysmem, 0x1453A5E5, int, sceKernelIsPSVitaTV, void)
+{
+    return 0;
+}
+
+EXPORT(SceSysmem, 0x0144FBD9, int, sceKernelCheckModelCapability, int mask)
+{
+    (void)mask;
+
+    return 0;
+}
+
+EXPORT(SceSysmem, 0x87CC580B, int, sceKernelGetFreeMemorySize, SceKernelFreeMemorySizeInfo *info)
+{
+    if (!info)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    info->size = sizeof(*info);
+    /* Report what a Vita would, so titles that size pools from this keep a
+       sensible layout even though the host has more memory. */
+    info->size_user = 0x6000000;
+    info->size_cdram = 0x1000000;
+    info->size_phycont = 0x800000;
+
+    return 0;
+}
+
+EXPORT(SceSysmem, 0x8EB8DFBB, int, sceKernelOpenMemBlock, const char *name, int flags)
+{
+    (void)name;
+    (void)flags;
+
+    /* Named memory sharing between modules is not supported. */
+    return SCE_KERNEL_ERROR_INVALID_UID;
+}
+
+EXPORT(SceSysmem, 0xB680E3A0, int, sceKernelCloseMemBlock, SceUID uid)
+{
+    (void)uid;
+
+    return 0;
+}
