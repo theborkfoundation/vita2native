@@ -218,6 +218,12 @@ typedef struct SceGxmRenderTarget {
     GLuint depth;
     GLuint depth_rb;
     bool depth_is_texture;
+
+    /* Multisampled draw target; resolved into fbo at EndScene. */
+    GLuint msaa_fbo;
+    GLuint msaa_color;
+    GLuint msaa_depth;
+    uint32_t samples;
 } SceGxmRenderTarget;
 
 typedef struct {
@@ -1607,6 +1613,41 @@ EXPORT(SceGxm, 0x207AF96B, int, sceGxmCreateRenderTarget, const SceGxmRenderTarg
             if (g_gl->glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
                 LOG("SceGxm: render target framebuffer incomplete");
         }
+
+        /* Optional multisampled draw target, resolved into the FBO above. */
+        rt->samples = params->multisampleMode == SCE_GXM_MULTISAMPLE_4X   ? 4
+                      : params->multisampleMode == SCE_GXM_MULTISAMPLE_2X ? 2
+                                                                          : 0;
+        if (rt->samples && g_gl->glRenderbufferStorageMultisample) {
+            rt->samples = rt->samples > 4 ? 4 : rt->samples;
+            g_gl->glGenRenderbuffers(1, &rt->msaa_color);
+            g_gl->glBindRenderbuffer(GL_RENDERBUFFER, rt->msaa_color);
+            g_gl->glRenderbufferStorageMultisample(GL_RENDERBUFFER, (GLsizei)rt->samples, GL_RGBA8,
+                                                   params->width, params->height);
+            g_gl->glGenRenderbuffers(1, &rt->msaa_depth);
+            g_gl->glBindRenderbuffer(GL_RENDERBUFFER, rt->msaa_depth);
+            g_gl->glRenderbufferStorageMultisample(GL_RENDERBUFFER, (GLsizei)rt->samples,
+                                                   GL_DEPTH24_STENCIL8, params->width,
+                                                   params->height);
+            g_gl->glGenFramebuffers(1, &rt->msaa_fbo);
+            g_gl->glBindFramebuffer(GL_FRAMEBUFFER, rt->msaa_fbo);
+            g_gl->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER,
+                                            rt->msaa_color);
+            g_gl->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                                            GL_RENDERBUFFER, rt->msaa_depth);
+            if (g_gl->glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+                LOG("SceGxm: multisampled framebuffer incomplete, falling back");
+                g_gl->glDeleteFramebuffers(1, &rt->msaa_fbo);
+                g_gl->glDeleteRenderbuffers(1, &rt->msaa_color);
+                g_gl->glDeleteRenderbuffers(1, &rt->msaa_depth);
+                rt->msaa_fbo = 0;
+                rt->msaa_color = 0;
+                rt->msaa_depth = 0;
+                rt->samples = 0;
+            }
+        } else {
+            rt->samples = 0;
+        }
         g_gl->glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 
@@ -1625,6 +1666,12 @@ EXPORT(SceGxm, 0x0B94C50A, int, sceGxmDestroyRenderTarget, SceGxmRenderTarget *r
             g_gl->glDeleteTextures(1, &renderTarget->depth);
         if (renderTarget->depth_rb)
             g_gl->glDeleteRenderbuffers(1, &renderTarget->depth_rb);
+        if (renderTarget->msaa_fbo)
+            g_gl->glDeleteFramebuffers(1, &renderTarget->msaa_fbo);
+        if (renderTarget->msaa_color)
+            g_gl->glDeleteRenderbuffers(1, &renderTarget->msaa_color);
+        if (renderTarget->msaa_depth)
+            g_gl->glDeleteRenderbuffers(1, &renderTarget->msaa_depth);
     }
     free(renderTarget);
     return 0;
@@ -2529,6 +2576,33 @@ static void gxm_ds_store_surface(SceGxmRenderTarget *rt,
     free(depth_values);
 }
 
+static void gxm_resolve_render_target(SceGxmRenderTarget *rt)
+{
+    if (!rt->samples || !rt->msaa_fbo)
+        return;
+
+    g_gl->glBindFramebuffer(GL_READ_FRAMEBUFFER, rt->msaa_fbo);
+    g_gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, rt->fbo);
+    g_gl->glBlitFramebuffer(0, 0, (GLint)rt->params.width, (GLint)rt->params.height, 0, 0,
+                            (GLint)rt->params.width, (GLint)rt->params.height,
+                            GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT,
+                            GL_NEAREST);
+    g_gl->glBindFramebuffer(GL_FRAMEBUFFER, rt->fbo);
+}
+
+static void gxm_blit_depth_stencil_to_msaa(SceGxmRenderTarget *rt)
+{
+    if (!rt->samples || !rt->msaa_fbo)
+        return;
+
+    g_gl->glBindFramebuffer(GL_READ_FRAMEBUFFER, rt->fbo);
+    g_gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, rt->msaa_fbo);
+    g_gl->glBlitFramebuffer(0, 0, (GLint)rt->params.width, (GLint)rt->params.height, 0, 0,
+                            (GLint)rt->params.width, (GLint)rt->params.height,
+                            GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, GL_NEAREST);
+    g_gl->glBindFramebuffer(GL_FRAMEBUFFER, rt->msaa_fbo);
+}
+
 EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsigned int flags,
        const SceGxmRenderTarget *renderTarget, const SceGxmValidRegion *validRegion,
        SceGxmSyncObject *vertexSyncObject, SceGxmSyncObject *fragmentSyncObject,
@@ -2565,11 +2639,15 @@ EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsign
     context->in_scene = true;
 
     if (g_gl) {
-        g_gl->glBindFramebuffer(GL_FRAMEBUFFER, renderTarget->fbo);
+        GLuint draw_fbo = renderTarget->samples ? renderTarget->msaa_fbo : renderTarget->fbo;
+
+        g_gl->glBindFramebuffer(GL_FRAMEBUFFER, draw_fbo);
         g_gl->glViewport(0, 0, renderTarget->params.width, renderTarget->params.height);
         g_gl->glDisable(GL_SCISSOR_TEST);
 
-        if (!gxm_ds_load_surface((SceGxmRenderTarget *)renderTarget, context->ds_surface)) {
+        if (gxm_ds_load_surface((SceGxmRenderTarget *)renderTarget, context->ds_surface)) {
+            gxm_blit_depth_stencil_to_msaa((SceGxmRenderTarget *)renderTarget);
+        } else {
             float bg_depth = 1.0f;
             unsigned int bg_stencil = 0;
 
@@ -2745,6 +2823,7 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
     if (!g_gl || !context->render_target)
         return 0;
 
+    gxm_resolve_render_target((SceGxmRenderTarget *)context->render_target);
     g_gl->glBindFramebuffer(GL_FRAMEBUFFER, context->render_target->fbo);
     g_gl->glFinish();
 

@@ -676,6 +676,33 @@ int main(int argc, char **argv)
         printf("tiled colour surface: ok\n");
     }
 
+    /* 6c: 4x multisampled render target resolves into the colour surface. */
+    {
+        SceGxmRenderTarget *msaa_target = NULL;
+        SceGxmRenderTarget *saved_target = scene.target;
+        SceGxmRenderTargetParams msaa_params = target_params;
+
+        msaa_params.multisampleMode = SCE_GXM_MULTISAMPLE_4X;
+        if (sceGxmCreateRenderTarget(&msaa_params, &msaa_target) != 0) {
+            fprintf(stderr, "could not create a multisampled render target\n");
+            goto done;
+        }
+
+        scene.target = msaa_target;
+        set_solid_color(solid_pixels, 90, 180, 30, 255);
+        begin_frame(&scene);
+        draw_quad(&scene, &solid_texture);
+        end_frame(&scene);
+        scene.target = saved_target;
+        sceGxmDestroyRenderTarget(msaa_target);
+
+        if (!pixel_is(scene.pixels, WIDTH / 2, HEIGHT / 2, 90, 180, 30, 255)) {
+            fprintf(stderr, "multisampled resolve did not reach the colour surface\n");
+            goto done;
+        }
+        printf("4x multisample target: ok\n");
+    }
+
     /* 7: a deferred context records a draw that the immediate context replays. */
     {
         SceGxmDeferredContextParams deferred_params;

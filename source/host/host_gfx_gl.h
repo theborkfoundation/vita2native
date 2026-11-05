@@ -92,7 +92,9 @@
     X(PFNGLSTENCILOPSEPARATEPROC, glStencilOpSeparate)                                             \
     X(PFNGLSTENCILMASKSEPARATEPROC, glStencilMaskSeparate)                                         \
     X(PFNGLCLEARDEPTHFPROC, glClearDepthf)                                                         \
-    X(PFNGLCLEARSTENCILPROC, glClearStencil)
+    X(PFNGLCLEARSTENCILPROC, glClearStencil)                                                       \
+    X(PFNGLBLITFRAMEBUFFERPROC, glBlitFramebuffer)                                                 \
+    X(PFNGLRENDERBUFFERSTORAGEMULTISAMPLEPROC, glRenderbufferStorageMultisample)
 
 typedef struct HostGles {
     void *egl_lib;
