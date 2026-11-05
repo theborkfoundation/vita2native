@@ -105,6 +105,9 @@ typedef struct {
     const SceGxmProgramParameter *wvp;
     SceGxmColorSurface color_surface;
     SceGxmDepthStencilSurface depth_surface;
+    float *depth_values;
+    uint32_t *packed_depth_stencil;
+    uint8_t *stencil_values;
     uint32_t *pixels;
     const SceGxmProgramParameter *position;
     const SceGxmProgramParameter *texcoord;
@@ -239,6 +242,37 @@ static void draw_quad(Scene *scene, const SceGxmTexture *texture)
                       quad_indices, 6) == 0);
 }
 
+static void draw_quad_at_z(Scene *scene, const SceGxmTexture *texture, float z)
+{
+    float vertices[4][4];
+
+    for (int i = 0; i < 4; i++) {
+        vertices[i][0] = quad_vertices[i][0];
+        vertices[i][1] = quad_vertices[i][1];
+        vertices[i][2] = z;
+        vertices[i][3] = quad_vertices[i][3];
+    }
+
+    sceGxmSetVertexProgram(scene->context, scene->vertex_program);
+    sceGxmSetFragmentProgram(scene->context, scene->fragment_program);
+    assert(sceGxmSetFragmentTexture(scene->context, 0, texture) == 0);
+    assert(sceGxmSetVertexStream(scene->context, 0, vertices) == 0);
+    assert(sceGxmSetVertexStream(scene->context, 1, quad_uvs) == 0);
+    set_identity_wvp(scene);
+    assert(sceGxmDraw(scene->context, SCE_GXM_PRIMITIVE_TRIANGLES, SCE_GXM_INDEX_FORMAT_U16,
+                      quad_indices, 6) == 0);
+}
+
+static void set_solid_color(uint8_t *solid_pixels, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+{
+    for (uint32_t i = 0; i < 8 * 8; i++) {
+        solid_pixels[i * 4 + 0] = r;
+        solid_pixels[i * 4 + 1] = g;
+        solid_pixels[i * 4 + 2] = b;
+        solid_pixels[i * 4 + 3] = a;
+    }
+}
+
 static uint32_t *begin_frame(Scene *scene)
 {
     memset(scene->pixels, 0, WIDTH * HEIGHT * 4);
@@ -333,6 +367,11 @@ int main(int argc, char **argv)
                                   SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, WIDTH, HEIGHT, WIDTH,
                                   scene.pixels) == 0);
     assert(sceGxmDepthStencilSurfaceInitDisabled(&scene.depth_surface) == 0);
+
+    scene.depth_values = calloc((size_t)WIDTH * HEIGHT, sizeof(float));
+    scene.packed_depth_stencil = calloc((size_t)WIDTH * HEIGHT, sizeof(uint32_t));
+    scene.stencil_values = calloc((size_t)WIDTH * HEIGHT, 1);
+    assert(scene.depth_values && scene.packed_depth_stencil && scene.stencil_values);
 
     /* Solid texture: bytes R,G,B,A for A8B8G8R8. Linear rows are padded to 8
      * pixels by GXM, so fill an 8x8 block. */
@@ -479,12 +518,112 @@ int main(int argc, char **argv)
         printf("wireframe: %u pixels\n", green);
     }
 
+    /* 5: depth test plus force store / force load of the depth surface. */
+    assert(sceGxmDepthStencilSurfaceInit(&scene.depth_surface, SCE_GXM_DEPTH_STENCIL_FORMAT_DF32,
+                                         SCE_GXM_DEPTH_STENCIL_SURFACE_LINEAR, WIDTH,
+                                         scene.depth_values, NULL) == 0);
+    if (sceGxmDepthStencilSurfaceGetFormat(&scene.depth_surface) !=
+            SCE_GXM_DEPTH_STENCIL_FORMAT_DF32 ||
+        sceGxmDepthStencilSurfaceGetStrideInSamples(&scene.depth_surface) != WIDTH ||
+        !sceGxmDepthStencilSurfaceIsEnabled(&scene.depth_surface)) {
+        fprintf(stderr, "depth surface queries failed\n");
+        goto done;
+    }
+
+    sceGxmDepthStencilSurfaceSetForceStoreMode(&scene.depth_surface,
+                                               SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED);
+    sceGxmDepthStencilSurfaceSetForceLoadMode(&scene.depth_surface,
+                                              SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_DISABLED);
+
+    set_solid_color(solid_pixels, 255, 0, 0, 255);
+    begin_frame(&scene);
+    draw_quad_at_z(&scene, &solid_texture, 0.25f);
+    set_solid_color(solid_pixels, 0, 255, 0, 255);
+    draw_quad_at_z(&scene, &solid_texture, 0.75f);
+    end_frame(&scene);
+
+    if (!pixel_is(scene.pixels, WIDTH / 2, HEIGHT / 2, 255, 0, 0, 255)) {
+        fprintf(stderr, "depth test did not keep the near fragment\n");
+        goto done;
+    }
+    if (!(scene.depth_values[0] > 0.60f && scene.depth_values[0] < 0.65f)) {
+        fprintf(stderr, "stored depth is %f, expected ~0.625\n", scene.depth_values[0]);
+        goto done;
+    }
+    printf("depth test / store: ok\n");
+
+    /* 5b: force load makes the far fragment fail against the stored depth. */
+    sceGxmDepthStencilSurfaceSetForceLoadMode(&scene.depth_surface,
+                                              SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED);
+    set_solid_color(solid_pixels, 0, 255, 0, 255);
+    begin_frame(&scene);
+    draw_quad_at_z(&scene, &solid_texture, 0.75f);
+    end_frame(&scene);
+
+    if (!pixel_is(scene.pixels, WIDTH / 2, HEIGHT / 2, 255, 0, 0, 255)) {
+        fprintf(stderr, "force-loaded depth did not reject the far fragment\n");
+        goto done;
+    }
+    printf("depth force load: ok\n");
+
+    /* 5c: without force load the depth surface starts from the background. */
+    sceGxmDepthStencilSurfaceSetForceLoadMode(&scene.depth_surface,
+                                              SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_DISABLED);
+    begin_frame(&scene);
+    draw_quad_at_z(&scene, &solid_texture, 0.75f);
+    end_frame(&scene);
+
+    if (!pixel_is(scene.pixels, WIDTH / 2, HEIGHT / 2, 0, 255, 0, 255)) {
+        fprintf(stderr, "background depth clear left the old fragment\n");
+        goto done;
+    }
+    printf("depth background clear: ok\n");
+
+    /* 6: packed S8D24 surface stores both depth and stencil. */
+    memset(scene.packed_depth_stencil, 0, (size_t)WIDTH * HEIGHT * sizeof(uint32_t));
+    assert(sceGxmDepthStencilSurfaceInit(&scene.depth_surface,
+                                         SCE_GXM_DEPTH_STENCIL_FORMAT_S8D24,
+                                         SCE_GXM_DEPTH_STENCIL_SURFACE_LINEAR, WIDTH,
+                                         scene.packed_depth_stencil, NULL) == 0);
+    if (sceGxmDepthStencilSurfaceGetFormat(&scene.depth_surface) !=
+        SCE_GXM_DEPTH_STENCIL_FORMAT_S8D24) {
+        fprintf(stderr, "S8D24 format query failed (0x%08x)\n",
+                sceGxmDepthStencilSurfaceGetFormat(&scene.depth_surface));
+        goto done;
+    }
+    sceGxmDepthStencilSurfaceSetForceStoreMode(&scene.depth_surface,
+                                               SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED);
+    sceGxmSetFrontStencilFunc(scene.context, SCE_GXM_STENCIL_FUNC_ALWAYS,
+                              SCE_GXM_STENCIL_OP_KEEP, SCE_GXM_STENCIL_OP_KEEP,
+                              SCE_GXM_STENCIL_OP_REPLACE, 0xFF, 0xFF);
+    sceGxmSetFrontStencilRef(scene.context, 7);
+
+    set_solid_color(solid_pixels, 0, 0, 255, 255);
+    begin_frame(&scene);
+    draw_quad_at_z(&scene, &solid_texture, 0.5f);
+    end_frame(&scene);
+
+    if ((scene.packed_depth_stencil[0] & 0xFFu) != 7u) {
+        fprintf(stderr, "stencil store returned %u, expected 7\n",
+                scene.packed_depth_stencil[0] & 0xFFu);
+        goto done;
+    }
+    if ((scene.packed_depth_stencil[0] >> 8) < 0x800000u) {
+        fprintf(stderr, "packed depth store returned 0x%06x\n",
+                scene.packed_depth_stencil[0] >> 8);
+        goto done;
+    }
+    printf("packed S8D24 depth/stencil: ok\n");
+
     printf("gxm_draw_smoke: ok\n");
     result = 0;
 
 done:
     if (scene.pixels)
         free(scene.pixels);
+    free(scene.depth_values);
+    free(scene.packed_depth_stencil);
+    free(scene.stencil_values);
     if (scene.target)
         sceGxmDestroyRenderTarget(scene.target);
     if (scene.fragment_program)

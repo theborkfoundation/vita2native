@@ -16,16 +16,30 @@
 #define SCE_GXM_COLOR_BASE_FORMAT_MASK   0xF1800000U
 #define SCE_GXM_TEXTURE_BASE_FORMAT_MASK 0x9f000000U
 
-#define SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_DISABLE_BIT   1
-#define SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_STRIDE_OFFSET 3
-#define SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_STRIDE_MASK   0xF
-#define SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_TYPE_OFFSET   12
-#define SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_TYPE_MASK     0xFF
-#define SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_FORMAT_OFFSET 21
-#define SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_FORMAT_MASK   0x7FF
+/*
+ * zlsControl layout (shared with the hardware and Vita3K):
+ *
+ *   bit 0      always 1 for an enabled surface (0 for InitDisabled)
+ *   bit 1      force load
+ *   bit 2      force store
+ *   bits 3-10  stride in samples / 32 - 1
+ *   bit 11     unused
+ *   bits 13-32 type/format, as encoded by the SceGxmDepthStencil* enums
+ *              shifted right by 12
+ */
+#define SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_ALWAYS_BIT      0x1u
+#define SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_FORCE_LOAD_BIT  0x2u
+#define SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_FORCE_STORE_BIT 0x4u
+#define SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_STRIDE_OFFSET   3
+#define SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_STRIDE_MASK     0xFFu
+#define SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_TYPE_FORMAT_OFFSET 13
+#define SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_TYPE_MASK       0x11u
+#define SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_ALWAYS_SET_BIT  0x100u
+#define SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_FORMAT_MASK     0x7EEEu
 
 #define SCE_GXM_DEPTH_STENCIL_BG_CTRL_STENCIL_MASK 0xFF
 #define SCE_GXM_DEPTH_STENCIL_BG_CTRL_MASK_BIT     0x100
+#define SCE_GXM_DEPTH_STENCIL_BG_CTRL_UNK_BIT      0x200
 
 typedef struct {
     // Control Word 0
@@ -249,18 +263,38 @@ static inline bool gxm_base_format_is_paletted_format(SceGxmTextureBaseFormat ba
            base_format == SCE_GXM_TEXTURE_BASE_FORMAT_P4;
 }
 
+static inline bool gxm_ds_surface_is_disabled(const SceGxmDepthStencilSurface *surface)
+{
+    return !(surface->zlsControl & SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_ALWAYS_BIT);
+}
+
 static inline SceGxmDepthStencilFormat
 gxm_ds_surface_get_format(const SceGxmDepthStencilSurface *surface)
 {
-    return (surface->zlsControl >> SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_FORMAT_OFFSET) &
-           SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_FORMAT_MASK;
+    uint32_t type_format =
+        (surface->zlsControl >> SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_TYPE_FORMAT_OFFSET);
+
+    return (SceGxmDepthStencilFormat)((type_format & SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_FORMAT_MASK)
+                                      << 12);
 }
 
 static inline SceGxmDepthStencilSurfaceType
 gxm_ds_surface_get_type(const SceGxmDepthStencilSurface *surface)
 {
-    return (surface->zlsControl & (SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_TYPE_MASK
-                                   << SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_TYPE_OFFSET));
+    uint32_t type_format =
+        (surface->zlsControl >> SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_TYPE_FORMAT_OFFSET);
+
+    return (SceGxmDepthStencilSurfaceType)((type_format & SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_TYPE_MASK)
+                                           << 12);
+}
+
+static inline uint32_t
+gxm_ds_surface_get_stride_in_samples(const SceGxmDepthStencilSurface *surface)
+{
+    return ((((surface->zlsControl >> SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_STRIDE_OFFSET) &
+              SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_STRIDE_MASK) +
+             1)
+            << 5);
 }
 
 #endif

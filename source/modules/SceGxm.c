@@ -86,6 +86,7 @@ typedef struct SceGxmContext {
     const SceGxmRenderTarget *render_target;
     const SceGxmColorSurfaceInner *color_surface;
     const SceGxmDepthStencilSurface *ds_surface;
+    const SceGxmDepthStencilSurface *ds_store_surface;
     SceGxmSyncObject *fragment_sync;
 
     const SceGxmVertexProgram *vertex_program;
@@ -196,6 +197,8 @@ typedef struct SceGxmRenderTarget {
     GLuint fbo;
     GLuint color;
     GLuint depth;
+    GLuint depth_rb;
+    bool depth_is_texture;
 } SceGxmRenderTarget;
 
 typedef struct {
@@ -731,6 +734,14 @@ static void gxm_gl_check(const char *where)
         LOG("SceGxm: GL error 0x%x at %s", error, where);
 }
 
+typedef struct {
+    uint32_t depth_bits; /* 0 = no depth, 16/24/32 = storage width */
+    bool has_stencil;
+    bool packed; /* depth and stencil share one 32-bit word (S8D24) */
+} GxmDsLayout;
+
+static GxmDsLayout gxm_ds_layout(SceGxmDepthStencilFormat format);
+
 static void gxm_flush_state(SceGxmContext *context, GLuint program, uint32_t max_index)
 {
     const SceGxmVertexProgram *vp = context->vertex_program;
@@ -828,24 +839,37 @@ static void gxm_flush_state(SceGxmContext *context, GLuint program, uint32_t max
 
     /* Depth and stencil. */
     if (context->ds_surface) {
-        g_gl->glEnable(GL_DEPTH_TEST);
-        g_gl->glDepthFunc(gxm_depth_func_to_gl(context->depth_func));
-        g_gl->glDepthMask(context->depth_write == SCE_GXM_DEPTH_WRITE_ENABLED ? GL_TRUE : GL_FALSE);
-        g_gl->glEnable(GL_STENCIL_TEST);
-        g_gl->glStencilFuncSeparate(GL_FRONT, gxm_stencil_func_to_gl(context->front_stencil_func),
-                                    (GLint)context->front_stencil_ref,
-                                    context->front_stencil_compare_mask);
-        g_gl->glStencilOpSeparate(GL_FRONT, gxm_stencil_op_to_gl(context->front_stencil_fail),
-                                  gxm_stencil_op_to_gl(context->front_stencil_depth_fail),
-                                  gxm_stencil_op_to_gl(context->front_stencil_pass));
-        g_gl->glStencilMaskSeparate(GL_FRONT, context->front_stencil_write_mask);
-        g_gl->glStencilFuncSeparate(GL_BACK, gxm_stencil_func_to_gl(context->back_stencil_func),
-                                    (GLint)context->back_stencil_ref,
-                                    context->back_stencil_compare_mask);
-        g_gl->glStencilOpSeparate(GL_BACK, gxm_stencil_op_to_gl(context->back_stencil_fail),
-                                  gxm_stencil_op_to_gl(context->back_stencil_depth_fail),
-                                  gxm_stencil_op_to_gl(context->back_stencil_pass));
-        g_gl->glStencilMaskSeparate(GL_BACK, context->back_stencil_write_mask);
+        GxmDsLayout layout = gxm_ds_layout(gxm_ds_surface_get_format(context->ds_surface));
+
+        if (layout.depth_bits) {
+            g_gl->glEnable(GL_DEPTH_TEST);
+            g_gl->glDepthFunc(gxm_depth_func_to_gl(context->depth_func));
+            g_gl->glDepthMask(context->depth_write == SCE_GXM_DEPTH_WRITE_ENABLED ? GL_TRUE
+                                                                                  : GL_FALSE);
+        } else {
+            g_gl->glDisable(GL_DEPTH_TEST);
+            g_gl->glDepthMask(GL_FALSE);
+        }
+
+        if (layout.has_stencil) {
+            g_gl->glEnable(GL_STENCIL_TEST);
+            g_gl->glStencilFuncSeparate(GL_FRONT, gxm_stencil_func_to_gl(context->front_stencil_func),
+                                        (GLint)context->front_stencil_ref,
+                                        context->front_stencil_compare_mask);
+            g_gl->glStencilOpSeparate(GL_FRONT, gxm_stencil_op_to_gl(context->front_stencil_fail),
+                                      gxm_stencil_op_to_gl(context->front_stencil_depth_fail),
+                                      gxm_stencil_op_to_gl(context->front_stencil_pass));
+            g_gl->glStencilMaskSeparate(GL_FRONT, context->front_stencil_write_mask);
+            g_gl->glStencilFuncSeparate(GL_BACK, gxm_stencil_func_to_gl(context->back_stencil_func),
+                                        (GLint)context->back_stencil_ref,
+                                        context->back_stencil_compare_mask);
+            g_gl->glStencilOpSeparate(GL_BACK, gxm_stencil_op_to_gl(context->back_stencil_fail),
+                                      gxm_stencil_op_to_gl(context->back_stencil_depth_fail),
+                                      gxm_stencil_op_to_gl(context->back_stencil_pass));
+            g_gl->glStencilMaskSeparate(GL_BACK, context->back_stencil_write_mask);
+        } else {
+            g_gl->glDisable(GL_STENCIL_TEST);
+        }
     } else {
         g_gl->glDisable(GL_DEPTH_TEST);
         g_gl->glDisable(GL_STENCIL_TEST);
@@ -1295,19 +1319,45 @@ EXPORT(SceGxm, 0x207AF96B, int, sceGxmCreateRenderTarget, const SceGxmRenderTarg
         g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
-        g_gl->glGenRenderbuffers(1, &rt->depth);
-        g_gl->glBindRenderbuffer(GL_RENDERBUFFER, rt->depth);
-        g_gl->glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, params->width,
-                                    params->height);
-
         g_gl->glGenFramebuffers(1, &rt->fbo);
         g_gl->glBindFramebuffer(GL_FRAMEBUFFER, rt->fbo);
         g_gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt->color,
                                      0);
-        g_gl->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
-                                        GL_RENDERBUFFER, rt->depth);
-        if (g_gl->glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-            LOG("SceGxm: render target framebuffer incomplete");
+
+        /*
+         * A depth/stencil *texture* lets sceGxmBeginScene upload guest depth
+         * data (glTexSubImage2D); a renderbuffer would be write-only. Some
+         * GLES 3.0 drivers do not allow packed depth/stencil textures, so
+         * fall back to a renderbuffer when the framebuffer is incomplete.
+         */
+        while (g_gl->glGetError() != GL_NO_ERROR) {
+        }
+        g_gl->glGenTextures(1, &rt->depth);
+        g_gl->glBindTexture(GL_TEXTURE_2D, rt->depth);
+        g_gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, params->width, params->height, 0,
+                           GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, NULL);
+        g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        g_gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D,
+                                     rt->depth, 0);
+        if (g_gl->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE &&
+            g_gl->glGetError() == GL_NO_ERROR) {
+            rt->depth_is_texture = true;
+        } else {
+            g_gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D,
+                                         0, 0);
+            g_gl->glDeleteTextures(1, &rt->depth);
+            rt->depth = 0;
+
+            g_gl->glGenRenderbuffers(1, &rt->depth_rb);
+            g_gl->glBindRenderbuffer(GL_RENDERBUFFER, rt->depth_rb);
+            g_gl->glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, params->width,
+                                        params->height);
+            g_gl->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                                            GL_RENDERBUFFER, rt->depth_rb);
+            if (g_gl->glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+                LOG("SceGxm: render target framebuffer incomplete");
+        }
         g_gl->glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 
@@ -1323,7 +1373,9 @@ EXPORT(SceGxm, 0x0B94C50A, int, sceGxmDestroyRenderTarget, SceGxmRenderTarget *r
         if (renderTarget->color)
             g_gl->glDeleteTextures(1, &renderTarget->color);
         if (renderTarget->depth)
-            g_gl->glDeleteRenderbuffers(1, &renderTarget->depth);
+            g_gl->glDeleteTextures(1, &renderTarget->depth);
+        if (renderTarget->depth_rb)
+            g_gl->glDeleteRenderbuffers(1, &renderTarget->depth_rb);
     }
     free(renderTarget);
     return 0;
@@ -1487,21 +1539,29 @@ EXPORT(SceGxm, 0xCA9D41D1, int, sceGxmDepthStencilSurfaceInit, SceGxmDepthStenci
        SceGxmDepthStencilFormat depthStencilFormat, SceGxmDepthStencilSurfaceType surfaceType,
        unsigned int strideInSamples, void *depthData, void *stencilData)
 {
+    uint32_t type_format;
+
     if (!surface)
         return SCE_GXM_ERROR_INVALID_POINTER;
+    if (!strideInSamples || (strideInSamples & 31u))
+        return SCE_GXM_ERROR_INVALID_VALUE;
+
+    type_format = ((uint32_t)surfaceType >> 12) & SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_TYPE_MASK;
+    type_format |= SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_ALWAYS_SET_BIT;
+    type_format |= ((uint32_t)depthStencilFormat >> 12) &
+                   SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_FORMAT_MASK;
 
     memset(surface, 0, sizeof(*surface));
     surface->zlsControl =
-        SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_DISABLED | SCE_GXM_DEPTH_STENCIL_FORCE_STORE_DISABLED |
-        (((strideInSamples >> 5) - 1) << SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_STRIDE_OFFSET) |
-        (surfaceType &
-         (SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_TYPE_MASK << SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_TYPE_OFFSET)) |
-        (depthStencilFormat &
-         (SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_FORMAT_MASK << SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_FORMAT_OFFSET));
+        SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_ALWAYS_BIT |
+        ((((strideInSamples >> 5) - 1) & SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_STRIDE_MASK)
+         << SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_STRIDE_OFFSET) |
+        (type_format << SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_TYPE_FORMAT_OFFSET);
     surface->depthData = depthData;
     surface->stencilData = stencilData;
     surface->backgroundDepth = 1.0f;
-    surface->backgroundControl = SCE_GXM_DEPTH_STENCIL_BG_CTRL_MASK_BIT;
+    surface->backgroundControl =
+        SCE_GXM_DEPTH_STENCIL_BG_CTRL_MASK_BIT | SCE_GXM_DEPTH_STENCIL_BG_CTRL_UNK_BIT;
     return 0;
 }
 
@@ -1511,14 +1571,16 @@ EXPORT(SceGxm, 0xA41DB0D6, int, sceGxmDepthStencilSurfaceInitDisabled,
     if (!surface)
         return SCE_GXM_ERROR_INVALID_POINTER;
     memset(surface, 0, sizeof(*surface));
-    surface->zlsControl = SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_DISABLE_BIT;
+    surface->backgroundDepth = 1.0f;
+    surface->backgroundControl =
+        SCE_GXM_DEPTH_STENCIL_BG_CTRL_MASK_BIT | SCE_GXM_DEPTH_STENCIL_BG_CTRL_UNK_BIT;
     return 0;
 }
 
 EXPORT(SceGxm, 0x082200E1, SceBool, sceGxmDepthStencilSurfaceIsEnabled,
        const SceGxmDepthStencilSurface *surface)
 {
-    return surface && !(surface->zlsControl & SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_DISABLE_BIT);
+    return surface && !gxm_ds_surface_is_disabled(surface);
 }
 
 EXPORT(SceGxm, 0x269B56BE, float, sceGxmDepthStencilSurfaceGetBackgroundDepth,
@@ -1596,7 +1658,7 @@ EXPORT(SceGxm, 0x8504038D, SceGxmDepthStencilFormat, sceGxmDepthStencilSurfaceGe
 EXPORT(SceGxm, 0x11628789, unsigned int, sceGxmDepthStencilSurfaceGetStrideInSamples,
        const SceGxmDepthStencilSurface *surface)
 {
-    return (unsigned int)((((surface->zlsControl >> 3) & 0xfu) + 1) << 5);
+    return gxm_ds_surface_get_stride_in_samples(surface);
 }
 
 EXPORT(SceGxm, 0x14BD831F, void, sceGxmSetFrontDepthFunc, SceGxmContext *context,
@@ -1974,6 +2036,250 @@ EXPORT(SceGxm, 0x49553737, int, sceGxmRenderTargetGetDriverMemBlock,
     return 0;
 }
 
+static GxmDsLayout gxm_ds_layout(SceGxmDepthStencilFormat format)
+{
+    GxmDsLayout layout = { 0, false, false };
+
+    switch (format) {
+    case SCE_GXM_DEPTH_STENCIL_FORMAT_DF32:
+    case SCE_GXM_DEPTH_STENCIL_FORMAT_DF32M:
+        layout.depth_bits = 32;
+        break;
+    case SCE_GXM_DEPTH_STENCIL_FORMAT_D16:
+        layout.depth_bits = 16;
+        break;
+    case SCE_GXM_DEPTH_STENCIL_FORMAT_DF32_S8:
+    case SCE_GXM_DEPTH_STENCIL_FORMAT_DF32M_S8:
+        layout.depth_bits = 32;
+        layout.has_stencil = true;
+        break;
+    case SCE_GXM_DEPTH_STENCIL_FORMAT_S8D24:
+        layout.depth_bits = 24;
+        layout.has_stencil = true;
+        layout.packed = true;
+        break;
+    case SCE_GXM_DEPTH_STENCIL_FORMAT_S8:
+        layout.has_stencil = true;
+        break;
+    default:
+        break;
+    }
+
+    return layout;
+}
+
+static uint32_t gxm_depth_to_u24(float value)
+{
+    if (!(value > 0.0f))
+        return 0;
+    if (value >= 1.0f)
+        return 0xFFFFFFu;
+    return (uint32_t)(value * 16777215.0f + 0.5f);
+}
+
+/*
+ * Uploads the guest depth/stencil surface into the render target's GL depth
+ * texture. Only called when the surface asks for a force load. Tiled surfaces
+ * are currently interpreted as linear (the tile order is undocumented and
+ * emulators ignore the backing store entirely).
+ */
+static bool gxm_ds_load_surface(SceGxmRenderTarget *rt,
+                                const SceGxmDepthStencilSurface *surface)
+{
+    GxmDsLayout layout;
+    SceGxmDepthStencilFormat format;
+    uint32_t stride, width, height, bg_stencil;
+    const uint8_t *depth_data;
+    const uint8_t *stencil_data;
+    uint32_t *packed;
+    bool loaded = false;
+
+    if (!surface || gxm_ds_surface_is_disabled(surface))
+        return false;
+    if (!(surface->zlsControl & SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_FORCE_LOAD_BIT))
+        return false;
+    if (!surface->depthData && !surface->stencilData)
+        return false;
+    if (!rt->depth_is_texture) {
+        LOG("SceGxm: force load requested without a depth texture render target");
+        return false;
+    }
+
+    format = gxm_ds_surface_get_format(surface);
+    layout = gxm_ds_layout(format);
+    if (!layout.depth_bits && !layout.has_stencil)
+        return false;
+
+    width = (uint32_t)rt->params.width;
+    height = (uint32_t)rt->params.height;
+    stride = gxm_ds_surface_get_stride_in_samples(surface);
+    if (stride < width)
+        stride = width;
+    bg_stencil = surface->backgroundControl & SCE_GXM_DEPTH_STENCIL_BG_CTRL_STENCIL_MASK;
+    depth_data = layout.packed ? (const uint8_t *)(surface->depthData ? surface->depthData
+                                                                     : surface->stencilData)
+                               : (const uint8_t *)surface->depthData;
+    stencil_data = (const uint8_t *)surface->stencilData;
+
+    packed = malloc((size_t)width * height * sizeof(uint32_t));
+    if (!packed)
+        return false;
+
+    for (uint32_t y = 0; y < height; y++) {
+        for (uint32_t x = 0; x < width; x++) {
+            uint32_t d24 = 0xFFFFFFu;
+            uint32_t s8 = bg_stencil;
+
+            if (layout.packed) {
+                uint32_t value = ((const uint32_t *)depth_data)[(size_t)y * stride + x];
+                d24 = value >> 8;
+                s8 = value & 0xFFu;
+            } else {
+                if (layout.depth_bits == 32 && depth_data) {
+                    float value = ((const float *)depth_data)[(size_t)y * stride + x];
+                    d24 = gxm_depth_to_u24(value);
+                } else if (layout.depth_bits == 16 && depth_data) {
+                    uint32_t value = ((const uint16_t *)depth_data)[(size_t)y * stride + x];
+                    d24 = (uint32_t)(((uint64_t)value * 0xFFFFFFu + 0x7FFFu) / 0xFFFFu);
+                }
+                if (layout.has_stencil && stencil_data)
+                    s8 = stencil_data[(size_t)y * stride + x];
+            }
+
+            packed[(size_t)y * width + x] = (d24 << 8) | s8;
+        }
+    }
+
+    while (g_gl->glGetError() != GL_NO_ERROR) {
+    }
+    g_gl->glBindTexture(GL_TEXTURE_2D, rt->depth);
+    g_gl->glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)width, (GLsizei)height, GL_DEPTH_STENCIL,
+                          GL_UNSIGNED_INT_24_8, packed);
+    loaded = g_gl->glGetError() == GL_NO_ERROR;
+    if (!loaded)
+        LOG("SceGxm: depth/stencil upload failed");
+    g_gl->glBindTexture(GL_TEXTURE_2D, 0);
+
+    free(packed);
+    return loaded;
+}
+
+/*
+ * Reads the render target's depth/stencil back into the guest surface when the
+ * surface asks for a force store. The GL origin is bottom-left, like the color
+ * readback in sceGxmEndScene, so rows are flipped.
+ */
+static void gxm_ds_store_surface(SceGxmRenderTarget *rt,
+                                 const SceGxmDepthStencilSurface *surface)
+{
+    GxmDsLayout layout;
+    SceGxmDepthStencilFormat format;
+    uint32_t stride, width, height;
+    uint8_t *depth_data;
+    uint8_t *stencil_data;
+    uint32_t *packed_values = NULL;
+    float *depth_values = NULL;
+    bool have_stencil = false;
+    bool have_depth = false;
+
+    if (!surface || gxm_ds_surface_is_disabled(surface))
+        return;
+    if (!(surface->zlsControl & SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_FORCE_STORE_BIT))
+        return;
+    if (!surface->depthData && !surface->stencilData)
+        return;
+    if (!rt->depth_is_texture && !rt->depth_rb)
+        return;
+
+    format = gxm_ds_surface_get_format(surface);
+    layout = gxm_ds_layout(format);
+    if (!layout.depth_bits && !layout.has_stencil)
+        return;
+
+    width = (uint32_t)rt->params.width;
+    height = (uint32_t)rt->params.height;
+    stride = gxm_ds_surface_get_stride_in_samples(surface);
+    if (stride < width)
+        stride = width;
+    depth_data = (uint8_t *)(layout.packed ? (surface->depthData ? surface->depthData
+                                                                : surface->stencilData)
+                                           : surface->depthData);
+    stencil_data = (uint8_t *)surface->stencilData;
+
+    packed_values = malloc((size_t)width * height * sizeof(uint32_t));
+    if (!packed_values)
+        return;
+
+    while (g_gl->glGetError() != GL_NO_ERROR) {
+    }
+
+    /*
+     * GLES 3.0 reads packed depth/stencil directly. Some drivers refuse it;
+     * in that case retry with depth only and keep the background stencil.
+     */
+    g_gl->glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    g_gl->glReadPixels(0, 0, (GLsizei)width, (GLsizei)height, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8,
+                       packed_values);
+    have_stencil = g_gl->glGetError() == GL_NO_ERROR;
+    have_depth = have_stencil;
+
+    if (!have_depth) {
+        depth_values = malloc((size_t)width * height * sizeof(float));
+        if (depth_values) {
+            while (g_gl->glGetError() != GL_NO_ERROR) {
+            }
+            g_gl->glReadPixels(0, 0, (GLsizei)width, (GLsizei)height, GL_DEPTH_COMPONENT, GL_FLOAT,
+                               depth_values);
+            have_depth = g_gl->glGetError() == GL_NO_ERROR;
+        }
+    }
+
+    if (!have_depth && !have_stencil) {
+        free(packed_values);
+        free(depth_values);
+        return;
+    }
+
+    for (uint32_t y = 0; y < height; y++) {
+        uint32_t src_y = height - 1 - y;
+
+        for (uint32_t x = 0; x < width; x++) {
+            size_t src = (size_t)src_y * width + x;
+            size_t dst = (size_t)y * stride + x;
+            float depth = 1.0f;
+            uint32_t d24;
+            uint8_t s8 = (uint8_t)(surface->backgroundControl &
+                                   SCE_GXM_DEPTH_STENCIL_BG_CTRL_STENCIL_MASK);
+
+            if (have_stencil) {
+                d24 = packed_values[src] >> 8;
+                s8 = (uint8_t)(packed_values[src] & 0xFFu);
+                depth = (float)d24 / 16777215.0f;
+            } else {
+                depth = depth_values[src];
+                d24 = gxm_depth_to_u24(depth);
+            }
+
+            if (layout.packed) {
+                ((uint32_t *)depth_data)[dst] = (d24 << 8) | s8;
+            } else {
+                if (depth_data && have_depth) {
+                    if (layout.depth_bits == 32)
+                        ((float *)depth_data)[dst] = depth;
+                    else if (layout.depth_bits == 16)
+                        ((uint16_t *)depth_data)[dst] =
+                            (uint16_t)(depth * 65535.0f + 0.5f);
+                }
+                if (stencil_data && have_stencil && layout.has_stencil)
+                    stencil_data[dst] = s8;
+            }
+        }
+    }
+
+    free(packed_values);
+    free(depth_values);
+}
+
 EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsigned int flags,
        const SceGxmRenderTarget *renderTarget, const SceGxmValidRegion *validRegion,
        SceGxmSyncObject *vertexSyncObject, SceGxmSyncObject *fragmentSyncObject,
@@ -1993,10 +2299,9 @@ EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsign
         (colorSurface && !((const SceGxmColorSurfaceInner *)colorSurface)->disabled)
             ? (const SceGxmColorSurfaceInner *)colorSurface
             : NULL;
-    context->ds_surface =
-        (depthStencil && !(depthStencil->zlsControl & SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_DISABLE_BIT))
-            ? depthStencil
-            : NULL;
+    context->ds_surface = (depthStencil && !gxm_ds_surface_is_disabled(depthStencil)) ? depthStencil
+                                                                                        : NULL;
+    context->ds_store_surface = context->ds_surface;
     context->fragment_sync = fragmentSyncObject;
     context->vertex_uniform_head = 0;
     context->fragment_uniform_head = 0;
@@ -2010,9 +2315,24 @@ EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsign
         g_gl->glBindFramebuffer(GL_FRAMEBUFFER, renderTarget->fbo);
         g_gl->glViewport(0, 0, renderTarget->params.width, renderTarget->params.height);
         g_gl->glDisable(GL_SCISSOR_TEST);
-        g_gl->glClearDepthf(1.0f);
-        g_gl->glClearStencil(0);
-        g_gl->glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+
+        if (!gxm_ds_load_surface((SceGxmRenderTarget *)renderTarget, context->ds_surface)) {
+            float bg_depth = 1.0f;
+            unsigned int bg_stencil = 0;
+
+            if (context->ds_surface) {
+                bg_depth = context->ds_surface->backgroundDepth;
+                bg_stencil = context->ds_surface->backgroundControl &
+                             SCE_GXM_DEPTH_STENCIL_BG_CTRL_STENCIL_MASK;
+            }
+
+            /* glClear honours the write masks. */
+            g_gl->glDepthMask(GL_TRUE);
+            g_gl->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
+            g_gl->glClearDepthf(bg_depth);
+            g_gl->glClearStencil((GLint)bg_stencil);
+            g_gl->glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        }
     }
 
     return 0;
@@ -2146,42 +2466,46 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
     if (!g_gl || !context->render_target)
         return 0;
 
+    g_gl->glBindFramebuffer(GL_FRAMEBUFFER, context->render_target->fbo);
     g_gl->glFinish();
 
     surface = context->color_surface;
-    if (!surface || !surface->data || surface->disabled)
-        return 0;
+    if (surface && surface->data && !surface->disabled) {
+        width = surface->width < context->render_target->params.width
+                    ? surface->width
+                    : context->render_target->params.width;
+        height = surface->height < context->render_target->params.height
+                     ? surface->height
+                     : context->render_target->params.height;
+        stride = surface->strideInPixels ? surface->strideInPixels : width;
 
-    width = surface->width < context->render_target->params.width ? surface->width
-                                                                 : context->render_target->params.width;
-    height = surface->height < context->render_target->params.height
-                 ? surface->height
-                 : context->render_target->params.height;
-    stride = surface->strideInPixels ? surface->strideInPixels : width;
+        rgba = malloc((size_t)width * height * 4);
+        if (!rgba)
+            return SCE_GXM_ERROR_OUT_OF_MEMORY;
 
-    rgba = malloc((size_t)width * height * 4);
-    if (!rgba)
-        return SCE_GXM_ERROR_OUT_OF_MEMORY;
+        g_gl->glPixelStorei(GL_PACK_ALIGNMENT, 4);
+        g_gl->glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
 
-    g_gl->glBindFramebuffer(GL_FRAMEBUFFER, context->render_target->fbo);
-    g_gl->glPixelStorei(GL_PACK_ALIGNMENT, 4);
-    g_gl->glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        /* GL's origin is bottom-left; Vita surfaces are top-left. */
+        {
+            uint32_t bytes_per_pixel = gxm_color_format_bytes(surface->colorFormat);
 
-    /* GL's origin is bottom-left; Vita surfaces are top-left. */
-    {
-        uint32_t bytes_per_pixel = gxm_color_format_bytes(surface->colorFormat);
+            for (uint32_t y = 0; y < height; y++) {
+                const uint8_t *src = rgba + (size_t)(height - 1 - y) * width * 4;
+                uint8_t *dst = (uint8_t *)surface->data + (size_t)y * stride * bytes_per_pixel;
 
-        for (uint32_t y = 0; y < height; y++) {
-            const uint8_t *src = rgba + (size_t)(height - 1 - y) * width * 4;
-            uint8_t *dst = (uint8_t *)surface->data + (size_t)y * stride * bytes_per_pixel;
-
-            for (uint32_t x = 0; x < width; x++)
-                gxm_write_color_pixel(dst + (size_t)x * bytes_per_pixel, src + (size_t)x * 4,
-                                      surface->colorFormat);
+                for (uint32_t x = 0; x < width; x++)
+                    gxm_write_color_pixel(dst + (size_t)x * bytes_per_pixel, src + (size_t)x * 4,
+                                          surface->colorFormat);
+            }
         }
+
+        free(rgba);
     }
 
-    free(rgba);
+    if (context->ds_store_surface)
+        gxm_ds_store_surface((SceGxmRenderTarget *)context->render_target,
+                             context->ds_store_surface);
 
     if (fragmentNotification && fragmentNotification->address) {
         __sync_synchronize();
@@ -3957,9 +4281,23 @@ EXPORT(SceGxm, 0x4709CF5A, int, sceGxmBeginSceneEx, SceGxmContext *context, unsi
        const SceGxmDepthStencilSurface *loadDepthStencilSurface,
        const SceGxmDepthStencilSurface *storeDepthStencilSurface)
 {
-    (void)storeDepthStencilSurface;
-    return sceGxmBeginScene(context, flags, renderTarget, validRegion, vertexSyncObject,
-                            fragmentSyncObject, colorSurface, loadDepthStencilSurface);
+    int result = sceGxmBeginScene(context, flags, renderTarget, validRegion, vertexSyncObject,
+                                  fragmentSyncObject, colorSurface, loadDepthStencilSurface);
+
+    if (result == 0 && context) {
+        context->ds_store_surface =
+            (storeDepthStencilSurface && !gxm_ds_surface_is_disabled(storeDepthStencilSurface))
+                ? storeDepthStencilSurface
+                : NULL;
+        /*
+         * The store surface may be the only one supplied: the depth data still
+         * has to be written back at the end of the scene.
+         */
+        if (!context->ds_surface && context->ds_store_surface)
+            context->ds_surface = context->ds_store_surface;
+    }
+
+    return result;
 }
 
 EXPORT(SceGxm, 0x2A1BCDDB, int, sceGxmGetContextType, const SceGxmContext *context,
