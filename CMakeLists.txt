@@ -82,6 +82,7 @@ add_executable(vita2native
     external/Vita3K/external/LibAtrac9/C/src/unpack.c
     external/Vita3K/external/LibAtrac9/C/src/utility.c
     ${VITA2NATIVE_CTRL_SOURCE}
+    source/modules/SceCtrl_common.c
     ${VITA2NATIVE_DISPLAY_SOURCE}
     ${VITA2NATIVE_AUDIO_SOURCE}
     source/modules/SceAudio.c
