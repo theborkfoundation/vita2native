@@ -27,11 +27,13 @@ option(VITA2NATIVE_HEADLESS
 if(VITA2NATIVE_HEADLESS)
     set(VITA2NATIVE_DISPLAY_SOURCE source/modules/SceDisplay_null.c)
     set(VITA2NATIVE_CTRL_SOURCE source/modules/SceCtrl_null.c)
+    set(VITA2NATIVE_AUDIO_SOURCE source/modules/SceAudio_null.c)
 else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(SDL2 REQUIRED sdl2)
     set(VITA2NATIVE_DISPLAY_SOURCE source/modules/SceDisplay_linux.c)
     set(VITA2NATIVE_CTRL_SOURCE source/modules/SceCtrl_linux.c)
+    set(VITA2NATIVE_AUDIO_SOURCE source/modules/SceAudio_sdl.c)
 endif()
 
 option(VITA2NATIVE_ALLOW_64BIT
@@ -67,6 +69,8 @@ add_executable(vita2native
     source/vpk.c
     ${VITA2NATIVE_CTRL_SOURCE}
     ${VITA2NATIVE_DISPLAY_SOURCE}
+    ${VITA2NATIVE_AUDIO_SOURCE}
+    source/modules/SceAudio.c
     source/modules/SceGxm.c
     source/modules/SceAppMgr.c
     source/modules/SceCommonDialog.c
@@ -183,6 +187,21 @@ if(BUILD_TESTING)
     target_compile_definitions(gl_thread_smoke PRIVATE _GNU_SOURCE=1)
     target_link_libraries(gl_thread_smoke PRIVATE pthread ${CMAKE_DL_LIBS} m)
     add_test(NAME gl_thread_smoke COMMAND gl_thread_smoke)
+
+    add_executable(audio_smoke
+        tests/audio_smoke.c
+        source/modules/SceAudio.c
+        ${VITA2NATIVE_AUDIO_SOURCE}
+        source/host/host_thread.c
+        source/log.c
+        source/netlog.c
+    )
+    target_include_directories(audio_smoke PRIVATE include source/modules
+        external/vita-headers/include)
+    target_compile_definitions(audio_smoke PRIVATE _GNU_SOURCE=1 _FILE_OFFSET_BITS=64)
+    target_link_directories(audio_smoke PRIVATE ${SDL2_LIBRARY_DIRS})
+    target_link_libraries(audio_smoke PRIVATE pthread m ${SDL2_LIBRARIES})
+    add_test(NAME audio_smoke COMMAND audio_smoke)
 
     add_executable(egl_window_smoke
         tests/egl_window_smoke.c

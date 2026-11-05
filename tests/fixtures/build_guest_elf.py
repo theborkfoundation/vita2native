@@ -44,6 +44,7 @@ LIBKERNEL_NID = 0xCAE9ACE6
 EXIT_PROCESS_NID = 0x7595D9AA
 MKDIR_NID = 0x9670D39F
 SCEGXM_NID = 0xF76B66BD
+SCEAUDIO_NID = 0x438BB957
 GXM_INITIALIZE_NID = 0xB0F1E4EC
 
 # Layout of the RX segment.
@@ -429,6 +430,136 @@ def build_gxm_scene_elf():
 
     rela = bytearray(b"".join(rx_relocs) + b"".join(rw_relocs))
     return assemble_elf(rx, rw, rela, GXM_MODINFO)
+
+
+# --- SceAudio fixture ------------------------------------------------------
+
+AUDIO_STUB_BASE = 0x140
+AUDIO_LIB_NAME = 0x190
+AUDIO_MODINFO = 0x1A0
+AUDIO_IMPORT = 0x200
+AUDIO_NIDS = 0x228
+AUDIO_ENTRIES = 0x240
+AUDIO_RX_SIZE = 0x258
+
+AUDIO_LIB = b"SceAudio\0"
+
+AUDIO_FUNCS = [
+    0x5BC341E4,  # sceAudioOutOpenPort
+    0x02DB3F5F,  # sceAudioOutOutput
+    0x9C8EDAEA,  # sceAudioOutGetConfig
+    0x69E2E6B5,  # sceAudioOutReleasePort
+]
+
+AUDIO_SAMPLES = 64
+AUDIO_RW_SAMPLES = 0x000
+AUDIO_RW_SIZE = AUDIO_SAMPLES * 2 * 2
+
+
+def build_audio_elf():
+    """Guest ELF that drives an audio port through the import stubs.
+
+    Covers the streaming contract: open a stereo 48 kHz port, push four
+    buffers (each call has to block), read the configuration back and release
+    the port. Returns 42 when every call succeeded, otherwise a bitmask of the
+    failures.
+    """
+    code = []
+    rx_relocs = []
+
+    def emit(word):
+        code.append(word & 0xFFFFFFFF)
+
+    def movw_movt_rw(rd, offset):
+        base = len(code) * 4
+        emit(arm_movw(rd, 0))
+        emit(arm_movt(rd, 0))
+        rx_relocs.append(encode_rela(0, 1, base, offset, R_ARM_MOVW_ABS_NC))
+        rx_relocs.append(encode_rela(0, 1, base + 4, offset, R_ARM_MOVT_ABS))
+
+    def call(index):
+        emit(arm_bl(len(code) * 4, AUDIO_STUB_BASE + index * 12))
+
+    def check(bit):
+        emit(0xE3500000)             # cmp r0, #0
+        emit(0x13844000 | bit)       # orrne r4, r4, #bit
+
+    emit(0xE92D4030)                 # push {r4, r5, lr}
+    emit(arm_mov_imm(4, 0))          # mov r4, #0
+
+    # port = sceAudioOutOpenPort(MAIN, 64, 48000, STEREO)
+    emit(arm_mov_imm(0, 0))
+    emit(arm_mov_imm(1, AUDIO_SAMPLES))
+    emit(arm_movw(2, 48000 & 0xFFFF))
+    emit(arm_mov_imm(3, 1))
+    call(0)
+    emit(0xE1A05000)                 # mov r5, r0
+    emit(0xE3500000)                 # cmp r0, #0
+    emit(0x43844001)                 # orrmi r4, r4, #1  (port < 0)
+
+    for _ in range(4):
+        # sceAudioOutOutput(port, samples)
+        emit(0xE1A00005)             # mov r0, r5
+        movw_movt_rw(1, AUDIO_RW_SAMPLES)
+        call(1)
+        check(2)
+
+    # sceAudioOutGetConfig(port, LEN) == 64
+    emit(0xE1A00005)                 # mov r0, r5
+    emit(arm_mov_imm(1, 0))
+    call(2)
+    emit(0xE3500040)                 # cmp r0, #64
+    emit(0x13844004)                 # orrne r4, r4, #4
+
+    # sceAudioOutReleasePort(port)
+    emit(0xE1A00005)                 # mov r0, r5
+    call(3)
+    check(8)
+
+    emit(0xE1A00004)                 # mov r0, r4
+    emit(0xE3500000)                 # cmp r0, #0
+    emit(0x03A0002A)                 # moveq r0, #42
+    emit(0xE8BD8030)                 # pop {r4, r5, pc}
+
+    assert len(code) * 4 <= AUDIO_STUB_BASE, "audio fixture code overlaps the stubs"
+
+    rx = bytearray(AUDIO_RX_SIZE)
+    rx[:len(code) * 4] = b"".join(struct.pack("<I", w) for w in code)
+
+    rx[AUDIO_LIB_NAME:AUDIO_LIB_NAME + len(AUDIO_LIB)] = AUDIO_LIB
+
+    info = bytearray(MODULE_INFO_SIZE)
+    struct.pack_into("<HH", info, 0x00, 0x0000, 0x0101)
+    info[0x04:0x04 + len(MODULE_NAME)] = MODULE_NAME
+    struct.pack_into("<I", info, 0x2C, AUDIO_IMPORT)
+    struct.pack_into("<I", info, 0x30, AUDIO_IMPORT + IMPORT_SIZE)
+    struct.pack_into("<I", info, 0x34, 0x12345678)
+    struct.pack_into("<I", info, 0x44, 0x00000000)
+    struct.pack_into("<I", info, 0x48, 0xFFFFFFFF)
+    struct.pack_into("<I", info, 0x5C, 0x03570011)
+    rx[AUDIO_MODINFO:AUDIO_MODINFO + MODULE_INFO_SIZE] = info
+
+    imp = bytearray(IMPORT_SIZE)
+    struct.pack_into("<HHHHHH", imp, 0, IMPORT_SIZE, 1, 0, len(AUDIO_FUNCS), 0, 0)
+    struct.pack_into("<I", imp, IMP_LIBRARY_NID, SCEAUDIO_NID)
+    rx[AUDIO_IMPORT:AUDIO_IMPORT + IMPORT_SIZE] = imp
+
+    for i, nid in enumerate(AUDIO_FUNCS):
+        struct.pack_into("<I", rx, AUDIO_NIDS + i * 4, nid)
+
+    rx_relocs.append(encode_rela(0, 0, AUDIO_IMPORT + IMP_LIBRARY_NAME, AUDIO_LIB_NAME))
+    rx_relocs.append(encode_rela(0, 0, AUDIO_IMPORT + IMP_FUNC_NID_TABLE, AUDIO_NIDS))
+    rx_relocs.append(encode_rela(0, 0, AUDIO_IMPORT + IMP_FUNC_ENTRY_TABLE, AUDIO_ENTRIES))
+    for i in range(len(AUDIO_FUNCS)):
+        rx_relocs.append(encode_rela(0, 0, AUDIO_ENTRIES + i * 4,
+                                     AUDIO_STUB_BASE + i * 12))
+
+    rw = bytearray(AUDIO_RW_SIZE)
+    for i in range(AUDIO_SAMPLES * 2):
+        struct.pack_into("<h", rw, i * 2, 4096 if (i % 2) == 0 else -4096)
+
+    rela = bytearray(b"".join(rx_relocs))
+    return assemble_elf(rx, rw, rela, AUDIO_MODINFO)
 
 
 def assemble_elf(rx, rw, rela, entry_offset):
@@ -923,6 +1054,11 @@ def main():
     with open(scene_path, "wb") as f:
         f.write(build_gxm_scene_elf())
     print(f"wrote {scene_path}")
+
+    audio_path = os.path.join(out_dir, "guest_audio.elf")
+    with open(audio_path, "wb") as f:
+        f.write(build_audio_elf())
+    print(f"wrote {audio_path}")
 
     if os.path.exists(os.path.join(shader_dir, "texture_v.gxp")) and os.path.exists(
             os.path.join(shader_dir, "texture_f.gxp")):
