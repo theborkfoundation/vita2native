@@ -470,9 +470,11 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
                 LOG("Data segment loaded at %p ", (void *)addr_rw);
             }
 
-            memcpy((void *)segments[i].rw_addr, segments[i].src_data, segments[i].p_filesz);
-            memset((char *)segments[i].rw_addr + segments[i].p_filesz, 0,
-                   segments[i].p_memsz - segments[i].p_filesz);
+            if (segments[i].p_filesz)
+                memcpy((void *)segments[i].rw_addr, segments[i].src_data, segments[i].p_filesz);
+            if (segments[i].p_memsz > segments[i].p_filesz)
+                memset((char *)segments[i].rw_addr + segments[i].p_filesz, 0,
+                       segments[i].p_memsz - segments[i].p_filesz);
         } else if (segments[i].p_type == PT_SCE_RELA) {
             LOG("Found relocations segment (%u)", i);
             relocate(segments[i].src_data, segments[i].p_filesz, segments);
@@ -598,7 +600,9 @@ static int resolve_imports(uintptr_t rx_base, uintptr_t rw_base, sce_module_impo
             stub[0] = arm_encode_movw(0, (uint16_t)SCE_KERNEL_ERROR_MODULEMGR_NO_FUNC_NID);
             stub[1] = arm_encode_movt(0, (uint16_t)(SCE_KERNEL_ERROR_MODULEMGR_NO_FUNC_NID >> 16));
             stub[2] = arm_encode_ret();
-            LOG("  Could not resolve NID 0x%08" PRIx32 ", export not found!", nid);
+            LOG("  Could not resolve NID 0x%08" PRIx32 " (stub at 0x%08" PRIx32
+                "), export not found!",
+                nid, (uint32_t)(rx_base + ((uintptr_t)stub - rw_base)));
         }
     }
 

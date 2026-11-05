@@ -21,6 +21,7 @@
 #include "modules/SceCtrl.h"
 #include "modules/SceAudio.h"
 #include "modules/SceAudiodec.h"
+#include "modules/SceFios2.h"
 #include "modules/SceAtrac.h"
 #include "modules/SceDisplay.h"
 #include "modules/SceGxm.h"
@@ -133,6 +134,9 @@ static int launch(SceKernelThreadEntry entry)
     if (ret != 0)
         goto done;
     ret = SceLibKernel_init();
+    if (ret != 0)
+        goto done;
+    ret = SceFios2_init();
     if (ret != 0)
         goto done;
     ret = SceKernelThreadMgr_init();

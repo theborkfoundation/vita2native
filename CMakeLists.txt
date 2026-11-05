@@ -101,6 +101,9 @@ add_executable(vita2native
     source/modules/SceMotion.c
     source/modules/SceKernelSync.c
     source/modules/SceLibKernel.c
+    source/modules/SceFios2.c
+    source/modules/ScePgf.c
+    source/modules/SceSqlite.c
     source/modules/SceIoAsync.c
     source/modules/SceLibClib.c
     source/modules/SceNet.c
@@ -120,6 +123,7 @@ target_include_directories(vita2native PRIVATE
     source/host
     external/khronos/include
     external/minimp3
+    external/font8x8
     external/Vita3K/external/LibAtrac9/C/src
     external/vita-headers/include
     external/Vita3K/vita3k/renderer/include
@@ -316,6 +320,20 @@ if(BUILD_TESTING)
     target_compile_definitions(apputil_smoke PRIVATE _GNU_SOURCE=1 _FILE_OFFSET_BITS=64)
     target_link_libraries(apputil_smoke PRIVATE pthread m)
     add_test(NAME apputil_smoke COMMAND apputil_smoke)
+
+    add_executable(fios2_smoke
+        tests/fios2_smoke.c
+        source/modules/SceFios2.c
+        source/host/host_fs.c
+        source/log.c
+        source/netlog.c
+        source/host/host_thread.c
+    )
+    target_include_directories(fios2_smoke PRIVATE include source/modules
+        external/vita-headers/include)
+    target_compile_definitions(fios2_smoke PRIVATE _GNU_SOURCE=1 _FILE_OFFSET_BITS=64)
+    target_link_libraries(fios2_smoke PRIVATE pthread m)
+    add_test(NAME fios2_smoke COMMAND fios2_smoke)
 
     add_executable(ngs_smoke
         tests/ngs_smoke.c

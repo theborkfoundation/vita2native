@@ -17,6 +17,7 @@
 #include <psp2/kernel/threadmgr/eventflag.h>
 #include <psp2/kernel/threadmgr/semaphore.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -657,6 +658,11 @@ EXPORT(SceThreadmgr, 0x9A68F547, int, sceKernelCloseEventFlag, SceUID uid)
 VitaLwMutex *SceKernelSync_lw_mutex_from_work(SceKernelLwMutexWork *work)
 {
     void *pointer;
+
+    /* Page zero is never mapped on Vita; reject obviously invalid work areas
+     * instead of dereferencing them on the host. */
+    if (!work || (uintptr_t)work < 0x10000)
+        return NULL;
 
     memcpy(&pointer, &work->data[0], sizeof(pointer));
     return pointer;
