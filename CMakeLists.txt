@@ -221,6 +221,14 @@ if(BUILD_TESTING)
     target_link_libraries(host_smoke PRIVATE pthread)
     add_test(NAME host_smoke COMMAND host_smoke)
 
+    add_executable(ctrl_script_smoke
+        tests/ctrl_script_smoke.c
+        source/modules/SceCtrl_null.c
+    )
+    target_include_directories(ctrl_script_smoke PRIVATE include external/vita-headers/include)
+    target_compile_definitions(ctrl_script_smoke PRIVATE _GNU_SOURCE=1)
+    add_test(NAME ctrl_script_smoke COMMAND ctrl_script_smoke)
+
     add_executable(gfx_smoke
         tests/gfx_smoke.c
         source/host/host_gfx.c

@@ -77,11 +77,32 @@ CPU-rendered homebrew runs: ELF loading, relocations, import patching, threads,
 TLS, file I/O, VPK assets, and process lifetime are implemented and tested.
 
 A GLES 3.x GPU device (EGL surfaceless + pbuffer) is created at startup when the
-libraries are available; otherwise a null backend is used. GXM command
-translation is not implemented yet, so 3D homebrew will hit unresolved `SceGxm`
-imports. Audio and encrypted SELF files are also not supported yet.
+libraries are available; otherwise a null backend is used. GXM is translated to
+GLES 3.x: GXP shaders through Vita3K's recompiler, render targets, textures,
+depth/stencil, MSAA and the transfer calls. `SceAudioOut`/`SceAudioIn`,
+MP3/ATRAC9 decoding, `SceNet`/`SceHttp`/`SceSsl`, `SceSqlite`, `ScePgf`,
+`SceTouch`, `SceCommonDialog` and the kernel/thread surface are implemented.
+AAC and CELP decoding and encrypted SELF files are not supported.
 
 Guest code runs natively in the host process; there is no sandbox or isolation.
+
+### Headless capture and scripted input
+
+Headless builds can dump guest framebuffers as BMP and drive the pad from a
+frame-keyed script, which is how real homebrew is validated under QEMU:
+
+```sh
+VITA2NATIVE_DUMP_FRAME=/tmp/frame-%04u.bmp \
+VITA2NATIVE_DUMP_FRAME_AT=0,120,240 \
+VITA2NATIVE_CTRL_SCRIPT="30:down,32:,34:down,36:,38:cross,40:" \
+GALLIUM_DRIVER=softpipe ./vita2native ./VitaShell.vpk
+```
+
+`..._AT` is a comma-separated list of swap indices; a `%u` in the path is
+replaced with the frame number. Script entries are
+`<frame>:<button>[+<button>...]`, applied until the next entry; an empty button
+list releases everything. Script frames refer to presented frames, not host
+time, so they do not depend on how slow software rendering is.
 
 ## Building from source
 

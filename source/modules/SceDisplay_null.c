@@ -13,11 +13,16 @@ static SceDisplayFrameBuf g_vita_conf_fb;
 static int g_vcount;
 static unsigned int g_frame_count;
 
+#define MAX_CAPTURES 64
+static long g_captures[MAX_CAPTURES];
+static int g_capture_count;
+
 /*
- * Headless frame capture. Set VITA2NATIVE_DUMP_FRAME to a path, optionally
- * VITA2NATIVE_DUMP_FRAME_AT to the (zero-based) swap index to capture, to get
- * a BMP of the guest framebuffer. This is how real homebrew output is checked
- * without a window.
+ * Headless frame capture. Set VITA2NATIVE_DUMP_FRAME to a path and optionally
+ * VITA2NATIVE_DUMP_FRAME_AT to a comma-separated list of swap indices to
+ * capture a BMP of the guest framebuffer. A '%u' in the path is replaced with
+ * the frame index, so one run can capture a scripted sequence. This is how real
+ * homebrew output is checked without a window.
  */
 static void put_u16(unsigned char *p, unsigned int value)
 {
@@ -36,7 +41,6 @@ static void put_u32(unsigned char *p, uint32_t value)
 static void dump_framebuffer(const SceDisplayFrameBuf *fb)
 {
     static const char *path;
-    static long capture_at = -1;
     static bool initialised;
     const uint8_t *base;
     unsigned int width;
@@ -45,6 +49,7 @@ static void dump_framebuffer(const SceDisplayFrameBuf *fb)
     unsigned int row_size;
     unsigned char header[54];
     unsigned char *row;
+    char file_path[1024];
     FILE *file;
 
     if (!initialised) {
@@ -52,14 +57,38 @@ static void dump_framebuffer(const SceDisplayFrameBuf *fb)
 
         initialised = true;
         path = getenv("VITA2NATIVE_DUMP_FRAME");
-        if (at)
-            capture_at = strtol(at, NULL, 0);
+        if (at) {
+            char *copy = malloc(strlen(at) + 1);
+
+            if (copy) {
+                char *token;
+
+                strcpy(copy, at);
+                for (token = strtok(copy, ",");
+                     token && g_capture_count < MAX_CAPTURES; token = strtok(NULL, ","))
+                    g_captures[g_capture_count++] = strtol(token, NULL, 0);
+                free(copy);
+            }
+        }
     }
 
     if (!path || !fb || !fb->base)
         return;
-    if (capture_at >= 0 && (long)g_frame_count != capture_at)
-        return;
+    if (g_capture_count > 0) {
+        bool wanted = false;
+
+        for (int i = 0; i < g_capture_count; i++)
+            wanted = wanted || g_captures[i] == (long)g_frame_count;
+        if (!wanted)
+            return;
+    }
+
+    /* A '%u' in the path is replaced with the frame index, which lets one run
+       capture a whole scripted sequence. */
+    if (strchr(path, '%'))
+        snprintf(file_path, sizeof(file_path), path, g_frame_count);
+    else
+        snprintf(file_path, sizeof(file_path), "%s", path);
 
     width  = fb->width;
     height = fb->height;
@@ -67,7 +96,7 @@ static void dump_framebuffer(const SceDisplayFrameBuf *fb)
     if (width == 0 || height == 0 || pitch < width)
         return;
 
-    file = fopen(path, "wb");
+    file = fopen(file_path, "wb");
     if (!file)
         return;
 
@@ -108,7 +137,12 @@ static void dump_framebuffer(const SceDisplayFrameBuf *fb)
 
     free(row);
     fclose(file);
-    LOG("SceDisplay: captured frame %u to %s", g_frame_count, path);
+    LOG("SceDisplay: captured frame %u to %s", g_frame_count, file_path);
+}
+
+unsigned int SceDisplay_get_frame_count(void)
+{
+    return g_frame_count;
 }
 
 EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayFrameBuf *pParam,

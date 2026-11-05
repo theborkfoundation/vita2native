@@ -313,6 +313,17 @@ EXPORT(SceDisplay, 0xB6FDE0BA, int, sceDisplayGetVcount, void)
     return vcount;
 }
 
+unsigned int SceDisplay_get_frame_count(void)
+{
+    unsigned int count;
+
+    pthread_mutex_lock(&g_lock);
+    count = (unsigned int)g_vcount;
+    pthread_mutex_unlock(&g_lock);
+
+    return count;
+}
+
 static int display_wait_vblanks(unsigned int count)
 {
     pthread_mutex_lock(&g_lock);
