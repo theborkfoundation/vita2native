@@ -136,6 +136,9 @@ static int launch(SceKernelThreadEntry entry)
     ret = SceKernelThreadMgr_init();
     if (ret != 0)
         goto done;
+    ret = SceKernelSync_init();
+    if (ret != 0)
+        goto done;
     ret = SceDisplay_init(device);
     if (ret != 0)
         goto done;
@@ -161,6 +164,7 @@ static int launch(SceKernelThreadEntry entry)
     SceGxm_finish();
     SceDisplay_finish();
     SceAudio_finish();
+    SceKernelSync_finish();
     SceKernelThreadMgr_finish();
 
     LOG("Process finished! Returned: %d", ret);

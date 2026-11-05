@@ -102,47 +102,6 @@ EXPORT(SceLibKernel, 0x7595D9AA, int, sceKernelExitProcess, int res)
     return 0;
 }
 
-EXPORT(SceLibKernel, 0xDA6EC8EF, int, sceKernelCreateLwMutex, SceKernelLwMutexWork *pWork,
-       const char *pName, unsigned int attr, int initCount,
-       const SceKernelLwMutexOptParam *pOptParam)
-{
-    Mutex *mutex = (void *)pWork;
-    mutexInit(mutex);
-    if (initCount > 0)
-        mutexLock(mutex);
-    return 0;
-}
-
-EXPORT(SceLibKernel, 0x244E76D2, int, sceKernelDeleteLwMutex, SceKernelLwMutexWork *pWork)
-{
-    mutexUnlock((void *)pWork);
-    mutexDestroy((void *)pWork);
-    return 0;
-}
-
-EXPORT(SceLibKernel, 0x46E7BE7B, int, sceKernelLockLwMutex, SceKernelLwMutexWork *pWork,
-       int lockCount, unsigned int *pTimeout)
-{
-    mutexLock((void *)pWork);
-    return 0;
-}
-
-EXPORT(SceLibKernel, 0xA6A2C915, int, sceKernelTryLockLwMutex, SceKernelLwMutexWork *pWork,
-       int lockCount)
-{
-    if (mutexTryLock((void *)pWork))
-        return 0;
-    else
-        return SCE_KERNEL_ERROR_LW_MUTEX_FAILED_TO_OWN;
-}
-
-EXPORT(SceLibKernel, 0x91FA6614, int, sceKernelUnlockLwMutex, SceKernelLwMutexWork *pWork,
-       int unlockCount)
-{
-    mutexUnlock((void *)pWork);
-    return 0;
-}
-
 static const char *vita_io_open_flags_to_fopen_flags(int flags)
 {
     if (flags == SCE_O_RDONLY)

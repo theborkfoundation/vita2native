@@ -75,6 +75,7 @@ add_executable(vita2native
     source/modules/SceAppMgr.c
     source/modules/SceCommonDialog.c
     source/modules/SceKernelThreadMgr.c
+    source/modules/SceKernelSync.c
     source/modules/SceLibKernel.c
     source/modules/SceNet.c
     source/modules/SceRtc.c
@@ -202,6 +203,19 @@ if(BUILD_TESTING)
     target_link_directories(audio_smoke PRIVATE ${SDL2_LIBRARY_DIRS})
     target_link_libraries(audio_smoke PRIVATE pthread m ${SDL2_LIBRARIES})
     add_test(NAME audio_smoke COMMAND audio_smoke)
+
+    add_executable(sync_smoke
+        tests/sync_smoke.c
+        source/modules/SceKernelSync.c
+        source/host/host_thread.c
+        source/log.c
+        source/netlog.c
+    )
+    target_include_directories(sync_smoke PRIVATE include source/modules
+        external/vita-headers/include external/mlib)
+    target_compile_definitions(sync_smoke PRIVATE _GNU_SOURCE=1 _FILE_OFFSET_BITS=64)
+    target_link_libraries(sync_smoke PRIVATE pthread m)
+    add_test(NAME sync_smoke COMMAND sync_smoke)
 
     add_executable(egl_window_smoke
         tests/egl_window_smoke.c
