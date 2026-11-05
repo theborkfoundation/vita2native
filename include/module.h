@@ -31,9 +31,9 @@ extern const library_t __stop_exported_libraries[];
         }
 
 #define EXPORT_FUNC(library, nid, func)                                                            \
-    static const uint32_t library##_##name##_##nid##_nid                                           \
+    static const uint32_t library##_##func##_##nid##_nid                                           \
         __attribute__((used, section(#library "_func_nidtable"))) = nid;                           \
-    static const void *const library##_##name##_##nid##_func                                       \
+    static const void *const library##_##func##_##nid##_func                                       \
         __attribute__((used, section(#library "_func_table"))) = &func;
 
 #define EXPORT(library, nid, type, name, ...)                                                      \
