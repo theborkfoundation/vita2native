@@ -67,6 +67,7 @@ int main(int argc, char **argv)
     uint64_t deadline = 0;
     unsigned int frame_index = 0;
     int failures = 0;
+    unsigned int last_pad_buttons = ~0u;
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
@@ -123,6 +124,21 @@ int main(int argc, char **argv)
         if (!(frame_index % 20))
             printf("present_probe: %u frames, last %.1f ms\n", frame_index,
                    (double)elapsed / 1e6);
+
+        /* Surface SDL input so a remote tester can verify mappings: run under
+           Xvfb and inject keys with xdotool. */
+        {
+            HostPadState pad;
+
+            if (host_video_pad_state(&pad) && pad.buttons != last_pad_buttons) {
+                printf("present_probe: pad buttons=0x%08x pressed=0x%08x "
+                       "lx=%u ly=%u rx=%u ry=%u controller=%d\n",
+                       pad.buttons, pad.pressed, pad.lx, pad.ly, pad.rx, pad.ry,
+                       pad.active ? 1 : 0);
+                fflush(stdout);
+                last_pad_buttons = pad.buttons;
+            }
+        }
     }
 
     printf("present_probe: finished after %u frames (%d slow presents)\n", frame_index, failures);

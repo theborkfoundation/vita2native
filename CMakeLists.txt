@@ -287,9 +287,11 @@ if(BUILD_TESTING)
     add_executable(ctrl_script_smoke
         tests/ctrl_script_smoke.c
         source/modules/SceCtrl_null.c
+        source/host/host_video_sdl.c
     )
     target_include_directories(ctrl_script_smoke PRIVATE include external/vita-headers/include)
     target_compile_definitions(ctrl_script_smoke PRIVATE _GNU_SOURCE=1)
+    target_link_libraries(ctrl_script_smoke PRIVATE pthread ${CMAKE_DL_LIBS})
     add_test(NAME ctrl_script_smoke COMMAND ctrl_script_smoke)
 
     add_executable(regmgr_smoke
@@ -378,7 +380,7 @@ if(BUILD_TESTING)
         tests/present_probe.c
         source/host/host_video_sdl.c
     )
-    target_include_directories(present_probe PRIVATE include)
+    target_include_directories(present_probe PRIVATE include external/vita-headers/include)
     target_compile_definitions(present_probe PRIVATE
         _GNU_SOURCE=1
         _FILE_OFFSET_BITS=64

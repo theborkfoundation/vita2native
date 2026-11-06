@@ -26,14 +26,20 @@
 #include "host.h"
 
 #include <dlfcn.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+#include <psp2/ctrl.h>
 
 typedef struct SDL_Window SDL_Window;
 typedef struct SDL_Renderer SDL_Renderer;
 typedef struct SDL_Texture SDL_Texture;
+typedef struct _SDL_GameController SDL_GameController;
+typedef struct _SDL_Joystick SDL_Joystick;
 
 typedef struct SDL_Rect {
     int x, y, w, h;
@@ -68,6 +74,26 @@ typedef struct {
     int (*get_renderer_info)(SDL_Renderer *, SDL_RendererInfo *);
     const char *(*get_current_video_driver)(void);
     int (*show_cursor)(int);
+    void (*pump_events)(void);
+    const unsigned char *(*get_keyboard_state)(int *numkeys);
+    int (*num_joysticks)(void);
+    int (*is_game_controller)(int joystick_index);
+    SDL_GameController *(*game_controller_open)(int joystick_index);
+    void (*game_controller_close)(SDL_GameController *controller);
+    int (*game_controller_get_button)(SDL_GameController *, int button);
+    int (*game_controller_get_axis)(SDL_GameController *, int axis);
+    const char *(*game_controller_name)(SDL_GameController *);
+    int (*game_controller_get_attached)(SDL_GameController *);
+    SDL_Joystick *(*joystick_open)(int joystick_index);
+    void (*joystick_close)(SDL_Joystick *);
+    int (*joystick_get_button)(SDL_Joystick *, int button);
+    int (*joystick_get_axis)(SDL_Joystick *, int axis);
+    int (*joystick_get_attached)(SDL_Joystick *);
+    int (*joystick_num_buttons)(SDL_Joystick *);
+    int (*joystick_num_axes)(SDL_Joystick *);
+    const char *(*joystick_name)(SDL_Joystick *);
+    char *(*game_controller_mapping)(SDL_GameController *);
+    void (*free)(void *);
 } SdlApi;
 
 #define SDL_INIT_VIDEO 0x00000020u
@@ -78,6 +104,48 @@ typedef struct {
 #define SDL_PIXELFORMAT_ABGR8888 0x16762004u
 #define SDL_TEXTUREACCESS_STREAMING 1
 #define SDL_WINDOWPOS_UNDEFINED 0x1FFF0000u
+
+#define SDL_INIT_GAMECONTROLLER 0x00002000u
+
+/* SDL_GameControllerButton */
+#define SDL_CONTROLLER_BUTTON_A 0
+#define SDL_CONTROLLER_BUTTON_B 1
+#define SDL_CONTROLLER_BUTTON_X 2
+#define SDL_CONTROLLER_BUTTON_Y 3
+#define SDL_CONTROLLER_BUTTON_BACK 4
+#define SDL_CONTROLLER_BUTTON_START 6
+#define SDL_CONTROLLER_BUTTON_LEFTSTICK 7
+#define SDL_CONTROLLER_BUTTON_RIGHTSTICK 8
+#define SDL_CONTROLLER_BUTTON_LEFTSHOULDER 9
+#define SDL_CONTROLLER_BUTTON_RIGHTSHOULDER 10
+#define SDL_CONTROLLER_BUTTON_DPAD_UP 11
+#define SDL_CONTROLLER_BUTTON_DPAD_DOWN 12
+#define SDL_CONTROLLER_BUTTON_DPAD_LEFT 13
+#define SDL_CONTROLLER_BUTTON_DPAD_RIGHT 14
+
+/* SDL_GameControllerAxis */
+#define SDL_CONTROLLER_AXIS_LEFTX 0
+#define SDL_CONTROLLER_AXIS_LEFTY 1
+#define SDL_CONTROLLER_AXIS_RIGHTX 2
+#define SDL_CONTROLLER_AXIS_RIGHTY 3
+#define SDL_CONTROLLER_AXIS_TRIGGERLEFT 4
+#define SDL_CONTROLLER_AXIS_TRIGGERRIGHT 5
+
+/* SDL_Scancode (subset) */
+#define SDL_SCANCODE_A 4
+#define SDL_SCANCODE_E 8
+#define SDL_SCANCODE_Q 20
+#define SDL_SCANCODE_S 22
+#define SDL_SCANCODE_X 27
+#define SDL_SCANCODE_Z 29
+#define SDL_SCANCODE_1 30
+#define SDL_SCANCODE_2 31
+#define SDL_SCANCODE_RETURN 40
+#define SDL_SCANCODE_BACKSPACE 42
+#define SDL_SCANCODE_RIGHT 79
+#define SDL_SCANCODE_LEFT 80
+#define SDL_SCANCODE_DOWN 81
+#define SDL_SCANCODE_UP 82
 
 struct HostVideo {
     SdlApi *api;
@@ -112,7 +180,24 @@ struct HostVideo {
     int window_height;
     bool stretch;
     bool windowed;
+
+    SDL_GameController *controller;
+    SDL_Joystick *joystick;
+    bool controller_ready;
+    uint64_t controller_scan_at_ns;
+    bool swap_ab;
+    HostPadState pad;
 };
+
+static HostVideo *g_active_video;
+
+static uint64_t video_now_ns(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
 
 static void video_present(HostVideo *video, const void *rgba, int width, int height,
                           int pitch_pixels)
@@ -142,6 +227,20 @@ static void video_present(HostVideo *video, const void *rgba, int width, int hei
     api->render_present(video->renderer);
 }
 
+static void video_close_devices(HostVideo *video)
+{
+    if (video->joystick) {
+        if (video->api->joystick_close)
+            video->api->joystick_close(video->joystick);
+        video->joystick = NULL;
+    }
+    if (video->controller) {
+        if (video->api->game_controller_close)
+            video->api->game_controller_close(video->controller);
+        video->controller = NULL;
+    }
+}
+
 static void video_destroy_sdl(HostVideo *video)
 {
     SdlApi *api = video->api;
@@ -149,6 +248,7 @@ static void video_destroy_sdl(HostVideo *video)
     if (!api)
         return;
 
+    video_close_devices(video);
     if (video->texture)
         api->destroy_texture(video->texture);
     if (video->renderer)
@@ -169,6 +269,14 @@ static bool video_init_sdl(HostVideo *video)
     if (api->init_subsystem(SDL_INIT_VIDEO) != 0) {
         fprintf(stderr, "vita2native: SDL video init failed: %s\n", api->get_error());
         return false;
+    }
+
+    /* Controllers are optional: keyboard input and video work without them. */
+    if (api->game_controller_open &&
+        api->init_subsystem(SDL_INIT_GAMECONTROLLER) == 0) {
+        video->controller_ready = true;
+    } else {
+        fprintf(stderr, "vita2native: SDL controller init failed: %s\n", api->get_error());
     }
 
     if (!video->windowed)
@@ -208,6 +316,308 @@ static bool video_init_sdl(HostVideo *video)
     fprintf(stderr, "vita2native: presenting through SDL (%s video, %dx%d window)\n",
             api->get_current_video_driver ? api->get_current_video_driver() : "unknown",
             video->width, video->height);
+
+    video->controller_scan_at_ns = video_now_ns();
+    return true;
+}
+
+/* ------------------------------------------------------------------------- */
+/* SDL input                                                                  */
+/* ------------------------------------------------------------------------- */
+
+static SDL_GameController *video_open_controller(HostVideo *video)
+{
+    SdlApi *api = video->api;
+    int count;
+
+    if (!video->controller_ready || !api->num_joysticks || !api->game_controller_open)
+        return NULL;
+
+    count = api->num_joysticks();
+    for (int i = 0; i < count; i++) {
+        SDL_GameController *controller;
+        const char *name;
+
+        if (api->is_game_controller && !api->is_game_controller(i))
+            continue;
+
+        controller = api->game_controller_open(i);
+        if (!controller)
+            continue;
+
+        name = api->game_controller_name ? api->game_controller_name(controller) : NULL;
+        fprintf(stderr, "vita2native: SDL opened controller %d%s%s\n", i, name ? ": " : "",
+                name ? name : "");
+        if (getenv("VITA2NATIVE_INPUT_DEBUG") && api->game_controller_mapping) {
+            char *mapping = api->game_controller_mapping(controller);
+
+            if (mapping) {
+                fprintf(stderr, "vita2native: SDL mapping %s\n", mapping);
+                if (api->free)
+                    api->free(mapping);
+            }
+        }
+        return controller;
+    }
+
+    return NULL;
+}
+
+/* Fallback for pads SDL has no game controller mapping for: read raw joystick
+   buttons and axes positionally. Generic vendor pads (including the R36S pad)
+   show up this way. */
+static SDL_Joystick *video_open_joystick(HostVideo *video)
+{
+    SdlApi *api = video->api;
+    int count;
+
+    if (!video->controller_ready || !api->num_joysticks || !api->joystick_open)
+        return NULL;
+
+    count = api->num_joysticks();
+    for (int i = 0; i < count; i++) {
+        SDL_Joystick *joystick = api->joystick_open(i);
+        const char *name;
+        int buttons, axes;
+
+        if (!joystick)
+            continue;
+
+        name = api->joystick_name ? api->joystick_name(joystick) : NULL;
+        buttons = api->joystick_num_buttons ? api->joystick_num_buttons(joystick) : 0;
+        axes = api->joystick_num_axes ? api->joystick_num_axes(joystick) : 0;
+        fprintf(stderr, "vita2native: SDL raw joystick %d%s%s (%d buttons, %d axes)\n", i,
+                name ? ": " : "", name ? name : "", buttons, axes);
+        return joystick;
+    }
+
+    return NULL;
+}
+
+static unsigned int raw_button_mask(const HostVideo *video, int button)
+{
+    switch (button) {
+    case 0: /* BTN_SOUTH */
+        return video->swap_ab ? SCE_CTRL_CIRCLE : SCE_CTRL_CROSS;
+    case 1: /* BTN_EAST */
+        return video->swap_ab ? SCE_CTRL_CROSS : SCE_CTRL_CIRCLE;
+    case 2: /* BTN_NORTH */
+        return SCE_CTRL_TRIANGLE;
+    case 3: /* BTN_WEST */
+        return SCE_CTRL_SQUARE;
+    case 4: /* BTN_TL */
+        return SCE_CTRL_L1;
+    case 5: /* BTN_TR */
+        return SCE_CTRL_R1;
+    case 6: /* BTN_TL2 */
+        return SCE_CTRL_L2;
+    case 7: /* BTN_TR2 */
+        return SCE_CTRL_R2;
+    case 8: /* BTN_SELECT */
+        return SCE_CTRL_SELECT;
+    case 9: /* BTN_START */
+        return SCE_CTRL_START;
+    case 10: /* BTN_DPAD_UP */
+        return SCE_CTRL_UP;
+    case 11: /* BTN_DPAD_DOWN */
+        return SCE_CTRL_DOWN;
+    case 12: /* BTN_DPAD_LEFT */
+        return SCE_CTRL_LEFT;
+    case 13: /* BTN_DPAD_RIGHT */
+        return SCE_CTRL_RIGHT;
+    default:
+        return 0;
+    }
+}
+
+static unsigned int controller_button_mask(const HostVideo *video, int button)
+{
+    switch (button) {
+    case SDL_CONTROLLER_BUTTON_A:
+        return video->swap_ab ? SCE_CTRL_CIRCLE : SCE_CTRL_CROSS;
+    case SDL_CONTROLLER_BUTTON_B:
+        return video->swap_ab ? SCE_CTRL_CROSS : SCE_CTRL_CIRCLE;
+    case SDL_CONTROLLER_BUTTON_X:
+        return SCE_CTRL_SQUARE;
+    case SDL_CONTROLLER_BUTTON_Y:
+        return SCE_CTRL_TRIANGLE;
+    case SDL_CONTROLLER_BUTTON_BACK:
+        return SCE_CTRL_SELECT;
+    case SDL_CONTROLLER_BUTTON_START:
+        return SCE_CTRL_START;
+    case SDL_CONTROLLER_BUTTON_LEFTSTICK:
+        return SCE_CTRL_L3;
+    case SDL_CONTROLLER_BUTTON_RIGHTSTICK:
+        return SCE_CTRL_R3;
+    case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
+        return SCE_CTRL_L1;
+    case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
+        return SCE_CTRL_R1;
+    case SDL_CONTROLLER_BUTTON_DPAD_UP:
+        return SCE_CTRL_UP;
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+        return SCE_CTRL_DOWN;
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+        return SCE_CTRL_LEFT;
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+        return SCE_CTRL_RIGHT;
+    default:
+        return 0;
+    }
+}
+
+static unsigned int keyboard_button_mask(const unsigned char *keys, int numkeys)
+{
+    unsigned int mask = 0;
+
+#define KEY(scancode, button)                                                                      \
+    do {                                                                                           \
+        if ((scancode) < numkeys && keys[(scancode)])                                              \
+            mask |= (button);                                                                      \
+    } while (0)
+
+    KEY(SDL_SCANCODE_UP, SCE_CTRL_UP);
+    KEY(SDL_SCANCODE_DOWN, SCE_CTRL_DOWN);
+    KEY(SDL_SCANCODE_LEFT, SCE_CTRL_LEFT);
+    KEY(SDL_SCANCODE_RIGHT, SCE_CTRL_RIGHT);
+    KEY(SDL_SCANCODE_Z, SCE_CTRL_CROSS);
+    KEY(SDL_SCANCODE_RETURN, SCE_CTRL_CROSS);
+    KEY(SDL_SCANCODE_X, SCE_CTRL_CIRCLE);
+    KEY(SDL_SCANCODE_BACKSPACE, SCE_CTRL_CIRCLE);
+    KEY(SDL_SCANCODE_A, SCE_CTRL_SQUARE);
+    KEY(SDL_SCANCODE_S, SCE_CTRL_TRIANGLE);
+    KEY(SDL_SCANCODE_Q, SCE_CTRL_L1);
+    KEY(SDL_SCANCODE_E, SCE_CTRL_R1);
+    KEY(SDL_SCANCODE_1, SCE_CTRL_L2);
+    KEY(SDL_SCANCODE_2, SCE_CTRL_R2);
+
+#undef KEY
+    return mask;
+}
+
+static uint8_t sdl_axis_to_vita(int value, bool invert)
+{
+    int converted;
+
+    /* SDL sticks are -32768..32767 with negative = up/left; Vita axes are
+       0..255 with 255 = up/left. Invert before scaling so the centre stays
+       exactly 128 instead of 127. */
+    if (invert)
+        value = -value;
+
+    converted = (int)(((long long)(value + 32768) * 255 + 32767) / 65535);
+    if (converted < 0)
+        converted = 0;
+    if (converted > 255)
+        converted = 255;
+    return (uint8_t)converted;
+}
+
+/* Runs on the video thread: SDL event/video calls must stay on the thread that
+   initialised the subsystem. */
+static void video_sample_input(HostVideo *video)
+{
+    SdlApi *api = video->api;
+    unsigned int buttons = 0;
+    uint8_t lx = 128, ly = 128, rx = 128, ry = 128;
+    bool active = false;
+
+    if (!api || !api->pump_events)
+        return;
+
+    api->pump_events();
+
+    if (api->get_keyboard_state) {
+        int numkeys = 0;
+        const unsigned char *keys = api->get_keyboard_state(&numkeys);
+
+        if (keys && numkeys > 0)
+            buttons |= keyboard_button_mask(keys, numkeys);
+    }
+
+    if (video->controller && api->game_controller_get_attached &&
+        !api->game_controller_get_attached(video->controller)) {
+        fprintf(stderr, "vita2native: SDL controller disconnected\n");
+        video_close_devices(video);
+    }
+    if (video->joystick && api->joystick_get_attached &&
+        !api->joystick_get_attached(video->joystick)) {
+        fprintf(stderr, "vita2native: SDL joystick disconnected\n");
+        video_close_devices(video);
+    }
+
+    if (!video->controller && !video->joystick) {
+        uint64_t now = video_now_ns();
+
+        if (now >= video->controller_scan_at_ns) {
+            video->controller = video_open_controller(video);
+            if (!video->controller)
+                video->joystick = video_open_joystick(video);
+            /* Hotplug detection costs a joystick enumeration, so look once a
+               second rather than on every 16 ms poll. */
+            video->controller_scan_at_ns = now + 1000000000ull;
+        }
+    }
+
+    if (video->controller) {
+        active = true;
+        for (int button = 0; button <= SDL_CONTROLLER_BUTTON_DPAD_RIGHT; button++) {
+            if (api->game_controller_get_button(video->controller, button))
+                buttons |= controller_button_mask(video, button);
+        }
+        if (api->game_controller_get_axis(video->controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) >
+            8000)
+            buttons |= SCE_CTRL_L2;
+        if (api->game_controller_get_axis(video->controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) >
+            8000)
+            buttons |= SCE_CTRL_R2;
+
+        lx = sdl_axis_to_vita(
+            api->game_controller_get_axis(video->controller, SDL_CONTROLLER_AXIS_LEFTX), false);
+        ly = sdl_axis_to_vita(
+            api->game_controller_get_axis(video->controller, SDL_CONTROLLER_AXIS_LEFTY), true);
+        rx = sdl_axis_to_vita(
+            api->game_controller_get_axis(video->controller, SDL_CONTROLLER_AXIS_RIGHTX), false);
+        ry = sdl_axis_to_vita(
+            api->game_controller_get_axis(video->controller, SDL_CONTROLLER_AXIS_RIGHTY), true);
+    } else if (video->joystick && api->joystick_get_button && api->joystick_get_axis) {
+        active = true;
+        for (int button = 0; button <= 13; button++) {
+            if (api->joystick_get_button(video->joystick, button))
+                buttons |= raw_button_mask(video, button);
+        }
+        /* Linux gamepad axes are X, Y, RX, RY in this order. Triggers are
+           buttons on generic pads, so they need no axis handling here. */
+        lx = sdl_axis_to_vita(api->joystick_get_axis(video->joystick, 0), false);
+        ly = sdl_axis_to_vita(api->joystick_get_axis(video->joystick, 1), true);
+        rx = sdl_axis_to_vita(api->joystick_get_axis(video->joystick, 2), false);
+        ry = sdl_axis_to_vita(api->joystick_get_axis(video->joystick, 3), true);
+    }
+
+    pthread_mutex_lock(&video->lock);
+    /* Latch new presses until the guest peeks: titles poll the pad once per
+       rendered frame, which can be slower than a human tap. */
+    video->pad.pressed |= buttons & ~video->pad.buttons;
+    video->pad.buttons = buttons;
+    video->pad.lx = lx;
+    video->pad.ly = ly;
+    video->pad.rx = rx;
+    video->pad.ry = ry;
+    video->pad.active = active;
+    pthread_mutex_unlock(&video->lock);
+}
+
+bool host_video_pad_state(HostPadState *state)
+{
+    HostVideo *video = g_active_video;
+
+    if (!video || !state)
+        return false;
+
+    pthread_mutex_lock(&video->lock);
+    *state = video->pad;
+    video->pad.pressed = 0;
+    pthread_mutex_unlock(&video->lock);
     return true;
 }
 
@@ -224,21 +634,42 @@ static void *video_thread(void *arg)
 
     if (!ok) {
         video_destroy_sdl(video);
-        if (video->api && video->api->quit_subsystem)
+        if (video->api && video->api->quit_subsystem) {
+            if (video->controller_ready)
+                video->api->quit_subsystem(SDL_INIT_GAMECONTROLLER);
             video->api->quit_subsystem(SDL_INIT_VIDEO);
+        }
         return NULL;
     }
 
     for (;;) {
         const uint8_t *frame;
         int width, height, pitch;
+        struct timespec wait_until;
+
+        /* Poll input even when no frame is waiting, so a desktop keyboard or
+           controller stays responsive while the guest is busy. */
+        video_sample_input(video);
+
+        clock_gettime(CLOCK_REALTIME, &wait_until);
+        wait_until.tv_nsec += 16 * 1000000L;
+        if (wait_until.tv_nsec >= 1000000000L) {
+            wait_until.tv_sec++;
+            wait_until.tv_nsec -= 1000000000L;
+        }
 
         pthread_mutex_lock(&video->lock);
-        while (!video->stop && !video->has_frame)
-            pthread_cond_wait(&video->cond, &video->lock);
+        while (!video->stop && !video->has_frame) {
+            if (pthread_cond_timedwait(&video->cond, &video->lock, &wait_until) == ETIMEDOUT)
+                break;
+        }
         if (video->stop) {
             pthread_mutex_unlock(&video->lock);
             break;
+        }
+        if (!video->has_frame) {
+            pthread_mutex_unlock(&video->lock);
+            continue;
         }
 
         video->has_frame = false;
@@ -258,8 +689,11 @@ static void *video_thread(void *arg)
     }
 
     video_destroy_sdl(video);
-    if (video->api && video->api->quit_subsystem)
+    if (video->api && video->api->quit_subsystem) {
+        if (video->controller_ready)
+            video->api->quit_subsystem(SDL_INIT_GAMECONTROLLER);
         video->api->quit_subsystem(SDL_INIT_VIDEO);
+    }
     return NULL;
 }
 
@@ -311,6 +745,31 @@ HostVideo *host_video_open(void)
     LOAD_SDL(show_cursor, "SDL_ShowCursor");
     *(void **)(&api->get_current_video_driver) = dlsym(api->library, "SDL_GetCurrentVideoDriver");
 
+    /* Input is optional: every symbol below may be absent on a minimal SDL
+       build, and missing video symbols are the only hard failures. */
+    *(void **)(&api->pump_events) = dlsym(api->library, "SDL_PumpEvents");
+    *(void **)(&api->get_keyboard_state) = dlsym(api->library, "SDL_GetKeyboardState");
+    *(void **)(&api->num_joysticks) = dlsym(api->library, "SDL_NumJoysticks");
+    *(void **)(&api->is_game_controller) = dlsym(api->library, "SDL_IsGameController");
+    *(void **)(&api->game_controller_open) = dlsym(api->library, "SDL_GameControllerOpen");
+    *(void **)(&api->game_controller_close) = dlsym(api->library, "SDL_GameControllerClose");
+    *(void **)(&api->game_controller_get_button) =
+        dlsym(api->library, "SDL_GameControllerGetButton");
+    *(void **)(&api->game_controller_get_axis) = dlsym(api->library, "SDL_GameControllerGetAxis");
+    *(void **)(&api->game_controller_name) = dlsym(api->library, "SDL_GameControllerName");
+    *(void **)(&api->game_controller_get_attached) =
+        dlsym(api->library, "SDL_GameControllerGetAttached");
+    *(void **)(&api->joystick_open) = dlsym(api->library, "SDL_JoystickOpen");
+    *(void **)(&api->joystick_close) = dlsym(api->library, "SDL_JoystickClose");
+    *(void **)(&api->joystick_get_button) = dlsym(api->library, "SDL_JoystickGetButton");
+    *(void **)(&api->joystick_get_axis) = dlsym(api->library, "SDL_JoystickGetAxis");
+    *(void **)(&api->joystick_get_attached) = dlsym(api->library, "SDL_JoystickGetAttached");
+    *(void **)(&api->joystick_num_buttons) = dlsym(api->library, "SDL_JoystickNumButtons");
+    *(void **)(&api->joystick_num_axes) = dlsym(api->library, "SDL_JoystickNumAxes");
+    *(void **)(&api->joystick_name) = dlsym(api->library, "SDL_JoystickName");
+    *(void **)(&api->game_controller_mapping) = dlsym(api->library, "SDL_GameControllerMapping");
+    *(void **)(&api->free) = dlsym(api->library, "SDL_free");
+
 #undef LOAD_SDL
 
     video = calloc(1, sizeof(*video));
@@ -320,6 +779,11 @@ HostVideo *host_video_open(void)
     video->api = api;
     video->stretch = getenv("VITA2NATIVE_STRETCH") != NULL;
     video->windowed = getenv("VITA2NATIVE_SDL_WINDOWED") != NULL;
+    video->swap_ab = getenv("VITA2NATIVE_CTRL_SWAP_AB") != NULL;
+    video->pad.lx = 128;
+    video->pad.ly = 128;
+    video->pad.rx = 128;
+    video->pad.ry = 128;
     video->window_width = 960;
     video->window_height = 544;
 
@@ -364,6 +828,7 @@ HostVideo *host_video_open(void)
         goto fail;
     }
 
+    g_active_video = video;
     return video;
 
 fail:
@@ -377,6 +842,9 @@ void host_video_close(HostVideo *video)
 {
     if (!video)
         return;
+
+    if (g_active_video == video)
+        g_active_video = NULL;
 
     if (video->thread_started) {
         pthread_mutex_lock(&video->lock);

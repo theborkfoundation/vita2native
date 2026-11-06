@@ -107,6 +107,23 @@ int host_video_height(const HostVideo *video);
 void host_video_present(HostVideo *video, const void *rgba, int width, int height,
                         int pitch_pixels);
 
+/*
+ * Pad state sampled by the video layer from SDL (keyboard and game
+ * controllers). Buttons use the SCE_CTRL_* encoding and axes are 0..255 with
+ * 128 centred. `pressed` holds the button edges accumulated since the previous
+ * call, so a quick tap survives the guest's slow polling. `active` says a game
+ * controller (not just a keyboard) is attached, which makes the axes
+ * meaningful. Returns false when no SDL video/input is running.
+ */
+typedef struct {
+    uint32_t buttons;
+    uint32_t pressed;
+    uint8_t lx, ly, rx, ry;
+    bool active;
+} HostPadState;
+
+bool host_video_pad_state(HostPadState *state);
+
 /* Mutexes. */
 void mutexInit(Mutex *mutex);
 void mutexLock(Mutex *mutex);

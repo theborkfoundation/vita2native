@@ -130,12 +130,22 @@ cycles colours and a moving marker on the panel without starting the emulator.
 On this board VitaShell renders at ~1.3 fps; the blob's per-draw overhead is the
 bottleneck (about 5 ms per `glDrawElements`).
 
-The headless build now also reads the pad directly from evdev
-(`/dev/input/event*`), so the R36S controls work without SDL: face buttons,
-D-pad, shoulders, `BTN_SELECT/START`, the F1–F5 buttons and both sticks.
-`VITA2NATIVE_INPUT_DEBUG=1` logs the code-to-button mapping and
-`VITA2NATIVE_CTRL_SWAP_AB` swaps cross/circle; scripted input still works and is
-ORed with the physical pad.
+Input follows the same split. While SDL video is running, its dedicated video
+thread samples input too: keyboards, plus pads that SDL recognises through its
+controller database, with a raw-joystick fallback for unknown devices. Keyboard
+mapping is arrows for the D-pad, `Z`/`Enter` = cross, `X`/`Backspace` = circle,
+`A` = square, `S` = triangle, `Q`/`E` = L1/R1 and `1`/`2` = L2/R2. Presses are
+latched until the guest polls, so a tap is not lost on a title running at 1 fps.
+`VITA2NATIVE_CTRL_SWAP_AB` swaps cross/circle on all sources, and
+`VITA2NATIVE_INPUT_DEBUG=1` logs the mapping (`SDL mapping ...` shows the
+mapping SDL picked for a controller).
+
+When SDL is unavailable, the headless build reads the pad directly from evdev
+(`/dev/input/event*`), which remains the reliable path on the R36S: face
+buttons, D-pad, shoulders, `BTN_SELECT/START`, the F1–F5 buttons and both
+sticks. SDL and evdev states are ORed together; axes come from SDL only when a
+controller is attached, so a keyboard-only session cannot overwrite the evdev
+stick values. Scripted input still works and is ORed with both.
 
 Video output goes through SDL, loaded with `dlopen` so the headless ARM binary
 keeps no SDL build dependency. SDL chooses the platform driver itself: KMSDRM
@@ -171,6 +181,7 @@ stays offscreen (surfaceless with Panfrost or the vendor blob); only
 presentation goes through SDL's X11 driver. That split is deliberate: if the GL
 context is created on the X11 EGL platform, Mesa uses llvmpipe over the
 forwarded connection, which is roughly 5x slower and can crash in LLVM.
+Forwarded X11 is also the easiest way to drive a title from a desktop keyboard.
 
 ### Headless capture and scripted input
 

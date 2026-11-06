@@ -1,10 +1,14 @@
 /*
- * Headless controller backend.
+ * Controller backend.
  *
- * Without a window there is no SDL input source, but on a handheld the pad is
- * still available as a plain evdev device (/dev/input/event*). This backend
- * opens every event node and maps the standard gamepad codes, which is what the
- * R36S exposes through its odroidgo3-joypad driver:
+ * Input comes from two places and the states are ORed:
+ *
+ *   SDL      the video layer samples keyboards and game controllers on its own
+ *            thread (see host_video_sdl.c). This is the desktop/X11 path and
+ *            also covers any pad SDL can open when the video window exists.
+ *   evdev    every /dev/input/event* node is opened below, which is the
+ *            reliable path on the R36S where SDL may have no controller
+ *            mapping and the pad is exposed as a plain gpio-keys device:
  *
  *   BTN_SOUTH/EAST/NORTH/WEST   face buttons (A/B/X/Y)
  *   BTN_TL/TR and BTN_TL2/TR2   shoulders
@@ -431,6 +435,9 @@ static bool input_open_devices(void)
 EXPORT(SceCtrl, 0xA9C3CED6, int, sceCtrlPeekBufferPositive, int port, SceCtrlData *pad_data,
        int count)
 {
+    HostPadState sdl_pad;
+    bool have_sdl_pad;
+
     (void)port;
     (void)count;
 
@@ -442,6 +449,10 @@ EXPORT(SceCtrl, 0xA9C3CED6, int, sceCtrlPeekBufferPositive, int port, SceCtrlDat
     if (g_script_enabled)
         script_update();
 
+    /* Sampled by the SDL video thread (keyboard and game controllers). Call it
+       before taking g_lock so the two locks are never taken in both orders. */
+    have_sdl_pad = host_video_pad_state(&sdl_pad);
+
     pthread_mutex_lock(&g_lock);
     pad_data->buttons = g_pad_buttons | g_pending_presses | g_script_buttons;
     g_pending_presses = 0;
@@ -449,6 +460,18 @@ EXPORT(SceCtrl, 0xA9C3CED6, int, sceCtrlPeekBufferPositive, int port, SceCtrlDat
     pad_data->ly = g_ly;
     pad_data->rx = g_rx;
     pad_data->ry = g_ry;
+
+    if (have_sdl_pad) {
+        pad_data->buttons |= sdl_pad.buttons | sdl_pad.pressed;
+        /* Prefer SDL axes only when a controller is actually attached; a
+           keyboard-only session must not overwrite the evdev stick values. */
+        if (sdl_pad.active) {
+            pad_data->lx = sdl_pad.lx;
+            pad_data->ly = sdl_pad.ly;
+            pad_data->rx = sdl_pad.rx;
+            pad_data->ry = sdl_pad.ry;
+        }
+    }
     pthread_mutex_unlock(&g_lock);
 
     if (g_debug) {
