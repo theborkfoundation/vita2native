@@ -88,6 +88,13 @@ bundled FAAD2 decoder; CELP decoding and encrypted SELF files are not supported.
 
 Guest code runs natively in the host process; there is no sandbox or isolation.
 
+### Tested homebrew
+
+VitaShell, PixelChess, Pong, VitaSudoku, Minesweeper, ElevenMPV and the VitaSDK
+AvPlayer sample load with **zero unresolved imports**. VitaShell, PixelChess
+and Pong have been rendered end-to-end under QEMU with Mesa softpipe; the other
+titles reach their main loop and start GXM work.
+
 ### Headless capture and scripted input
 
 Headless builds can dump guest framebuffers as BMP and drive the pad from a
