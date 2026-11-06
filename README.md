@@ -138,7 +138,10 @@ mapping is arrows for the D-pad, `Z`/`Enter` = cross, `X`/`Backspace` = circle,
 latched until the guest polls, so a tap is not lost on a title running at 1 fps.
 `VITA2NATIVE_CTRL_SWAP_AB` swaps cross/circle on all sources, and
 `VITA2NATIVE_INPUT_DEBUG=1` logs the mapping (`SDL mapping ...` shows the
-mapping SDL picked for a controller).
+mapping SDL picked for a controller). The same video-thread poll reads the
+pointer: the front touch panel follows the mouse, mapped through the letterbox
+rectangle into the Vita's 1920x1088 active area, and a click is latched until
+the guest reads it. Clicks on the black bars are ignored.
 
 When SDL is unavailable, the headless build reads the pad directly from evdev
 (`/dev/input/event*`), which remains the reliable path on the R36S: face

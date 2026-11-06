@@ -94,6 +94,7 @@ typedef struct {
     const char *(*joystick_name)(SDL_Joystick *);
     char *(*game_controller_mapping)(SDL_GameController *);
     void (*free)(void *);
+    unsigned int (*get_mouse_state)(int *, int *);
 } SdlApi;
 
 #define SDL_INIT_VIDEO 0x00000020u
@@ -147,6 +148,11 @@ typedef struct {
 #define SDL_SCANCODE_DOWN 81
 #define SDL_SCANCODE_UP 82
 
+/* Vita front touch panel. */
+#define TOUCH_PANEL_WIDTH 1920
+#define TOUCH_PANEL_HEIGHT 1088
+#define SDL_BUTTON_LMASK 0x01u
+
 struct HostVideo {
     SdlApi *api;
 
@@ -187,6 +193,8 @@ struct HostVideo {
     uint64_t controller_scan_at_ns;
     bool swap_ab;
     HostPadState pad;
+    HostTouchState touch;
+    bool touch_latched;
 };
 
 static HostVideo *g_active_video;
@@ -515,6 +523,71 @@ static uint8_t sdl_axis_to_vita(int value, bool invert)
 
 /* Runs on the video thread: SDL event/video calls must stay on the thread that
    initialised the subsystem. */
+static void video_sample_touch(HostVideo *video)
+{
+    SdlApi *api = video->api;
+    int mouse_x = 0, mouse_y = 0;
+    unsigned int buttons;
+    bool down;
+    bool mapped = false;
+    int panel_x = 0, panel_y = 0;
+
+    if (!api || !api->get_mouse_state)
+        return;
+
+    buttons = api->get_mouse_state(&mouse_x, &mouse_y);
+    down = (buttons & SDL_BUTTON_LMASK) != 0;
+
+    if (video->width > 0 && video->height > 0) {
+        int content_x = 0, content_y = 0;
+        int content_w = video->width, content_h = video->height;
+
+        /* Mirror SDL_RenderSetLogicalSize's letterbox, so the black bars are
+           not touchable and the visible frame maps onto the full panel. */
+        if (!video->stretch && video->texture_width > 0 && video->texture_height > 0) {
+            int scale_x = video->width * 1000 / video->texture_width;
+            int scale_y = video->height * 1000 / video->texture_height;
+            int scale = scale_x < scale_y ? scale_x : scale_y;
+
+            content_w = video->texture_width * scale / 1000;
+            content_h = video->texture_height * scale / 1000;
+            content_x = (video->width - content_w) / 2;
+            content_y = (video->height - content_h) / 2;
+        }
+
+        if (content_w > 0 && content_h > 0 && mouse_x >= content_x &&
+            mouse_y >= content_y && mouse_x < content_x + content_w &&
+            mouse_y < content_y + content_h) {
+            panel_x = (mouse_x - content_x) * TOUCH_PANEL_WIDTH / content_w;
+            panel_y = (mouse_y - content_y) * TOUCH_PANEL_HEIGHT / content_h;
+            if (panel_x < 0)
+                panel_x = 0;
+            if (panel_x >= TOUCH_PANEL_WIDTH)
+                panel_x = TOUCH_PANEL_WIDTH - 1;
+            if (panel_y < 0)
+                panel_y = 0;
+            if (panel_y >= TOUCH_PANEL_HEIGHT)
+                panel_y = TOUCH_PANEL_HEIGHT - 1;
+            mapped = true;
+        }
+    }
+
+    pthread_mutex_lock(&video->lock);
+    video->touch.active = true;
+    if (mapped && down) {
+        /* Keep the press coordinates for the latch: a tap may be released
+           before the guest polls, and it should still report where it was. */
+        video->touch.x = (uint16_t)panel_x;
+        video->touch.y = (uint16_t)panel_y;
+        if (!video->touch.down)
+            video->touch_latched = true;
+        video->touch.down = true;
+    } else {
+        video->touch.down = false;
+    }
+    pthread_mutex_unlock(&video->lock);
+}
+
 static void video_sample_input(HostVideo *video)
 {
     SdlApi *api = video->api;
@@ -526,6 +599,7 @@ static void video_sample_input(HostVideo *video)
         return;
 
     api->pump_events();
+    video_sample_touch(video);
 
     if (api->get_keyboard_state) {
         int numkeys = 0;
@@ -617,6 +691,21 @@ bool host_video_pad_state(HostPadState *state)
     pthread_mutex_lock(&video->lock);
     *state = video->pad;
     video->pad.pressed = 0;
+    pthread_mutex_unlock(&video->lock);
+    return true;
+}
+
+bool host_video_touch_state(HostTouchState *state)
+{
+    HostVideo *video = g_active_video;
+
+    if (!video || !state)
+        return false;
+
+    pthread_mutex_lock(&video->lock);
+    *state = video->touch;
+    state->down = video->touch.down || video->touch_latched;
+    video->touch_latched = false;
     pthread_mutex_unlock(&video->lock);
     return true;
 }
@@ -769,6 +858,7 @@ HostVideo *host_video_open(void)
     *(void **)(&api->joystick_name) = dlsym(api->library, "SDL_JoystickName");
     *(void **)(&api->game_controller_mapping) = dlsym(api->library, "SDL_GameControllerMapping");
     *(void **)(&api->free) = dlsym(api->library, "SDL_free");
+    *(void **)(&api->get_mouse_state) = dlsym(api->library, "SDL_GetMouseState");
 
 #undef LOAD_SDL
 

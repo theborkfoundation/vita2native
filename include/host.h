@@ -124,6 +124,21 @@ typedef struct {
 
 bool host_video_pad_state(HostPadState *state);
 
+/*
+ * Pointer/touch state sampled by the video layer from SDL's mouse state and
+ * mapped through the same letterbox rectangle SDL uses to present the guest
+ * frame. Coordinates are in the Vita's 1920x1088 touch-panel space. `down` is
+ * true while pressed, or for one query after a tap so a slow guest still sees
+ * it. Returns false when no SDL video is running.
+ */
+typedef struct {
+    bool active;
+    bool down;
+    uint16_t x, y;
+} HostTouchState;
+
+bool host_video_touch_state(HostTouchState *state);
+
 /* Mutexes. */
 void mutexInit(Mutex *mutex);
 void mutexLock(Mutex *mutex);

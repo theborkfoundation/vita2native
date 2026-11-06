@@ -68,6 +68,8 @@ int main(int argc, char **argv)
     unsigned int frame_index = 0;
     int failures = 0;
     unsigned int last_pad_buttons = ~0u;
+    bool last_touch_down = false;
+    int last_touch_x = -1, last_touch_y = -1;
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
@@ -137,6 +139,21 @@ int main(int argc, char **argv)
                        pad.active ? 1 : 0);
                 fflush(stdout);
                 last_pad_buttons = pad.buttons;
+            }
+        }
+
+        {
+            HostTouchState touch;
+
+            if (host_video_touch_state(&touch) && touch.active &&
+                (touch.down != last_touch_down ||
+                 (touch.down && (touch.x != last_touch_x || touch.y != last_touch_y)))) {
+                printf("present_probe: touch down=%d x=%u y=%u\n", touch.down ? 1 : 0,
+                       (unsigned)touch.x, (unsigned)touch.y);
+                fflush(stdout);
+                last_touch_down = touch.down;
+                last_touch_x = touch.x;
+                last_touch_y = touch.y;
             }
         }
     }

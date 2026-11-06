@@ -2,8 +2,9 @@
  * SceTouch: front-panel touch input.
  *
  * The front panel is driven by the pointer (mouse or touchscreen) over the
- * presentation window: a left-button press produces one touch report scaled
- * into the Vita's 1920x1088 active area. The back panel has no host source.
+ * presentation window. The SDL video thread samples the pointer, maps it through
+ * the same letterbox rectangle it uses for the guest frame, and latches a press
+ * until the guest reads it. The back panel has no host source.
  *
  * Read() polls for at most ~128 ms so a title that calls it in a loop still
  * gets a chance to run its render path when nothing is being touched.
@@ -12,21 +13,16 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-
-#ifdef VITA2NATIVE_HAVE_SDL2
-#include <SDL.h>
-#endif
 
 #include <psp2/touch.h>
 
 #include "host.h"
 #include "module.h"
-#include "modules/SceDisplay.h"
 #include "util.h"
 
-#define TOUCH_PANEL_MAX_X 1920
-#define TOUCH_PANEL_MAX_Y 1088
 #define TOUCH_MAX_BUFFERS 8
 #define TOUCH_READ_POLLS  16
 #define TOUCH_READ_NS     8000000ll
@@ -36,52 +32,39 @@ static SceTouchSamplingState g_sampling[SCE_TOUCH_PORT_MAX_NUM] = {
     SCE_TOUCH_SAMPLING_STATE_START,
     SCE_TOUCH_SAMPLING_STATE_STOP,
 };
+static bool g_debug;
+static bool g_logged_down;
 
 static void build_touch_data(SceUInt32 port, SceTouchData *data)
 {
+    HostTouchState touch;
+    bool down;
+
     memset(data, 0, sizeof(*data));
     data->timeStamp = host_monotonic_ns() / 1000ull;
 
     if (port != SCE_TOUCH_PORT_FRONT)
         return;
-#ifdef VITA2NATIVE_HAVE_SDL2
-    if (!SDL_WasInit(SDL_INIT_VIDEO))
+
+    if (!host_video_touch_state(&touch) || !touch.active)
         return;
 
-    SDL_PumpEvents();
-
-    {
-        int mouse_x = 0, mouse_y = 0;
-        int window_width = 960, window_height = 544;
-        Uint32 buttons = SDL_GetMouseState(&mouse_x, &mouse_y);
-
-        if (!(buttons & SDL_BUTTON(SDL_BUTTON_LEFT)))
-            return;
-
-        SceDisplay_get_window_size(&window_width, &window_height);
-        if (window_width <= 0 || window_height <= 0)
-            return;
-
-        int x = mouse_x * TOUCH_PANEL_MAX_X / window_width;
-        int y = mouse_y * TOUCH_PANEL_MAX_Y / window_height;
-
-        if (x < 0)
-            x = 0;
-        if (x >= TOUCH_PANEL_MAX_X)
-            x = TOUCH_PANEL_MAX_X - 1;
-        if (y < 0)
-            y = 0;
-        if (y >= TOUCH_PANEL_MAX_Y)
-            y = TOUCH_PANEL_MAX_Y - 1;
-
-        data->reportNum = 1;
-        data->report[0].id = 0;
-        data->report[0].force = 64;
-        data->report[0].x = (SceInt16)x;
-        data->report[0].y = (SceInt16)y;
-        data->report[0].info = 0;
+    down = touch.down;
+    if (g_debug && down != g_logged_down) {
+        fprintf(stderr, "vita2native: SceTouch %s x=%u y=%u\n", down ? "down" : "up",
+                (unsigned)touch.x, (unsigned)touch.y);
+        g_logged_down = down;
     }
-#endif
+
+    if (!down)
+        return;
+
+    data->reportNum = 1;
+    data->report[0].id = 0;
+    data->report[0].force = 64;
+    data->report[0].x = (SceInt16)touch.x;
+    data->report[0].y = (SceInt16)touch.y;
+    data->report[0].info = 0;
 }
 
 static int touch_get(SceUInt32 port, SceTouchData *data, SceUInt32 n_bufs, bool block)
@@ -342,5 +325,6 @@ DECLARE_LIBRARY(SceTouch, 0x3e4f4a81);
 
 int SceTouch_init(void)
 {
+    g_debug = getenv("VITA2NATIVE_INPUT_DEBUG") != NULL;
     return 0;
 }
