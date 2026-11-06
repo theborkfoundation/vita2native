@@ -123,6 +123,14 @@ static pthread_mutex_t g_vita_thread_event_handlers_lock = PTHREAD_MUTEX_INITIAL
 
 static inline int vita_priority_to_host_priority(int priority)
 {
+    /* On Vita, priority 0 means "same priority as the calling thread". SDL2's
+       Vita thread wrapper passes 0, which the range check below would reject. */
+    if (priority == 0) {
+        VitaThreadInfo *current = SceKernelThreadMgr_get_thread_info();
+
+        priority = current ? current->current_priority : SCE_KERNEL_DEFAULT_PRIORITY_GAME_APP;
+    }
+
     if ((priority & SCE_KERNEL_DEFAULT_PRIORITY) == SCE_KERNEL_DEFAULT_PRIORITY)
         priority = SCE_KERNEL_DEFAULT_PRIORITY_GAME_APP + (priority & ~SCE_KERNEL_DEFAULT_PRIORITY);
 
