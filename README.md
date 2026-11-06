@@ -125,10 +125,12 @@ The same ARM32 build also runs on an R36S handheld (Rockchip RK3326, Mali-G31
 through the proprietary Bifrost blob, 640x480 DSI panel). Its vendor kernel
 exposes `/dev/fb0` but does not scan it out — the VOP was reading a null buffer
 — so presentation goes through DRM/KMS directly: `source/host/host_console.c`
-allocates dumb buffers, creates framebuffers, sets the CRTC and page-flips each
-converted guest frame. fbdev remains as a fallback, and the backend is chosen
-automatically (`VITA2NATIVE_DRM`, `VITA2NATIVE_FBDEV`,
-`VITA2NATIVE_NO_PRESENT`, and `VITA2NATIVE_STRETCH` override it).
+allocates a dumb buffer, creates a framebuffer, sets the CRTC and writes each
+converted guest frame straight into the scanned buffer. Page flips are opt-in
+(`VITA2NATIVE_PAGE_FLIP=1`) because this kernel accepts them without re-pointing
+the VOP. fbdev remains as a fallback, and the backend is chosen automatically
+(`VITA2NATIVE_DRM`, `VITA2NATIVE_FBDEV`, `VITA2NATIVE_NO_PRESENT`, and
+`VITA2NATIVE_STRETCH` override it).
 `tests/present_probe.c` cycles colours and a moving marker on the panel without
 starting the emulator. On this board VitaShell renders on the panel at ~1.3 fps;
 the blob's per-draw overhead is the bottleneck (about 5 ms per `glDrawElements`).

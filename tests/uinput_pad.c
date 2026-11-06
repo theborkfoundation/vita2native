@@ -89,12 +89,19 @@ int main(int argc, char **argv)
     struct uinput_user_dev device;
     long delay = argc > 1 ? strtol(argv[1], NULL, 0) : 10;
     long hold_ms = argc > 3 ? strtol(argv[3], NULL, 0) : 1800;
+    long gap_ms = argc > 4 ? strtol(argv[4], NULL, 0) : 800;
+    long repeat = argc > 5 ? strtol(argv[5], NULL, 0) : 1;
+    unsigned int codes[64];
+    int code_count = 0;
     char *list;
     char *token;
     int result;
 
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <delay-seconds> <button>[,<button>...] [hold-ms]\n", argv[0]);
+        fprintf(stderr,
+                "usage: %s <delay-seconds> <button>[,<button>...] [hold-ms] [gap-ms] [repeat]\n"
+                "       repeat 0 loops forever\n",
+                argv[0]);
         return 1;
     }
 
@@ -150,29 +157,36 @@ int main(int argc, char **argv)
     if (!list)
         return 1;
 
-    for (token = strtok(list, ","); token; token = strtok(NULL, ",")) {
+    for (token = strtok(list, ","); token && code_count < 64; token = strtok(NULL, ",")) {
         unsigned int code = button_code(token);
 
         if (!code) {
             fprintf(stderr, "uinput_pad: unknown button '%s'\n", token);
             continue;
         }
+        codes[code_count++] = code;
+    }
+    free(list);
 
-        printf("uinput_pad: press %s (0x%x)\n", token, code);
-        fflush(stdout);
-        emit(EV_KEY, code, 1);
-        sync_event();
-        /* Guest frames can be much slower than a human tap (VitaShell runs at
-           ~1.3 fps on the R36S), so hold each button long enough to be seen.
-           The emulator also latches presses until the guest samples them, so a
-           short hold still works. */
-        sleep_ms(hold_ms);
-        emit(EV_KEY, code, 0);
-        sync_event();
-        sleep_ms(800);
+    if (!code_count)
+        return 1;
+
+    for (long iteration = 0; repeat == 0 || iteration < repeat; iteration++) {
+        for (int i = 0; i < code_count; i++) {
+            printf("uinput_pad: press 0x%x (round %ld)\n", codes[i], iteration);
+            fflush(stdout);
+            emit(EV_KEY, codes[i], 1);
+            sync_event();
+            /* Guest frames can be much slower than a human tap (VitaShell runs
+               at ~1.3 fps on the R36S), so hold each button long enough to be
+               sampled even without the press latch. */
+            sleep_ms(hold_ms);
+            emit(EV_KEY, codes[i], 0);
+            sync_event();
+            sleep_ms(gap_ms);
+        }
     }
 
-    free(list);
     printf("uinput_pad: done, keeping device alive\n");
     fflush(stdout);
 

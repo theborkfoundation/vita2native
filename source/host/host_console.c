@@ -549,6 +549,13 @@ static HostConsole *console_open_drm(const char *path)
     console->width = (int)target.mode.hdisplay;
     console->height = (int)target.mode.vdisplay;
     console->stretch = getenv("VITA2NATIVE_STRETCH") != NULL;
+    /* The Rockchip vendor kernel accepts PAGE_FLIP and sends completion events
+       but keeps scanning the original buffer, so a flip never reaches the
+       panel. Writing into the SETCRTC buffer always works; double buffering is
+       opt-in for kernels where flips are known to be wired up. */
+    console->use_flip = getenv("VITA2NATIVE_PAGE_FLIP") != NULL;
+    console->front = 0;
+    console->back = console->use_flip ? 1 : 0;
 
     build_lut(console->lut[0], 16, 8);
     build_lut(console->lut[1], 8, 8);
@@ -558,6 +565,8 @@ static HostConsole *console_open_drm(const char *path)
         if (!drm_create_buffer(console, &console->buffers[i]))
             goto fail_console;
         console->buffer_count++;
+        if (!console->use_flip)
+            break;
     }
 
     {
@@ -575,10 +584,6 @@ static HostConsole *console_open_drm(const char *path)
             goto fail_console;
         }
     }
-
-    console->use_flip = true;
-    console->front = 0;
-    console->back = 1;
 
     fprintf(stderr,
             "vita2native: presenting to %s (%dx%d, DRM crtc %u connector %u%s)\n", path,
@@ -708,7 +713,8 @@ void host_console_present(HostConsole *console, const void *rgba, int width, int
                 console->back = 1 - target;
                 console->flip_pending = true;
             } else {
-                /* Keep drawing into buffer 0 from now on. */
+                /* Keep drawing into buffer 0 from now on; it is the one the
+                   CRTC was pointed at by SETCRTC. */
                 console->use_flip = false;
                 drm_dirty(console, &console->buffers[0]);
             }
