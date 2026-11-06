@@ -17,6 +17,15 @@ HostGpuDevice host_gpu_create(const HostGpuConfig *config)
     if (!config)
         config = &defaults;
 
+    /*
+     * Panfrost's default tiled/AFBC layouts make glReadPixels roughly twice as
+     * slow (195 ns/pixel on Mali-G31), and this port reads the whole frame
+     * back every frame for sceDisplaySetFrameBuf. Linear layouts only affect
+     * Panfrost, and a caller-supplied PAN_MESA_DEBUG wins.
+     */
+    if (!getenv("PAN_MESA_DEBUG"))
+        setenv("PAN_MESA_DEBUG", "linear", 0);
+
     device = host_gfx_gl_create(config);
     if (device)
         return device;

@@ -36,6 +36,7 @@
 #include <execinfo.h>
 #include <signal.h>
 #include <sys/auxv.h>
+#include <sys/syscall.h>
 #include <ucontext.h>
 #include <unistd.h>
 
@@ -103,6 +104,31 @@ static void guest_signal_handler(int signal, siginfo_t *info, void *context)
     _exit(128 + signal);
 }
 
+static void debug_sample_handler(int signal, siginfo_t *info, void *context)
+{
+    ucontext_t *uc = context;
+    char message[256];
+    int length;
+    void *frames[24];
+    int count;
+
+    (void)signal;
+    (void)info;
+
+    length = snprintf(message, sizeof(message),
+                      "vita2native: sample tid=%ld pc=0x%08lx lr=0x%08lx sp=0x%08lx "
+                      "fp=0x%08lx\n",
+                      (long)syscall(SYS_gettid), (unsigned long)uc->uc_mcontext.arm_pc,
+                      (unsigned long)uc->uc_mcontext.arm_lr,
+                      (unsigned long)uc->uc_mcontext.arm_sp,
+                      (unsigned long)uc->uc_mcontext.arm_fp);
+    if (length > 0)
+        write(STDERR_FILENO, message, (size_t)length);
+
+    count = backtrace(frames, (int)ARRAY_SIZE(frames));
+    backtrace_symbols_fd(frames, count, STDERR_FILENO);
+}
+
 static void install_guest_signal_handlers(void)
 {
     static const int signals[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE };
@@ -115,6 +141,17 @@ static void install_guest_signal_handlers(void)
 
     for (size_t i = 0; i < ARRAY_SIZE(signals); i++)
         sigaction(signals[i], &action, NULL);
+
+    /* `kill -USR1 <tid>` samples one thread's PC and call stack. */
+    if (getenv("VITA2NATIVE_DEBUG_SAMPLE")) {
+        struct sigaction sample;
+
+        memset(&sample, 0, sizeof(sample));
+        sample.sa_sigaction = debug_sample_handler;
+        sample.sa_flags = SA_SIGINFO | SA_RESTART;
+        sigemptyset(&sample.sa_mask);
+        sigaction(SIGUSR1, &sample, NULL);
+    }
 }
 #endif
 
@@ -277,7 +314,7 @@ int main(int argc, char *argv[])
     log_init(LOG_DEVICE_STDERR | LOG_DEVICE_NETLOG);
 
     LOG("vita2native " VITA2NATIVE_MAJOR "." VITA2NATIVE_MINOR "." VITA2NATIVE_PATCH "-"
-        VITA2NATIVE_HASH " (" __DATE__ " " __TIME__ ")");
+        VITA2NATIVE_HASH);
 
     now = time(NULL);
     strftime(timestr, sizeof(timestr), "%c", localtime(&now));

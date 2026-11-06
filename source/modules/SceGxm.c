@@ -4,9 +4,10 @@
  * The guest renders into a GLES framebuffer owned by SceGxmRenderTarget. GXP
  * shaders are compiled through Vita3K's recompiler (GXP -> SPIR-V) and
  * SPIRV-Cross (SPIR-V -> GLSL ES 3.10). Default uniforms are fed through the
- * same storage-buffer bindings Vita3K's SPIR-V uses (0 = vertex, 1 = fragment),
- * render info through uniform buffers 2/3, and textures through sampler
- * bindings equal to the GXM texture unit.
+ * same bindings Vita3K's SPIR-V uses (0 = vertex, 1 = fragment) but as uniform
+ * blocks: GLES 3.1 does not require vertex storage buffers to exist, and
+ * Panfrost on Mali reports zero of them. Render info uses uniform buffers 2/3
+ * and textures use sampler bindings equal to the GXM texture unit.
  *
  * At sceGxmEndScene the color target is read back into the guest's
  * SceGxmColorSurface, which is what sceDisplaySetFrameBuf presents.
@@ -19,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #include "config.h"
 #include "fs.h"
@@ -34,10 +36,6 @@
 #include "vita3k_shader_recompiler_iface_c.h"
 
 extern int vita3k_gxm_get_attribute_location(const SceGxmProgram *program, uint16_t reg_index);
-
-#ifndef GL_SHADER_STORAGE_BUFFER
-#define GL_SHADER_STORAGE_BUFFER 0x90D2
-#endif
 
 #ifndef GL_TEXTURE_LOD_BIAS
 #define GL_TEXTURE_LOD_BIAS 0x8501
@@ -66,10 +64,20 @@ struct GXMRenderFragUniformBlock {
 };
 
 typedef struct {
-    GLuint vbo;
     const void *data;
-    uint32_t size;
 } GxmStream;
+
+/*
+ * Per-frame upload arena. Re-uploading into a buffer the GPU is still reading
+ * makes the driver stall or reallocate, which on Panfrost cost more than the
+ * draw itself (847 draws per VitaShell frame). All per-draw data is appended
+ * into a fresh region instead and the whole arena is orphaned once per frame.
+ */
+typedef struct {
+    GLuint buffer;
+    uint32_t capacity;
+    uint32_t used;
+} GxmBufferArena;
 
 typedef struct {
     GLuint tex;
@@ -82,8 +90,32 @@ typedef struct {
     uint32_t mip_count;
     uint32_t gamma_mode;
     uint32_t hash;
+    uint64_t hash_frame;
+    uint64_t last_used;
     bool valid;
 } GxmTextureCache;
+
+/*
+ * A single-slot cache per texture unit thrashes as soon as a frame alternates
+ * two textures on one unit (VitaShell switches between its 512x512 font atlas
+ * and small icons), which re-decoded the atlas every frame. The cache is
+ * global and bounded instead; entries are keyed by content hash, so a texture
+ * that is genuinely rewritten still gets re-uploaded.
+ */
+#define GXM_TEXTURE_CACHE_SLOTS 64
+
+static GxmTextureCache g_texture_cache[GXM_TEXTURE_CACHE_SLOTS];
+static uint64_t g_texture_clock;
+static uint64_t g_gxm_frame;
+static unsigned int g_profile_draws;
+static unsigned int g_profile_vertices;
+static unsigned int g_profile_uploads;
+static uint64_t g_profile_upload_bytes;
+static uint64_t g_profile_draw_ns;
+static uint64_t g_profile_uniform_ns;
+static uint64_t g_profile_state_ns;
+static uint64_t g_profile_texture_ns;
+static uint64_t g_profile_attrib_ns;
 
 /*
  * sRGB transfer functions. A gamma colour surface stores sRGB-encoded values
@@ -155,10 +187,10 @@ typedef struct SceGxmContext {
     uint32_t vertex_uniform_head;
     uint32_t fragment_uniform_head;
 
-    uint8_t *vertex_ssbo_data;
-    uint8_t *fragment_ssbo_data;
-    uint32_t vertex_ssbo_size;
-    uint32_t fragment_ssbo_size;
+    uint8_t *vertex_block_data;
+    uint8_t *fragment_block_data;
+    uint32_t vertex_block_size;
+    uint32_t fragment_block_size;
 
     float viewport_x_offset, viewport_x_scale;
     float viewport_y_offset, viewport_y_scale;
@@ -190,12 +222,16 @@ typedef struct SceGxmContext {
     uint8_t back_stencil_compare_mask, back_stencil_write_mask;
     unsigned int front_stencil_ref, back_stencil_ref;
 
-    GLuint ssbo[2];
     GLuint ubo[2];
-    GLuint vbo;
-    GLuint ibo;
-    GLuint wire_ibo;
-    GxmTextureCache textures[2][SCE_GXM_MAX_TEXTURE_UNITS];
+    uint32_t ubo_capacity[2];
+    GLuint uniform_block[2];
+    uint32_t uniform_block_capacity[2];
+    struct GXMRenderVertUniformBlock last_vert_info;
+    struct GXMRenderFragUniformBlock last_frag_info;
+    bool vert_info_valid;
+    bool frag_info_valid;
+    GxmBufferArena stream_arena;
+    GxmBufferArena index_arena;
 
     const SceGxmPrecomputedVertexState *precomputed_vertex;
     const SceGxmPrecomputedFragmentState *precomputed_fragment;
@@ -221,7 +257,7 @@ typedef struct SceGxmRegisteredProgram {
     const SceGxmProgram *programHeader;
     Vita3kUniformBufferLayout uniform_buffers[GXM_MAX_UNIFORM_BUFFER_LAYOUT];
     uint32_t uniform_buffer_count;
-    uint32_t uniform_buffer_size; /* total SSBO container size */
+    uint32_t uniform_buffer_size; /* total uniform container size */
     int refcount;
 } SceGxmRegisteredProgram;
 
@@ -270,6 +306,10 @@ typedef struct {
     const SceGxmVertexProgram *vs;
     const SceGxmFragmentProgram *fs;
     GLuint program;
+    GLint block_vertex_data;
+    GLint block_fragment_data;
+    GLint block_render_vert;
+    GLint block_render_frag;
 } GxmLinkedProgram;
 
 /*
@@ -338,6 +378,10 @@ static HostGles *g_gl;
 static uint32_t *g_notification_region;
 static GxmLinkedProgram g_linked[GXM_MAX_LINKED_PROGRAMS];
 static unsigned int g_linked_count;
+static GLuint g_bound_texture[2 * SCE_GXM_MAX_TEXTURE_UNITS];
+static unsigned int g_active_texture_unit = UINT_MAX;
+static GLuint g_bound_uniform_block[2];
+static GLuint g_bound_render_ubo[2];
 static SceGxmDisplayQueueCallback *g_display_callback;
 static uint32_t g_display_callback_data_size;
 
@@ -500,7 +544,7 @@ static void gxm_compile_shader(GLuint shader, const char *source, const char *na
  * it is cached under <vfs root>/cache/shaders. Driver-level shader objects are
  * not portable and are never cached.
  */
-#define GXM_SHADER_CACHE_VERSION 1u
+#define GXM_SHADER_CACHE_VERSION 2u
 
 static uint32_t gxm_hash_bytes(uint32_t hash, const void *data, size_t size);
 
@@ -672,14 +716,19 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
     return shader;
 }
 
-static GLuint gxm_get_linked_program(const SceGxmVertexProgram *vs, const SceGxmFragmentProgram *fs)
+static GLuint gxm_get_linked_program(const SceGxmVertexProgram *vs, const SceGxmFragmentProgram *fs,
+                                     GxmLinkedProgram **linked_out)
 {
     GLint ok = 0;
     char log[1024];
+    GxmLinkedProgram *linked;
 
     for (unsigned int i = 0; i < g_linked_count; i++) {
-        if (g_linked[i].vs == vs && g_linked[i].fs == fs)
+        if (g_linked[i].vs == vs && g_linked[i].fs == fs) {
+            if (linked_out)
+                *linked_out = &g_linked[i];
             return g_linked[i].program;
+        }
     }
 
     if (g_linked_count == GXM_MAX_LINKED_PROGRAMS)
@@ -699,10 +748,27 @@ static GLuint gxm_get_linked_program(const SceGxmVertexProgram *vs, const SceGxm
         return 0;
     }
 
-    g_linked[g_linked_count].vs = vs;
-    g_linked[g_linked_count].fs = fs;
-    g_linked[g_linked_count].program = program;
-    g_linked_count++;
+    linked = &g_linked[g_linked_count++];
+    linked->vs = vs;
+    linked->fs = fs;
+    linked->program = program;
+    linked->block_vertex_data = g_gl->glGetUniformBlockIndex(program, "vertexDataType");
+    linked->block_fragment_data = g_gl->glGetUniformBlockIndex(program, "fragmentDataType");
+    linked->block_render_vert = g_gl->glGetUniformBlockIndex(program, "renderVertInfo");
+    linked->block_render_frag = g_gl->glGetUniformBlockIndex(program, "renderFragInfo");
+
+    /* Block bindings are static for the program's lifetime. */
+    if (linked->block_vertex_data != GL_INVALID_INDEX)
+        g_gl->glUniformBlockBinding(program, linked->block_vertex_data, 0);
+    if (linked->block_fragment_data != GL_INVALID_INDEX)
+        g_gl->glUniformBlockBinding(program, linked->block_fragment_data, 1);
+    if (linked->block_render_vert != GL_INVALID_INDEX)
+        g_gl->glUniformBlockBinding(program, linked->block_render_vert, 2);
+    if (linked->block_render_frag != GL_INVALID_INDEX)
+        g_gl->glUniformBlockBinding(program, linked->block_render_frag, 3);
+
+    if (linked_out)
+        *linked_out = linked;
 
     return program;
 }
@@ -710,8 +776,18 @@ static GLuint gxm_get_linked_program(const SceGxmVertexProgram *vs, const SceGxm
 static uint32_t gxm_hash_bytes(uint32_t hash, const void *data, size_t size)
 {
     const uint8_t *bytes = data;
+    size_t i = 0;
 
-    for (size_t i = 0; i < size; i++) {
+    /* Word-at-a-time: texture hashing runs on every draw, and a byte loop at
+       -O0 made a 512x512 atlas cost more than the draw itself. */
+    for (; i + 4 <= size; i += 4) {
+        uint32_t word;
+
+        memcpy(&word, bytes + i, sizeof(word));
+        hash = (hash ^ word) * 16777619u;
+        hash ^= hash >> 13;
+    }
+    for (; i < size; i++) {
         hash ^= bytes[i];
         hash *= 16777619u;
     }
@@ -732,11 +808,13 @@ static uint32_t gxm_texture_hash(const SceGxmTextureInner *texture, const void *
     hash = gxm_hash_bytes(hash, &type, sizeof(type));
 
     for (uint32_t face = 0; face < faces; face++) {
-        GxmTextureLevel level;
+        for (uint32_t level = 0;; level++) {
+            GxmTextureLevel info;
 
-        if (gxm_texture_get_level(texture, face, 0, &level) != 0)
-            return 0;
-        hash = gxm_hash_bytes(hash, (const uint8_t *)data + level.offset, level.size);
+            if (gxm_texture_get_level(texture, face, level, &info) != 0)
+                break;
+            hash = gxm_hash_bytes(hash, (const uint8_t *)data + info.offset, info.size);
+        }
     }
 
     if (base == SCE_GXM_TEXTURE_BASE_FORMAT_P4 || base == SCE_GXM_TEXTURE_BASE_FORMAT_P8) {
@@ -783,6 +861,14 @@ static GLenum gxm_min_filter(const SceGxmTextureInner *texture, uint32_t mip_cou
     }
 }
 
+static uint64_t gxm_time_ns(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
 static void gxm_texture_params(const SceGxmTextureInner *texture, GLenum target, uint32_t mip_count)
 {
     g_gl->glTexParameteri(target, GL_TEXTURE_MIN_FILTER, (GLint)gxm_min_filter(texture, mip_count));
@@ -799,8 +885,78 @@ static void gxm_texture_params(const SceGxmTextureInner *texture, GLenum target,
                           (float)(texture->lod_min0 | (texture->lod_min1 << 2)));
 }
 
-static bool gxm_upload_texture(GxmTextureCache *cache, const SceGxmTextureInner *texture,
-                               unsigned int unit)
+static GxmTextureCache *gxm_texture_cache_find(const SceGxmTextureInner *texture,
+                                               const void *data, GLenum target)
+{
+    uint32_t format = (uint32_t)gxm_texture_get_format(texture);
+    uint32_t mip_count = gxm_texture_true_mip_count(texture);
+    const void *palette = (const void *)(uintptr_t)(texture->palette_addr << 6);
+
+    for (unsigned int i = 0; i < GXM_TEXTURE_CACHE_SLOTS; i++) {
+        GxmTextureCache *cache = &g_texture_cache[i];
+
+        if (!cache->valid)
+            continue;
+        if (cache->data == data && cache->target == target && cache->format == format &&
+            cache->mip_count == mip_count && cache->gamma_mode == texture->gamma_mode &&
+            cache->palette == palette)
+            return cache;
+    }
+
+    return NULL;
+}
+
+static void gxm_forget_texture(GLuint tex);
+
+static GxmTextureCache *gxm_texture_cache_alloc(void)
+{
+    GxmTextureCache *victim = &g_texture_cache[0];
+    bool found = false;
+
+    for (unsigned int i = 0; i < GXM_TEXTURE_CACHE_SLOTS; i++) {
+        GxmTextureCache *cache = &g_texture_cache[i];
+
+        if (!cache->valid) {
+            victim = cache;
+            found = true;
+            break;
+        }
+        if (!found || cache->last_used < victim->last_used) {
+            victim = cache;
+            found = true;
+        }
+    }
+
+    if (victim->tex)
+        g_gl->glDeleteTextures(1, &victim->tex);
+    gxm_forget_texture(victim->tex);
+    memset(victim, 0, sizeof(*victim));
+
+    return victim;
+}
+
+static void gxm_forget_texture(GLuint tex)
+{
+    for (unsigned int i = 0; i < ARRAY_SIZE(g_bound_texture); i++) {
+        if (g_bound_texture[i] == tex)
+            g_bound_texture[i] = 0;
+    }
+}
+
+static void gxm_texture_cache_flush(void)
+{
+    for (unsigned int i = 0; i < GXM_TEXTURE_CACHE_SLOTS; i++) {
+        if (g_texture_cache[i].tex && g_gl)
+            g_gl->glDeleteTextures(1, &g_texture_cache[i].tex);
+        memset(&g_texture_cache[i], 0, sizeof(g_texture_cache[i]));
+    }
+    memset(g_bound_texture, 0, sizeof(g_bound_texture));
+    g_active_texture_unit = UINT_MAX;
+    g_texture_clock = 0;
+    g_gxm_frame = 0;
+}
+
+static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int unit)
 {
     SceGxmTextureType type = (SceGxmTextureType)gxm_texture_get_type(texture);
     bool cube = type == SCE_GXM_TEXTURE_CUBE || type == SCE_GXM_TEXTURE_CUBE_ARBITRARY;
@@ -809,45 +965,88 @@ static bool gxm_upload_texture(GxmTextureCache *cache, const SceGxmTextureInner 
     uint32_t width = (uint32_t)gxm_texture_get_width(texture);
     uint32_t height = (uint32_t)gxm_texture_get_height(texture);
     uint32_t mip_count = gxm_texture_true_mip_count(texture);
+    const void *palette = (const void *)(uintptr_t)(texture->palette_addr << 6);
     uint32_t hash;
+    GxmTextureCache *cache;
     uint8_t *rgba;
+    uint64_t started;
 
-    g_gl->glActiveTexture(GL_TEXTURE0 + unit);
+    if (g_active_texture_unit != unit) {
+        g_gl->glActiveTexture(GL_TEXTURE0 + unit);
+        g_active_texture_unit = unit;
+    }
 
     if (!data || !width || !height || width > 4096 || height > 4096) {
-        g_gl->glBindTexture(GL_TEXTURE_2D, 0);
-        g_gl->glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
-        cache->valid = false;
+        if (g_bound_texture[unit]) {
+            g_gl->glBindTexture(GL_TEXTURE_2D, 0);
+            g_gl->glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+            g_bound_texture[unit] = 0;
+        }
         return false;
+    }
+
+    cache = gxm_texture_cache_find(texture, data, target);
+
+    /*
+     * A texture can be bound many times per frame (the same font atlas backs
+     * every label), so its content is hashed at most once per frame. Content
+     * written mid-frame is picked up on the next frame.
+     */
+    if (cache && cache->hash_frame == g_gxm_frame) {
+        if (g_bound_texture[unit] != cache->tex) {
+            g_gl->glBindTexture(target, cache->tex);
+            g_bound_texture[unit] = cache->tex;
+        }
+        gxm_texture_params(texture, target, mip_count);
+        cache->last_used = ++g_texture_clock;
+        return true;
     }
 
     hash = gxm_texture_hash(texture, data);
 
-    if (cache->tex && cache->target != target) {
-        g_gl->glDeleteTextures(1, &cache->tex);
-        cache->tex = 0;
-        cache->valid = false;
-    }
-
-    if (!cache->tex) {
-        g_gl->glGenTextures(1, &cache->tex);
-        cache->target = target;
-        cache->valid = false;
-    }
-
-    g_gl->glBindTexture(target, cache->tex);
-
-    if (cache->valid && cache->hash == hash && cache->data == data &&
-        cache->format == (uint32_t)gxm_texture_get_format(texture) &&
-        cache->mip_count == mip_count && cache->gamma_mode == texture->gamma_mode &&
-        cache->target == target) {
+    if (cache && cache->hash == hash) {
+        cache->hash_frame = g_gxm_frame;
+        if (g_bound_texture[unit] != cache->tex) {
+            g_gl->glBindTexture(target, cache->tex);
+            g_bound_texture[unit] = cache->tex;
+        }
         gxm_texture_params(texture, target, mip_count);
+        cache->last_used = ++g_texture_clock;
         return true;
     }
 
+    if (cache) {
+        /* Same key, different content: re-upload into the same slot. */
+        if (cache->tex) {
+            gxm_forget_texture(cache->tex);
+            g_gl->glDeleteTextures(1, &cache->tex);
+        }
+        memset(cache, 0, sizeof(*cache));
+        cache->target = target;
+    } else {
+        cache = gxm_texture_cache_alloc();
+        cache->target = target;
+    }
+
+    g_gl->glGenTextures(1, &cache->tex);
+    g_gl->glBindTexture(target, cache->tex);
+    g_bound_texture[unit] = cache->tex;
+
     rgba = malloc((size_t)width * height * 4);
-    if (!rgba)
+    if (!rgba) {
+        if (cache->tex) {
+            gxm_forget_texture(cache->tex);
+            g_gl->glDeleteTextures(1, &cache->tex);
+        }
+        memset(cache, 0, sizeof(*cache));
+        g_bound_texture[unit] = 0;
+        g_gl->glBindTexture(target, 0);
         return false;
+    }
+
+    started = gxm_time_ns();
+    g_profile_uploads++;
+    g_profile_upload_bytes += (uint64_t)width * height * 4;
 
     for (uint32_t face = 0; face < (cube ? 6u : 1u); face++) {
         for (uint32_t level = 0; level < mip_count; level++) {
@@ -875,8 +1074,11 @@ static bool gxm_upload_texture(GxmTextureCache *cache, const SceGxmTextureInner 
                     LOG("SceGxm: unsupported texture format 0x%08x, sampling black", format);
                 }
                 free(rgba);
+                gxm_forget_texture(cache->tex);
+                g_gl->glDeleteTextures(1, &cache->tex);
+                memset(cache, 0, sizeof(*cache));
+                g_bound_texture[unit] = 0;
                 g_gl->glBindTexture(target, 0);
-                cache->valid = false;
                 return false;
             }
 
@@ -909,16 +1111,25 @@ static bool gxm_upload_texture(GxmTextureCache *cache, const SceGxmTextureInner 
 
     free(rgba);
 
+    if (getenv("VITA2NATIVE_TRACE_TEXTURES") || gxm_time_ns() - started >= 50000000ull) {
+        LOG("SceGxm: texture upload unit %u %ux%u fmt=0x%08x type=%d mips=%u data=%p "
+            "hash=%08x took %.1f ms",
+            unit, width, height, (uint32_t)gxm_texture_get_format(texture), (int)type, mip_count,
+            data, hash, (double)(gxm_time_ns() - started) / 1e6);
+    }
+
     gxm_texture_params(texture, target, mip_count);
 
     cache->data = data;
-    cache->palette = (const void *)(uintptr_t)(texture->palette_addr << 6);
+    cache->palette = palette;
     cache->width = width;
     cache->height = height;
     cache->format = (uint32_t)gxm_texture_get_format(texture);
     cache->mip_count = mip_count;
     cache->gamma_mode = texture->gamma_mode;
     cache->hash = hash;
+    cache->hash_frame = g_gxm_frame;
+    cache->last_used = ++g_texture_clock;
     cache->valid = true;
 
     return true;
@@ -927,10 +1138,53 @@ static bool gxm_upload_texture(GxmTextureCache *cache, const SceGxmTextureInner 
 static void gxm_upload_textures(SceGxmContext *context)
 {
     for (unsigned int i = 0; i < SCE_GXM_MAX_TEXTURE_UNITS; i++) {
-        gxm_upload_texture(&context->textures[0][i], &context->fragment_textures[i], i);
-        gxm_upload_texture(&context->textures[1][i], &context->vertex_textures[i],
-                           SCE_GXM_MAX_TEXTURE_UNITS + i);
+        gxm_upload_texture(&context->fragment_textures[i], i);
+        gxm_upload_texture(&context->vertex_textures[i], SCE_GXM_MAX_TEXTURE_UNITS + i);
     }
+}
+
+static void gxm_arena_reset(GxmBufferArena *arena, GLenum target, uint32_t initial_capacity)
+{
+    if (!arena->buffer) {
+        g_gl->glGenBuffers(1, &arena->buffer);
+        arena->capacity = initial_capacity;
+    }
+    if (!arena->capacity)
+        arena->capacity = initial_capacity;
+
+    g_gl->glBindBuffer(target, arena->buffer);
+    g_gl->glBufferData(target, (GLsizeiptr)arena->capacity, NULL, GL_STREAM_DRAW);
+    arena->used = 0;
+}
+
+static uint32_t gxm_arena_upload(GxmBufferArena *arena, GLenum target, const void *data,
+                                 uint32_t size, uint32_t alignment)
+{
+    uint32_t offset;
+
+    if (!arena->buffer)
+        gxm_arena_reset(arena, target, 256 * 1024);
+
+    offset = (arena->used + alignment - 1) & ~(alignment - 1);
+
+    if (offset + size > arena->capacity) {
+        uint32_t capacity = arena->capacity ? arena->capacity : 256 * 1024;
+
+        while (capacity < offset + size)
+            capacity *= 2;
+
+        g_gl->glBindBuffer(target, arena->buffer);
+        g_gl->glBufferData(target, (GLsizeiptr)capacity, NULL, GL_STREAM_DRAW);
+        arena->capacity = capacity;
+        arena->used = 0;
+        offset = 0;
+    }
+
+    g_gl->glBindBuffer(target, arena->buffer);
+    g_gl->glBufferSubData(target, (GLintptr)offset, (GLsizeiptr)size, data);
+    arena->used = offset + size;
+
+    return offset;
 }
 
 static void gxm_upload_uniforms(SceGxmContext *context, const SceGxmRegisteredProgram *program,
@@ -939,11 +1193,13 @@ static void gxm_upload_uniforms(SceGxmContext *context, const SceGxmRegisteredPr
     const void *default_buffer = vertex ? context->vertex_uniforms : context->fragment_uniforms;
     const void *const *buffers =
         vertex ? context->vertex_uniform_buffers : context->fragment_uniform_buffers;
-    uint8_t **data = vertex ? &context->vertex_ssbo_data : &context->fragment_ssbo_data;
-    uint32_t *capacity = vertex ? &context->vertex_ssbo_size : &context->fragment_ssbo_size;
+    uint8_t **data = vertex ? &context->vertex_block_data : &context->fragment_block_data;
+    uint32_t *capacity = vertex ? &context->vertex_block_size : &context->fragment_block_size;
     uint32_t total = program ? program->uniform_buffer_size : 0;
+    unsigned int index = vertex ? 0 : 1;
+    GLuint buffer = context->uniform_block[index];
 
-    if (!program || !total)
+    if (!total)
         return;
 
     if (*capacity != total) {
@@ -974,10 +1230,23 @@ static void gxm_upload_uniforms(SceGxmContext *context, const SceGxmRegisteredPr
         memcpy(*data + layout->offset, source, size);
     }
 
-    g_gl->glBindBuffer(GL_SHADER_STORAGE_BUFFER, context->ssbo[vertex ? 0 : 1]);
-    g_gl->glBufferData(GL_SHADER_STORAGE_BUFFER, total, *data, GL_STREAM_DRAW);
-    g_gl->glBindBufferBase(GL_SHADER_STORAGE_BUFFER, vertex ? 0 : 1,
-                           context->ssbo[vertex ? 0 : 1]);
+    if (!buffer) {
+        g_gl->glGenBuffers(1, &buffer);
+        context->uniform_block[index] = buffer;
+    }
+
+    g_gl->glBindBuffer(GL_UNIFORM_BUFFER, buffer);
+    if (context->uniform_block_capacity[index] < total) {
+        g_gl->glBufferData(GL_UNIFORM_BUFFER, (GLsizeiptr)total, *data, GL_STREAM_DRAW);
+        context->uniform_block_capacity[index] = total;
+    } else {
+        g_gl->glBufferSubData(GL_UNIFORM_BUFFER, 0, (GLsizeiptr)total, *data);
+    }
+
+    if (g_bound_uniform_block[index] != buffer) {
+        g_gl->glBindBufferBase(GL_UNIFORM_BUFFER, index, buffer);
+        g_bound_uniform_block[index] = buffer;
+    }
 }
 
 static void gxm_apply_viewport(SceGxmContext *context)
@@ -1057,7 +1326,15 @@ static void gxm_apply_cull(SceGxmContext *context)
 
 static void gxm_gl_check(const char *where)
 {
-    GLenum error = g_gl->glGetError();
+    static int enabled = -1;
+    GLenum error;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_GL_CHECK") != NULL;
+    if (!enabled)
+        return;
+
+    error = g_gl->glGetError();
 
     if (error != GL_NO_ERROR)
         LOG("SceGxm: GL error 0x%x at %s", error, where);
@@ -1071,10 +1348,12 @@ typedef struct {
 
 static GxmDsLayout gxm_ds_layout(SceGxmDepthStencilFormat format);
 
-static void gxm_flush_state(SceGxmContext *context, GLuint program, uint32_t max_index)
+static void gxm_flush_state(SceGxmContext *context, const GxmLinkedProgram *linked,
+                           uint32_t max_index)
 {
     const SceGxmVertexProgram *vp = context->vertex_program;
     const SceGxmFragmentProgram *fp = context->fragment_program;
+    GLuint program = linked->program;
     uint32_t surface_width = context->color_surface && context->color_surface->width
                                  ? context->color_surface->width
                                  : 960;
@@ -1082,6 +1361,7 @@ static void gxm_flush_state(SceGxmContext *context, GLuint program, uint32_t max
                                   ? context->color_surface->height
                                   : 544;
     bool both_side_disabled;
+    uint64_t prof = gxm_time_ns();
 
     g_gl->glUseProgram(program);
 
@@ -1091,8 +1371,6 @@ static void gxm_flush_state(SceGxmContext *context, GLuint program, uint32_t max
     if (g_gl->glGenBuffers) {
         if (!context->ubo[0] || !context->ubo[1])
             g_gl->glGenBuffers(2, context->ubo);
-        if (!context->ssbo[0] || !context->ssbo[1])
-            g_gl->glGenBuffers(2, context->ssbo);
     }
 
     /* Render-info uniform buffers. */
@@ -1132,32 +1410,50 @@ static void gxm_flush_state(SceGxmContext *context, GLuint program, uint32_t max
             0.0f,
             1.0f,
         };
-        GLuint block;
-
         if (both_side_disabled)
             g_gl->glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
 
         g_gl->glBindBuffer(GL_UNIFORM_BUFFER, context->ubo[0]);
-        g_gl->glBufferData(GL_UNIFORM_BUFFER, sizeof(vert), &vert, GL_STREAM_DRAW);
-        g_gl->glBindBufferBase(GL_UNIFORM_BUFFER, 2, context->ubo[0]);
+        if (!context->vert_info_valid ||
+            memcmp(&context->last_vert_info, &vert, sizeof(vert)) != 0) {
+            if (context->ubo_capacity[0] < sizeof(vert)) {
+                g_gl->glBufferData(GL_UNIFORM_BUFFER, sizeof(vert), &vert, GL_STREAM_DRAW);
+                context->ubo_capacity[0] = sizeof(vert);
+            } else {
+                g_gl->glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(vert), &vert);
+            }
+            context->last_vert_info = vert;
+            context->vert_info_valid = true;
+        }
+        if (g_bound_render_ubo[0] != context->ubo[0]) {
+            g_gl->glBindBufferBase(GL_UNIFORM_BUFFER, 2, context->ubo[0]);
+            g_bound_render_ubo[0] = context->ubo[0];
+        }
 
         g_gl->glBindBuffer(GL_UNIFORM_BUFFER, context->ubo[1]);
-        g_gl->glBufferData(GL_UNIFORM_BUFFER, sizeof(frag), &frag, GL_STREAM_DRAW);
-        g_gl->glBindBufferBase(GL_UNIFORM_BUFFER, 3, context->ubo[1]);
-
-        block = g_gl->glGetUniformBlockIndex(program, "renderVertInfo");
-        if (block != GL_INVALID_INDEX)
-            g_gl->glUniformBlockBinding(program, block, 2);
-        block = g_gl->glGetUniformBlockIndex(program, "renderFragInfo");
-        if (block != GL_INVALID_INDEX)
-            g_gl->glUniformBlockBinding(program, block, 3);
+        if (!context->frag_info_valid ||
+            memcmp(&context->last_frag_info, &frag, sizeof(frag)) != 0) {
+            if (context->ubo_capacity[1] < sizeof(frag)) {
+                g_gl->glBufferData(GL_UNIFORM_BUFFER, sizeof(frag), &frag, GL_STREAM_DRAW);
+                context->ubo_capacity[1] = sizeof(frag);
+            } else {
+                g_gl->glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(frag), &frag);
+            }
+            context->last_frag_info = frag;
+            context->frag_info_valid = true;
+        }
+        if (g_bound_render_ubo[1] != context->ubo[1]) {
+            g_gl->glBindBufferBase(GL_UNIFORM_BUFFER, 3, context->ubo[1]);
+            g_bound_render_ubo[1] = context->ubo[1];
+        }
     }
-
-    /* Default uniforms and named uniform buffers share one SSBO per stage. */
     if (vp)
         gxm_upload_uniforms(context, vp->programId, true);
     if (fp)
         gxm_upload_uniforms(context, fp->programId, false);
+
+    g_profile_uniform_ns += gxm_time_ns() - prof;
+    prof = gxm_time_ns();
 
     gxm_apply_viewport(context);
     gxm_apply_region_clip(context);
@@ -1237,10 +1533,31 @@ static void gxm_flush_state(SceGxmContext *context, GLuint program, uint32_t max
                               (b->colorMask & SCE_GXM_COLOR_MASK_A) ? GL_TRUE : GL_FALSE);
     }
 
+    g_profile_state_ns += gxm_time_ns() - prof;
+    prof = gxm_time_ns();
+
     gxm_upload_textures(context);
 
-    /* Vertex attributes: stream data is copied into a GL buffer every draw. */
+    g_profile_texture_ns += gxm_time_ns() - prof;
+    prof = gxm_time_ns();
+
+    /* Vertex attributes: stream data is appended to the per-frame arena. */
     if (vp) {
+        uint32_t stream_offsets[SCE_GXM_MAX_VERTEX_STREAMS] = { 0 };
+
+        for (unsigned int i = 0; i < vp->streamCount && i < SCE_GXM_MAX_VERTEX_STREAMS; i++) {
+            const SceGxmVertexStream *s = &vp->streams[i];
+            GxmStream *stream = &context->streams[i];
+            uint32_t size;
+
+            if (!stream->data || !s->stride)
+                continue;
+
+            size = (max_index + 1) * s->stride;
+            stream_offsets[i] = gxm_arena_upload(&context->stream_arena, GL_ARRAY_BUFFER,
+                                                 stream->data, size, 4);
+        }
+
         for (unsigned int i = 0; i < vp->attributeCount; i++) {
             const SceGxmVertexAttribute *a = &vp->attributes[i];
             const SceGxmVertexStream *s;
@@ -1260,19 +1577,16 @@ static void gxm_flush_state(SceGxmContext *context, GLuint program, uint32_t max
             if (!stream->data || !s->stride)
                 continue;
 
-            stream->size = (max_index + 1) * s->stride;
-            if (!stream->vbo)
-                g_gl->glGenBuffers(1, &stream->vbo);
-            g_gl->glBindBuffer(GL_ARRAY_BUFFER, stream->vbo);
-            g_gl->glBufferData(GL_ARRAY_BUFFER, stream->size, stream->data, GL_STREAM_DRAW);
-
             type = gxm_attribute_type((SceGxmAttributeFormat)a->format);
             g_gl->glEnableVertexAttribArray((GLuint)location);
-            g_gl->glVertexAttribPointer((GLuint)location, a->componentCount, type,
-                                        gxm_attribute_normalized((SceGxmAttributeFormat)a->format),
-                                        s->stride, (const void *)(uintptr_t)a->offset);
+            g_gl->glVertexAttribPointer(
+                (GLuint)location, a->componentCount, type,
+                gxm_attribute_normalized((SceGxmAttributeFormat)a->format), s->stride,
+                (const void *)(uintptr_t)(stream_offsets[a->streamIndex] + a->offset));
         }
     }
+
+    g_profile_attrib_ns += gxm_time_ns() - prof;
 }
 
 EXPORT(SceGxm, 0xB0F1E4EC, int, sceGxmInitialize, const SceGxmInitializeParams *params)
@@ -1312,6 +1626,9 @@ EXPORT(SceGxm, 0xB627DE66, int, sceGxmTerminate)
     if (g_gl) {
         for (unsigned int i = 0; i < g_linked_count; i++)
             g_gl->glDeleteProgram(g_linked[i].program);
+        gxm_texture_cache_flush();
+        memset(g_bound_uniform_block, 0, sizeof(g_bound_uniform_block));
+        memset(g_bound_render_ubo, 0, sizeof(g_bound_render_ubo));
     }
     g_linked_count = 0;
     free(g_notification_region);
@@ -1358,7 +1675,6 @@ static void gxm_context_init_defaults(SceGxmContext *ctx, bool deferred)
     ctx->fragment_uniform_arena = malloc(GXM_UNIFORM_ARENA_SIZE);
 
     if (!deferred && g_gl && g_gl->glGenBuffers) {
-        g_gl->glGenBuffers(2, ctx->ssbo);
         g_gl->glGenBuffers(2, ctx->ubo);
     }
 
@@ -1449,27 +1765,18 @@ EXPORT(SceGxm, 0xEDDC5FB2, int, sceGxmDestroyContext, SceGxmContext *context)
         return SCE_GXM_ERROR_INVALID_POINTER;
 
     if (g_gl && !context->deferred) {
-        for (unsigned int i = 0; i < SCE_GXM_MAX_TEXTURE_UNITS; i++) {
-            if (context->textures[0][i].tex)
-                g_gl->glDeleteTextures(1, &context->textures[0][i].tex);
-            if (context->textures[1][i].tex)
-                g_gl->glDeleteTextures(1, &context->textures[1][i].tex);
-        }
-        for (unsigned int i = 0; i < SCE_GXM_MAX_VERTEX_STREAMS; i++)
-            if (context->streams[i].vbo)
-                g_gl->glDeleteBuffers(1, &context->streams[i].vbo);
-        if (context->ssbo[0] || context->ssbo[1])
-            g_gl->glDeleteBuffers(2, context->ssbo);
         if (context->ubo[0] || context->ubo[1])
             g_gl->glDeleteBuffers(2, context->ubo);
-        if (context->ibo)
-            g_gl->glDeleteBuffers(1, &context->ibo);
-        if (context->wire_ibo)
-            g_gl->glDeleteBuffers(1, &context->wire_ibo);
+        if (context->stream_arena.buffer)
+            g_gl->glDeleteBuffers(1, &context->stream_arena.buffer);
+        if (context->index_arena.buffer)
+            g_gl->glDeleteBuffers(1, &context->index_arena.buffer);
+        if (context->uniform_block[0] || context->uniform_block[1])
+            g_gl->glDeleteBuffers(2, context->uniform_block);
     }
 
-    free(context->vertex_ssbo_data);
-    free(context->fragment_ssbo_data);
+    free(context->vertex_block_data);
+    free(context->fragment_block_data);
     free(context->vertex_uniform_arena);
     free(context->fragment_uniform_arena);
     gxm_command_free(context->cmd_head);
@@ -1688,6 +1995,8 @@ EXPORT(SceGxm, 0x207AF96B, int, sceGxmCreateRenderTarget, const SceGxmRenderTarg
         return SCE_KERNEL_ERROR_NO_MEMORY;
 
     rt->params = *params;
+    LOG("SceGxm: render target %ux%u multisampleMode=%u", params->width, params->height,
+        params->multisampleMode);
     if (g_gl) {
         g_gl->glGenTextures(1, &rt->color);
         g_gl->glBindTexture(GL_TEXTURE_2D, rt->color);
@@ -2805,6 +3114,11 @@ EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsign
     if (g_gl) {
         GLuint draw_fbo = renderTarget->msaa_fbo ? renderTarget->msaa_fbo : renderTarget->fbo;
 
+        /* The GPU is idle here (the previous frame ended with a finish), so
+           orphaning the upload arenas once per frame is cheap. */
+        gxm_arena_reset(&context->stream_arena, GL_ARRAY_BUFFER, 1024 * 1024);
+        gxm_arena_reset(&context->index_arena, GL_ELEMENT_ARRAY_BUFFER, 256 * 1024);
+
         g_gl->glBindFramebuffer(GL_FRAMEBUFFER, draw_fbo);
         g_gl->glViewport(0, 0, renderTarget->params.width, renderTarget->params.height);
         g_gl->glDisable(GL_SCISSOR_TEST);
@@ -3033,12 +3347,60 @@ static void gxm_write_color_pixel(uint8_t *dst, const uint8_t rgba[4], SceGxmCol
     }
 }
 
+static void gxm_profile_frame(uint64_t resolve_ns, uint64_t finish_ns, uint64_t read_ns,
+                              uint64_t convert_ns)
+{
+    static uint64_t resolve_total, finish_total, read_total, convert_total, last;
+    static unsigned int frames;
+    uint64_t now;
+
+    if (!getenv("VITA2NATIVE_PROFILE"))
+        return;
+
+    resolve_total += resolve_ns;
+    finish_total += finish_ns;
+    read_total += read_ns;
+    convert_total += convert_ns;
+    frames++;
+
+    now = gxm_time_ns();
+    if (!last) {
+        last = now;
+        return;
+    }
+    if (now - last < 2000000000ull)
+        return;
+
+    LOG("SceGxm: %u frames in %.1f s: draw %.1f (uniform %.1f state %.1f tex %.1f attrib "
+        "%.1f) resolve %.1f finish %.1f read %.1f convert %.1f ms/frame "
+        "(%u draws, %u vertices, %u uploads/%llu KiB per frame)",
+        frames, (double)(now - last) / 1e9, (double)g_profile_draw_ns / frames / 1e6,
+        (double)g_profile_uniform_ns / frames / 1e6, (double)g_profile_state_ns / frames / 1e6,
+        (double)g_profile_texture_ns / frames / 1e6, (double)g_profile_attrib_ns / frames / 1e6,
+        (double)resolve_total / frames / 1e6, (double)finish_total / frames / 1e6,
+        (double)read_total / frames / 1e6, (double)convert_total / frames / 1e6,
+        g_profile_draws / frames, g_profile_vertices / frames, g_profile_uploads / frames,
+        (unsigned long long)(g_profile_upload_bytes / frames / 1024));
+
+    resolve_total = finish_total = read_total = convert_total = 0;
+    g_profile_draws = g_profile_vertices = g_profile_uploads = 0;
+    g_profile_upload_bytes = 0;
+    g_profile_draw_ns = 0;
+    g_profile_uniform_ns = 0;
+    g_profile_state_ns = 0;
+    g_profile_texture_ns = 0;
+    g_profile_attrib_ns = 0;
+    frames = 0;
+    last = now;
+}
+
 EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
        const SceGxmNotification *vertexNotification, const SceGxmNotification *fragmentNotification)
 {
     const SceGxmColorSurfaceInner *surface;
     uint32_t width, height;
     uint8_t *rgba;
+    uint64_t t_resolve, t0, t1, t2;
 
     (void)vertexNotification;
     (void)fragmentNotification;
@@ -3053,13 +3415,21 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
         return SCE_GXM_ERROR_NOT_WITHIN_SCENE;
 
     context->in_scene = false;
+    g_gxm_frame++;
 
     if (!g_gl || !context->render_target)
         return 0;
 
-    gxm_resolve_render_target((SceGxmRenderTarget *)context->render_target);
+    {
+        uint64_t start = gxm_time_ns();
+
+        gxm_resolve_render_target((SceGxmRenderTarget *)context->render_target);
+        t_resolve = gxm_time_ns() - start;
+    }
     g_gl->glBindFramebuffer(GL_FRAMEBUFFER, context->render_target->fbo);
+    t0 = gxm_time_ns();
     g_gl->glFinish();
+    t1 = gxm_time_ns();
 
     surface = context->color_surface;
     if (surface && surface->data && !surface->disabled) {
@@ -3090,6 +3460,7 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
 
         g_gl->glPixelStorei(GL_PACK_ALIGNMENT, 4);
         g_gl->glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        t2 = gxm_time_ns();
 
         /* GL's origin is bottom-left; Vita surfaces are top-left. */
         {
@@ -3130,6 +3501,7 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
         }
 
         free(rgba);
+        gxm_profile_frame(t_resolve, t1 - t0, t2 - t1, gxm_time_ns() - t2);
     }
 
     if (context->ds_store_surface)
@@ -3198,7 +3570,6 @@ EXPORT(SceGxm, 0x895DF2E9, int, sceGxmSetVertexStream, SceGxmContext *context,
         return SCE_GXM_ERROR_INVALID_VALUE;
 
     context->streams[streamIndex].data = streamData;
-    context->streams[streamIndex].size = 0;
     return 0;
 }
 
@@ -4058,7 +4429,6 @@ static void gxm_apply_draw_command(SceGxmContext *context, const GxmDrawCommand 
     context->fragment_program = draw->fragment_program;
     for (unsigned int i = 0; i < SCE_GXM_MAX_VERTEX_STREAMS; i++) {
         context->streams[i].data = draw->streams[i];
-        context->streams[i].size = 0;
     }
     memcpy(context->fragment_textures, draw->fragment_textures, sizeof(context->fragment_textures));
     memcpy(context->vertex_textures, draw->vertex_textures, sizeof(context->vertex_textures));
@@ -4138,11 +4508,13 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
                            unsigned int indexCount, unsigned int instances)
 {
     GLuint program;
+    GxmLinkedProgram *linked = NULL;
     GLenum gl_index_type;
     GLenum gl_primitive;
     size_t index_size;
     uint32_t max_index = 0;
     SceGxmPolygonMode polygon_mode;
+    uint64_t draw_started = gxm_time_ns();
 
     host_gpu_thread_enter(g_device);
 
@@ -4167,7 +4539,7 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
     if (!g_gl)
         return 0;
 
-    program = gxm_get_linked_program(context->vertex_program, context->fragment_program);
+    program = gxm_get_linked_program(context->vertex_program, context->fragment_program, &linked);
     if (!program)
         return SCE_GXM_ERROR_INVALID_VALUE;
 
@@ -4178,9 +4550,11 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
                 max_index = index;
         }
 
-        while (g_gl->glGetError() != GL_NO_ERROR) {
+        if (getenv("VITA2NATIVE_GL_CHECK")) {
+            while (g_gl->glGetError() != GL_NO_ERROR) {
+            }
         }
-        gxm_flush_state(context, program, max_index);
+        gxm_flush_state(context, linked, max_index);
     }
 
     if (indexType == SCE_GXM_INDEX_FORMAT_U32) {
@@ -4191,42 +4565,51 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
         index_size = 2;
     }
 
-    if (!context->ibo)
-        g_gl->glGenBuffers(1, &context->ibo);
-    g_gl->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, context->ibo);
-    g_gl->glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(indexCount * index_size), indexData,
-                       GL_STREAM_DRAW);
+    {
+        uint32_t index_offset;
 
-    gl_primitive = gxm_primitive_to_gl(primType);
-    polygon_mode = context->front_polygon_mode;
+        index_offset = gxm_arena_upload(&context->index_arena, GL_ELEMENT_ARRAY_BUFFER, indexData,
+                                        (uint32_t)(indexCount * index_size), 4);
 
-    if (gxm_polygon_is_line(polygon_mode)) {
-        uint32_t wire_count = 0;
-        uint32_t *wire = gxm_wireframe_indices(primType, indexType, indexData, indexCount,
-                                               &wire_count);
+        gl_primitive = gxm_primitive_to_gl(primType);
+        polygon_mode = context->front_polygon_mode;
 
-        if (wire) {
-            if (!context->wire_ibo)
-                g_gl->glGenBuffers(1, &context->wire_ibo);
-            g_gl->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, context->wire_ibo);
-            g_gl->glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(wire_count * 4), wire,
-                               GL_STREAM_DRAW);
-            free(wire);
-            g_gl->glDrawElements(GL_LINES, (GLsizei)wire_count, GL_UNSIGNED_INT, 0);
-            return 0;
+        if (gxm_polygon_is_line(polygon_mode)) {
+            uint32_t wire_count = 0;
+            uint32_t *wire = gxm_wireframe_indices(primType, indexType, indexData, indexCount,
+                                                   &wire_count);
+
+            if (wire) {
+                uint32_t wire_offset = gxm_arena_upload(&context->index_arena,
+                                                        GL_ELEMENT_ARRAY_BUFFER, wire,
+                                                        wire_count * 4, 4);
+                free(wire);
+                g_gl->glDrawElements(GL_LINES, (GLsizei)wire_count, GL_UNSIGNED_INT,
+                                     (const void *)(uintptr_t)wire_offset);
+                g_profile_draws++;
+                g_profile_vertices += indexCount;
+                g_profile_draw_ns += gxm_time_ns() - draw_started;
+                return 0;
+            }
         }
+
+        if (gxm_polygon_is_point(polygon_mode))
+            gl_primitive = GL_POINTS;
+
+        if (instances > 1 && gl_primitive != GL_POINTS)
+            g_gl->glDrawElementsInstanced(gl_primitive, (GLsizei)indexCount, gl_index_type,
+                                          (const void *)(uintptr_t)index_offset,
+                                          (GLsizei)instances);
+        else
+            g_gl->glDrawElements(gl_primitive, (GLsizei)indexCount, gl_index_type,
+                                 (const void *)(uintptr_t)index_offset);
     }
 
-    if (gxm_polygon_is_point(polygon_mode))
-        gl_primitive = GL_POINTS;
-
-    if (instances > 1 && gl_primitive != GL_POINTS)
-        g_gl->glDrawElementsInstanced(gl_primitive, (GLsizei)indexCount, gl_index_type, 0,
-                                      (GLsizei)instances);
-    else
-        g_gl->glDrawElements(gl_primitive, (GLsizei)indexCount, gl_index_type, 0);
-
     gxm_gl_check("draw");
+
+    g_profile_draws++;
+    g_profile_vertices += indexCount * (instances > 1 ? instances : 1);
+    g_profile_draw_ns += gxm_time_ns() - draw_started;
 
     return 0;
 }

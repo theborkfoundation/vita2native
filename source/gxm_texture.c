@@ -500,39 +500,165 @@ static void unpack_lettered(uint8_t out[4], uint64_t word, const FormatInfo *inf
 
 static uint64_t read_word(const uint8_t *data, uint32_t index, uint32_t bits)
 {
-    const uint8_t *p;
     uint64_t value = 0;
-    uint32_t bytes;
 
-    if (bits == 4) {
+    switch (bits) {
+    case 8:
+        return data[index];
+    case 16: {
+        uint16_t half;
+
+        memcpy(&half, data + (size_t)index * 2, sizeof(half));
+        return half;
+    }
+    case 32: {
+        uint32_t word;
+
+        memcpy(&word, data + (size_t)index * 4, sizeof(word));
+        return word;
+    }
+    case 4: {
         uint8_t byte = data[index >> 1];
         return (index & 1) ? (byte >> 4) : (byte & 0xf);
     }
+    default: {
+        const uint8_t *p = data + (size_t)index * (bits / 8);
+        uint32_t bytes = bits / 8;
 
-    bytes = bits / 8;
-    p = data + (size_t)index * bytes;
-    for (uint32_t i = 0; i < bytes && i < 8; i++)
-        value |= (uint64_t)p[i] << (8 * i);
-
-    return value;
+        for (uint32_t i = 0; i < bytes && i < 8; i++)
+            value |= (uint64_t)p[i] << (8 * i);
+        return value;
+    }
+    }
 }
 
-static int decode_texel(uint8_t out[4], const uint8_t *data, uint32_t index,
-                        SceGxmTextureFormat format)
-{
-    uint32_t base = base_format(format);
-    uint32_t swizzle = (format >> 12) & 7;
+/*
+ * Per-level texel decoder.
+ *
+ * The format descriptor is parsed once per level instead of once per texel:
+ * real titles re-upload large swizzled textures (VitaShell's font atlas is a
+ * 512x512 U8 texture) and the repeated switch in the inner loop dominated the
+ * frame time on Cortex-A53. Formats whose components are all 8-bit UNORM take
+ * a byte-copy fast path with a precomputed channel map.
+ */
+typedef struct {
     FormatInfo info;
-    uint32_t bits = gxm_texture_base_bits(format);
+    uint32_t base;
+    uint32_t bits;
+    uint32_t swizzle;
+    bool fast8;
+    uint8_t map[4]; /* index into values {r,g,b,a,255,0} */
+} TexelFormat;
+
+static const uint8_t one_channel_maps[8][4] = {
+    { 0, 5, 5, 4 }, /* R */
+    { 0, 5, 5, 5 }, /* 000R */
+    { 0, 4, 4, 4 }, /* 111R */
+    { 0, 0, 0, 0 }, /* RRRR */
+    { 0, 0, 0, 5 }, /* 0RRR */
+    { 0, 0, 0, 4 }, /* 1RRR */
+    { 5, 5, 5, 0 }, /* R000 */
+    { 4, 4, 4, 0 }, /* R111 */
+};
+
+static const uint8_t two_channel_maps[8][4] = {
+    { 0, 1, 5, 4 }, /* GR */
+    { 0, 1, 5, 5 }, /* 00GR */
+    { 0, 0, 0, 1 }, /* GRRR */
+    { 1, 1, 1, 0 }, /* RGGG */
+    { 0, 1, 0, 1 }, /* GRGR */
+    { 1, 0, 5, 5 }, /* 00RG */
+    { 0, 1, 5, 4 },
+    { 0, 1, 5, 4 },
+};
+
+static uint8_t letter_map_index(const char *letters, uint32_t count, char channel)
+{
+    for (uint32_t i = 0; i < count; i++) {
+        if (letters[i] == channel)
+            return (uint8_t)i;
+    }
+
+    if (channel == 'A' || channel == '1')
+        return 4;
+    return 5;
+}
+
+static void texel_format_init(TexelFormat *tf, SceGxmTextureFormat format)
+{
+    static const char channels[4] = { 'R', 'G', 'B', 'A' };
+    uint32_t count;
+
+    memset(tf, 0, sizeof(*tf));
+    tf->base = base_format(format);
+    tf->swizzle = (format >> 12) & 7;
+    tf->bits = gxm_texture_base_bits(format);
+
+    if (format_info(tf->base, tf->swizzle, &tf->info) != 0)
+        return;
+
+    count = tf->info.count;
+    tf->fast8 = count >= 1 && count <= 4 && tf->base != SCE_GXM_TEXTURE_BASE_FORMAT_U8U3U3U2;
+    for (uint32_t i = 0; i < count && tf->fast8; i++) {
+        if (tf->info.width[i] != 8 || tf->info.kind[i] != KIND_UNORM)
+            tf->fast8 = false;
+    }
+    if (!tf->fast8)
+        return;
+
+    switch (count) {
+    case 1:
+        memcpy(tf->map, one_channel_maps[tf->swizzle & 7], sizeof(tf->map));
+        break;
+    case 2:
+        memcpy(tf->map, two_channel_maps[tf->swizzle & 7], sizeof(tf->map));
+        break;
+    case 3: {
+        const char *letters = swizzle3_letters[tf->swizzle & 1];
+
+        for (uint32_t i = 0; i < 4; i++)
+            tf->map[i] = letter_map_index(letters, count, channels[i]);
+        break;
+    }
+    default: {
+        const char *letters = swizzle4_letters[tf->swizzle & 7];
+
+        for (uint32_t i = 0; i < 4; i++)
+            tf->map[i] = letter_map_index(letters, count, channels[i]);
+        break;
+    }
+    }
+}
+
+static int decode_texel_prepared(uint8_t out[4], const uint8_t *data, uint32_t index,
+                                 const TexelFormat *tf)
+{
+    const FormatInfo *info = &tf->info;
+    uint32_t base = tf->base;
+    uint32_t swizzle = tf->swizzle;
     uint64_t word;
 
     if (base == SCE_GXM_TEXTURE_BASE_FORMAT_P4 || base == SCE_GXM_TEXTURE_BASE_FORMAT_P8)
         return -1; /* handled by the palette-aware caller */
 
-    if (format_info(base, swizzle, &info) != 0)
-        return -1;
+    if (tf->fast8) {
+        uint8_t values[6];
+        uint32_t count = info->count;
+        const uint8_t *p = data + (size_t)index * count;
 
-    word = read_word(data, index, bits);
+        for (uint32_t i = 0; i < count; i++)
+            values[i] = p[count - 1 - i];
+        values[4] = 255;
+        values[5] = 0;
+
+        out[0] = values[tf->map[0]];
+        out[1] = values[tf->map[1]];
+        out[2] = values[tf->map[2]];
+        out[3] = values[tf->map[3]];
+        return 0;
+    }
+
+    word = read_word(data, index, tf->bits);
 
     if (base == SCE_GXM_TEXTURE_BASE_FORMAT_X8U24) {
         uint32_t value = (uint32_t)word;
@@ -570,24 +696,25 @@ static int decode_texel(uint8_t out[4], const uint8_t *data, uint32_t index,
         return 0;
     }
 
-    if (info.count == 4) {
+    if (info->count == 4) {
         const char *letters = base == SCE_GXM_TEXTURE_BASE_FORMAT_U8U3U3U2
                                   ? "ARGB"
                                   : swizzle4_letters[swizzle & 7];
-        unpack_lettered(out, word, &info, letters);
+
+        unpack_lettered(out, word, info, letters);
         return 0;
     }
 
-    if (info.count == 3) {
-        unpack_lettered(out, word, &info, swizzle3_letters[swizzle & 1]);
+    if (info->count == 3) {
+        unpack_lettered(out, word, info, swizzle3_letters[swizzle & 1]);
         return 0;
     }
 
-    if (info.count == 2) {
-        uint64_t mask = info.width[0] >= 64 ? ~0ull : ((1ull << info.width[0]) - 1);
-        uint8_t first = component_to_u8((uint32_t)(word & mask), info.width[0], info.kind[0]);
-        uint8_t second = component_to_u8((uint32_t)(word >> info.width[0]), info.width[1],
-                                         info.kind[1]);
+    if (info->count == 2) {
+        uint64_t mask = info->width[0] >= 64 ? ~0ull : ((1ull << info->width[0]) - 1);
+        uint8_t first = component_to_u8((uint32_t)(word & mask), info->width[0], info->kind[0]);
+        uint8_t second = component_to_u8((uint32_t)(word >> info->width[0]), info->width[1],
+                                         info->kind[1]);
 
         switch (swizzle) {
         case 0: /* GR */
@@ -638,8 +765,8 @@ static int decode_texel(uint8_t out[4], const uint8_t *data, uint32_t index,
 
     /* One component. */
     {
-        uint64_t mask = info.width[0] >= 64 ? ~0ull : ((1ull << info.width[0]) - 1);
-        uint8_t value = component_to_u8((uint32_t)(word & mask), info.width[0], info.kind[0]);
+        uint64_t mask = info->width[0] >= 64 ? ~0ull : ((1ull << info->width[0]) - 1);
+        uint8_t value = component_to_u8((uint32_t)(word & mask), info->width[0], info->kind[0]);
 
         switch (swizzle) {
         case 0: /* R */
@@ -681,10 +808,8 @@ static int decode_texel(uint8_t out[4], const uint8_t *data, uint32_t index,
 }
 
 static int decode_paletted_texel(uint8_t out[4], const uint8_t *data, uint32_t index,
-                                 SceGxmTextureFormat format, const uint32_t *palette)
+                                 uint32_t base, uint32_t swizzle, const uint32_t *palette)
 {
-    uint32_t base = base_format(format);
-    uint32_t swizzle = (format >> 12) & 7;
     uint32_t palette_index;
     FormatInfo info;
     uint32_t word;
@@ -1265,7 +1390,9 @@ static int decode_level_rgba8(uint8_t *dest, const uint8_t *input,
                               SceGxmTextureFormat format, const GxmTextureLevel *info)
 {
     uint32_t base = base_format(format);
+    uint32_t swizzle = (format >> 12) & 7;
     const uint32_t *palette = NULL;
+    TexelFormat texel;
 
     if (base == SCE_GXM_TEXTURE_BASE_FORMAT_P4 || base == SCE_GXM_TEXTURE_BASE_FORMAT_P8)
         palette = (const uint32_t *)(uintptr_t)(texture->palette_addr << 6);
@@ -1276,6 +1403,8 @@ static int decode_level_rgba8(uint8_t *dest, const uint8_t *input,
         return decode_pvrt_level(dest, input, format, info);
     if (is_yuv_format(base))
         return decode_yuv_level(dest, input, format, info);
+
+    texel_format_init(&texel, format);
 
     if (type == SCE_GXM_TEXTURE_SWIZZLED || type == SCE_GXM_TEXTURE_CUBE ||
         is_arbitrary(type)) {
@@ -1301,10 +1430,11 @@ static int decode_level_rgba8(uint8_t *dest, const uint8_t *input,
                 continue;
 
             if (palette) {
-                if (decode_paletted_texel(&dest[(y * info->width + x) * 4], input, i, format,
-                                          palette) != 0)
+                if (decode_paletted_texel(&dest[(y * info->width + x) * 4], input, i, base,
+                                          swizzle, palette) != 0)
                     return -1;
-            } else if (decode_texel(&dest[(y * info->width + x) * 4], input, i, format) != 0) {
+            } else if (decode_texel_prepared(&dest[(y * info->width + x) * 4], input, i,
+                                             &texel) != 0) {
                 return -1;
             }
         }
@@ -1322,10 +1452,10 @@ static int decode_level_rgba8(uint8_t *dest, const uint8_t *input,
 
                 if (palette) {
                     if (decode_paletted_texel(&dest[(y * info->width + x) * 4], input, index,
-                                              format, palette) != 0)
+                                              base, swizzle, palette) != 0)
                         return -1;
-                } else if (decode_texel(&dest[(y * info->width + x) * 4], input, index, format) !=
-                           0) {
+                } else if (decode_texel_prepared(&dest[(y * info->width + x) * 4], input, index,
+                                                 &texel) != 0) {
                     return -1;
                 }
             }
@@ -1340,10 +1470,11 @@ static int decode_level_rgba8(uint8_t *dest, const uint8_t *input,
             uint32_t index = y * info->layout_width + x;
 
             if (palette) {
-                if (decode_paletted_texel(&dest[(y * info->width + x) * 4], input, index, format,
-                                          palette) != 0)
+                if (decode_paletted_texel(&dest[(y * info->width + x) * 4], input, index, base,
+                                          swizzle, palette) != 0)
                     return -1;
-            } else if (decode_texel(&dest[(y * info->width + x) * 4], input, index, format) != 0) {
+            } else if (decode_texel_prepared(&dest[(y * info->width + x) * 4], input, index,
+                                             &texel) != 0) {
                 return -1;
             }
         }

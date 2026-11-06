@@ -47,6 +47,12 @@ endif()
 
 add_subdirectory(external)
 
+# The export registry relies on __start_/__stop_ symbols for linker sections.
+# LLD's start-stop-gc keeps the section only if it is otherwise referenced, so
+# optimizing builds (which enable --gc-sections) would drop it; disable section
+# GC for every target. This also covers Zig's optimizing configurations.
+add_link_options("-Wl,--no-gc-sections")
+
 add_executable(vita2native
     source/host/host_fs.c
     source/host/host_gfx.c
@@ -240,9 +246,8 @@ install(FILES packaging/vita2native.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}
 install(FILES packaging/x-vita-vpk.xml DESTINATION ${CMAKE_INSTALL_DATADIR}/mime/packages)
 install(FILES README.md licenses/COPYING.txt DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
-# Do not use --gc-sections here: the export registry relies on
-# __start_/__stop_ symbols for linker sections, and lld may garbage-collect
-# them unless -z nostart-stop-gc is used.
+# Do not use --gc-sections: the export registry relies on the linker sections
+# above and that is handled once, for every target, near the top of the file.
 
 # stb_image_write shifts a signed accumulator into the sign bit (well-defined
 # on the target compilers in release builds, but Zig's debug instrumentation
@@ -255,6 +260,10 @@ set_source_files_properties(
 
 include(CTest)
 if(BUILD_TESTING)
+    # The smoke tests drive their setup from assert(), so NDEBUG must not
+    # remove those calls in optimizing builds.
+    add_compile_options(-UNDEBUG)
+
     add_executable(host_smoke
         tests/host_smoke.c
         source/host/host_fs.c
@@ -333,6 +342,16 @@ if(BUILD_TESTING)
     target_compile_definitions(gfx_smoke PRIVATE _GNU_SOURCE=1)
     target_link_libraries(gfx_smoke PRIVATE ${CMAKE_DL_LIBS} m)
     add_test(NAME gfx_smoke COMMAND gfx_smoke)
+
+    add_executable(gpu_bench
+        tests/gpu_bench.c
+        source/host/host_gfx.c
+        source/host/host_gfx_gl.c
+        source/host/host_gfx_null.c
+    )
+    target_include_directories(gpu_bench PRIVATE include source/host external/khronos/include)
+    target_compile_definitions(gpu_bench PRIVATE _GNU_SOURCE=1)
+    target_link_libraries(gpu_bench PRIVATE ${CMAKE_DL_LIBS} m)
 
     add_executable(gl_thread_smoke
         tests/gl_thread_smoke.c

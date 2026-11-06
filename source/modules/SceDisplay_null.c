@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "host.h"
 #include "log.h"
@@ -146,6 +147,39 @@ unsigned int SceDisplay_get_frame_count(void)
     return g_frame_count;
 }
 
+static void display_log_fps(void)
+{
+    static uint64_t last_ns;
+    static unsigned int frames;
+    static bool ready;
+    static bool enabled;
+    struct timespec ts;
+    uint64_t now;
+
+    if (!ready) {
+        enabled = getenv("VITA2NATIVE_FPS") != NULL;
+        ready = true;
+    }
+    if (!enabled)
+        return;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+
+    if (!last_ns) {
+        last_ns = now;
+        return;
+    }
+
+    frames++;
+    if (now - last_ns >= 2000000000ull) {
+        LOG("SceDisplay: %u frames in %.1f s (%.1f fps)", frames,
+            (double)(now - last_ns) / 1e9, (double)frames * 1e9 / (double)(now - last_ns));
+        last_ns = now;
+        frames = 0;
+    }
+}
+
 EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayFrameBuf *pParam,
        SceDisplaySetBufSync sync)
 {
@@ -165,6 +199,7 @@ EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayF
         dump_framebuffer(pParam);
     }
     g_frame_count++;
+    display_log_fps();
 
     return 0;
 }

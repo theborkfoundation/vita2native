@@ -97,6 +97,28 @@ Mesa softpipe; the other titles reach their main loop and start GXM work.
 VitaSudoku expects `ux0:/data/VitaSudoku` to exist (its Lua script does not
 handle a missing directory), so create that directory before testing it.
 
+### Real ARM32 hardware
+
+The ARM32 build runs natively on a 32-bit ARM Linux userland (armhf on an
+aarch64 kernel works too) with no emulation. Verified on an Orange Pi Zero 3
+(Allwinner H618, Cortex-A53, Mali-G31 via Panfrost, Ubuntu 24.04 armhf
+multiarch):
+
+- all GXM, texture, EGL and non-graphics smoke tests pass unchanged;
+- VitaShell renders its home screen with real device capacities;
+- the backend reports `GLES 3.1 Mesa (Mali-G31, Panfrost)`.
+
+`PAN_MESA_DEBUG=linear` is set by default when the caller has not set it:
+Panfrost's tiled/AFBC layouts make `glReadPixels` about twice as slow, and the
+port reads the whole frame back every frame for `sceDisplaySetFrameBuf`.
+
+Performance is usable but not yet at native speed on that board: VitaShell
+runs at ~3 fps. The measured frame budget is dominated by the GPU 
+transition/readback (~160 ms), 847 small draws (~100 ms of CPU in GL setup) and
+the guest-surface conversion (~25 ms). `VITA2NATIVE_PROFILE=1` prints that
+breakdown, `VITA2NATIVE_FPS=1` prints the frame rate, `VITA2NATIVE_TRACE_TEXTURES=1`
+logs texture uploads, and `tests/gpu_bench.c` measures the driver in isolation.
+
 ### Headless capture and scripted input
 
 Headless builds can dump guest framebuffers as BMP and drive the pad from a
@@ -114,6 +136,10 @@ replaced with the frame number. Script entries are
 `<frame>:<button>[+<button>...]`, applied until the next entry; an empty button
 list releases everything. Script frames refer to presented frames, not host
 time, so they do not depend on how slow software rendering is.
+
+`kill -USR1 <tid>` with `VITA2NATIVE_DEBUG_SAMPLE=1` set dumps a thread's PC and
+call stack, which is how guest/host hotspots were located on the device.
+`VITA2NATIVE_GL_CHECK=1` re-enables the per-draw `glGetError` checks.
 
 ## Building from source
 
