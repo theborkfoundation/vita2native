@@ -565,8 +565,6 @@ static HostConsole *console_open_drm(const char *path)
         if (!drm_create_buffer(console, &console->buffers[i]))
             goto fail_console;
         console->buffer_count++;
-        if (!console->use_flip)
-            break;
     }
 
     {
@@ -704,8 +702,21 @@ void host_console_present(HostConsole *console, const void *rgba, int width, int
         }
 
         target = console->use_flip ? console->back : 0;
-        console_blit(console, console->buffers[target].map, console->buffers[target].pitch,
-                     console->width, console->height, rgba, width, height, pitch_pixels);
+        if (console->use_flip) {
+            console_blit(console, console->buffers[target].map, console->buffers[target].pitch,
+                         console->width, console->height, rgba, width, height, pitch_pixels);
+        } else {
+            /* buffer 0 is being scanned out, so never compose into it directly:
+               a refresh would catch the cleared frame. Compose into buffer 1 and
+               copy the finished image in one pass. */
+            ConsoleBuffer *scanout = &console->buffers[0];
+            ConsoleBuffer *stage = &console->buffers[1];
+
+            console_blit(console, stage->map, stage->pitch, console->width, console->height, rgba,
+                         width, height, pitch_pixels);
+            memcpy(scanout->map, stage->map, (size_t)stage->pitch * (size_t)console->height);
+            target = 0;
+        }
 
         if (console->use_flip) {
             if (drm_flip(console, target)) {
