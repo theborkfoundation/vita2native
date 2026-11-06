@@ -185,6 +185,23 @@ static uint64_t g_profile_uniform_ns;
 static uint64_t g_profile_state_ns;
 static uint64_t g_profile_texture_ns;
 static uint64_t g_profile_attrib_ns;
+/* Why the previous batch could not absorb the next draw. */
+static unsigned int g_batch_break_state;
+static unsigned int g_batch_break_program;
+static unsigned int g_batch_break_surface;
+static unsigned int g_batch_break_clip;
+static unsigned int g_batch_break_state_other;
+static unsigned int g_batch_break_prim;
+static unsigned int g_batch_break_viewport;
+static unsigned int g_batch_break_depth;
+static unsigned int g_batch_break_depth_func;
+static unsigned int g_batch_break_depth_write;
+static unsigned int g_batch_break_depth_bias;
+static unsigned int g_batch_break_stencil;
+static unsigned int g_batch_break_rest;
+static unsigned int g_batch_break_size;
+static unsigned int g_batch_break_uniform;
+static unsigned int g_batch_break_texture;
 
 /*
  * sRGB transfer functions. A gamma colour surface stores sRGB-encoded values
@@ -3917,7 +3934,8 @@ static void gxm_profile_frame(uint64_t resolve_ns, uint64_t finish_ns, uint64_t 
 
     LOG("SceGxm: %u frames in %.1f s: draw %.1f (flush %.1f [commit %.1f gldraw %.1f], uniform "
         "%.1f state %.1f tex %.1f attrib %.1f) resolve %.1f finish %.1f read %.1f convert "
-        "%.1f ds %.1f ms/frame (%u gl draws, %u vertices, %u uploads/%llu KiB per frame)",
+        "%.1f ds %.1f ms/frame (%u gl draws, %u vertices, %u uploads/%llu KiB per frame, "
+        "breaks %u/%u/%u/%u [prog%u prim%u dfunc%u dwrite%u dbias%u stencil%u])",
         frames, (double)(now - last) / 1e9, (double)g_profile_draw_ns / frames / 1e6,
         (double)g_profile_flush_ns / frames / 1e6, (double)g_profile_commit_ns / frames / 1e6,
         (double)g_profile_gldraw_ns / frames / 1e6, (double)g_profile_uniform_ns / frames / 1e6,
@@ -3926,7 +3944,12 @@ static void gxm_profile_frame(uint64_t resolve_ns, uint64_t finish_ns, uint64_t 
         (double)finish_total / frames / 1e6, (double)read_total / frames / 1e6,
         (double)convert_total / frames / 1e6, (double)g_profile_ds_ns / frames / 1e6,
         g_profile_draws / frames, g_profile_vertices / frames, g_profile_uploads / frames,
-        (unsigned long long)(g_profile_upload_bytes / frames / 1024));
+        (unsigned long long)(g_profile_upload_bytes / frames / 1024), g_batch_break_state / frames,
+        g_batch_break_size / frames, g_batch_break_uniform / frames,
+        g_batch_break_texture / frames, g_batch_break_program / frames,
+        g_batch_break_prim / frames, g_batch_break_depth_func / frames,
+        g_batch_break_depth_write / frames, g_batch_break_depth_bias / frames,
+        g_batch_break_stencil / frames);
 
     resolve_total = finish_total = read_total = convert_total = 0;
     g_profile_draws = g_profile_vertices = g_profile_uploads = 0;
@@ -3940,6 +3963,22 @@ static void gxm_profile_frame(uint64_t resolve_ns, uint64_t finish_ns, uint64_t 
     g_profile_state_ns = 0;
     g_profile_texture_ns = 0;
     g_profile_attrib_ns = 0;
+    g_batch_break_state = 0;
+    g_batch_break_program = 0;
+    g_batch_break_surface = 0;
+    g_batch_break_clip = 0;
+    g_batch_break_state_other = 0;
+    g_batch_break_prim = 0;
+    g_batch_break_viewport = 0;
+    g_batch_break_depth = 0;
+    g_batch_break_depth_func = 0;
+    g_batch_break_depth_write = 0;
+    g_batch_break_depth_bias = 0;
+    g_batch_break_stencil = 0;
+    g_batch_break_rest = 0;
+    g_batch_break_size = 0;
+    g_batch_break_uniform = 0;
+    g_batch_break_texture = 0;
     frames = 0;
     last = now;
 }
@@ -5129,23 +5168,95 @@ static bool gxm_batch_matches(SceGxmContext *context, const GxmDrawState *state,
 
     if (!batch->active)
         return false;
-    if (memcmp(&batch->state, state, sizeof(*state)) != 0)
+    if (memcmp(&batch->state, state, sizeof(*state)) != 0) {
+        g_batch_break_state++;
+        if (batch->state.program != state->program)
+            g_batch_break_program++;
+        else if (batch->state.color_surface != state->color_surface ||
+                 batch->state.ds_surface != state->ds_surface)
+            g_batch_break_surface++;
+        else if (batch->state.region_clip_mode != state->region_clip_mode ||
+                 batch->state.region_clip_xmin != state->region_clip_xmin ||
+                 batch->state.region_clip_ymin != state->region_clip_ymin ||
+                 batch->state.region_clip_xmax != state->region_clip_xmax ||
+                 batch->state.region_clip_ymax != state->region_clip_ymax)
+            g_batch_break_clip++;
+        else if (batch->state.prim != state->prim ||
+                 batch->state.index_format != state->index_format ||
+                 batch->state.instances != state->instances)
+            g_batch_break_prim++;
+        else if (batch->state.viewport_enable != state->viewport_enable ||
+                 batch->state.viewport_x_offset != state->viewport_x_offset ||
+                 batch->state.viewport_x_scale != state->viewport_x_scale ||
+                 batch->state.viewport_y_offset != state->viewport_y_offset ||
+                 batch->state.viewport_y_scale != state->viewport_y_scale ||
+                 batch->state.viewport_z_offset != state->viewport_z_offset ||
+                 batch->state.viewport_z_scale != state->viewport_z_scale)
+            g_batch_break_viewport++;
+        else if (batch->state.depth_func != state->depth_func) {
+            g_batch_break_depth++;
+            g_batch_break_depth_func++;
+        } else if (batch->state.depth_write != state->depth_write) {
+            g_batch_break_depth++;
+            g_batch_break_depth_write++;
+        } else if (batch->state.depth_bias_factor != state->depth_bias_factor ||
+                   batch->state.depth_bias_units != state->depth_bias_units) {
+            g_batch_break_depth++;
+            g_batch_break_depth_bias++;
+        } else if (batch->state.front_stencil_func != state->front_stencil_func ||
+                   batch->state.back_stencil_func != state->back_stencil_func ||
+                   batch->state.front_stencil_fail != state->front_stencil_fail ||
+                   batch->state.front_stencil_depth_fail != state->front_stencil_depth_fail ||
+                   batch->state.front_stencil_pass != state->front_stencil_pass ||
+                   batch->state.back_stencil_fail != state->back_stencil_fail ||
+                   batch->state.back_stencil_depth_fail != state->back_stencil_depth_fail ||
+                   batch->state.back_stencil_pass != state->back_stencil_pass) {
+            g_batch_break_depth++;
+            g_batch_break_stencil++;
+            if (getenv("VITA2NATIVE_BATCH_DEBUG")) {
+                static unsigned int shown;
+
+                if (shown++ < 12)
+                    LOG("stencil break: front %d %d/%d/%d back %d %d/%d/%d -> "
+                        "front %d %d/%d/%d back %d %d/%d/%d",
+                        batch->state.front_stencil_func, batch->state.front_stencil_fail,
+                        batch->state.front_stencil_depth_fail, batch->state.front_stencil_pass,
+                        batch->state.back_stencil_func, batch->state.back_stencil_fail,
+                        batch->state.back_stencil_depth_fail, batch->state.back_stencil_pass,
+                        state->front_stencil_func, state->front_stencil_fail,
+                        state->front_stencil_depth_fail, state->front_stencil_pass,
+                        state->back_stencil_func, state->back_stencil_fail,
+                        state->back_stencil_depth_fail, state->back_stencil_pass);
+            }
+        } else
+            g_batch_break_rest++;
         return false;
+    }
     if (batch->vertex_uniform_size != vertex_uniform_size ||
-        batch->fragment_uniform_size != fragment_uniform_size)
+        batch->fragment_uniform_size != fragment_uniform_size) {
+        g_batch_break_size++;
         return false;
+    }
     if (vertex_uniform_size &&
-        memcmp(batch->vertex_uniforms, context->vertex_block_data, vertex_uniform_size) != 0)
+        memcmp(batch->vertex_uniforms, context->vertex_block_data, vertex_uniform_size) != 0) {
+        g_batch_break_uniform++;
         return false;
+    }
     if (fragment_uniform_size &&
-        memcmp(batch->fragment_uniforms, context->fragment_block_data, fragment_uniform_size) != 0)
+        memcmp(batch->fragment_uniforms, context->fragment_block_data, fragment_uniform_size) != 0) {
+        g_batch_break_uniform++;
         return false;
+    }
     if (memcmp(batch->fragment_textures, context->fragment_textures,
-               sizeof(batch->fragment_textures)) != 0)
+               sizeof(batch->fragment_textures)) != 0) {
+        g_batch_break_texture++;
         return false;
+    }
     if (memcmp(batch->vertex_textures, context->vertex_textures, sizeof(batch->vertex_textures)) !=
-        0)
+        0) {
+        g_batch_break_texture++;
         return false;
+    }
 
     return true;
 }
@@ -5518,6 +5629,16 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
     fragment_uniform_size = gxm_build_uniforms(context, context->fragment_program->programId, false);
 
     gxm_fill_draw_state(context, program, primType, indexType, instances, &state);
+
+    if (getenv("VITA2NATIVE_BATCH_DEBUG")) {
+        static bool logged;
+
+        if (!logged) {
+            logged = true;
+            LOG("draw surfaces: color=%p depth/stencil=%p", (const void *)context->color_surface,
+                (const void *)context->ds_surface);
+        }
+    }
 
     can_merge = gxm_batch_matches(context, &state, vertex_uniform_size, fragment_uniform_size);
     if (getenv("VITA2NATIVE_NO_BATCH"))

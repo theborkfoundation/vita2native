@@ -142,6 +142,22 @@ D-pad, shoulders, `BTN_SELECT/START`, the F1–F5 buttons and both sticks.
 `VITA2NATIVE_CTRL_SWAP_AB` swaps cross/circle; scripted input still works and is
 ORed with the physical pad.
 
+Video output is pluggable and selected at runtime:
+
+```
+VITA2NATIVE_VIDEO=sdl     # default: SDL renderer (KMSDRM, X11, Wayland)
+VITA2NATIVE_VIDEO=drm     # raw KMS dumb-buffer presenter
+VITA2NATIVE_VIDEO=fbdev   # /dev/fb0
+VITA2NATIVE_VIDEO=none    # headless
+```
+
+The SDL backend is loaded with `dlopen`, so the headless ARM binary still has no
+SDL build dependency; it uploads the guest frame as `SDL_PIXELFORMAT_ABGR8888`
+(which is the guest's A8B8G8R8 byte order) and lets SDL scale, letterbox and
+present. `VITA2NATIVE_SDL_DRIVER=kmsdrm` forces an SDL video driver and
+`VITA2NATIVE_SDL_WINDOWED=1` avoids fullscreen. `auto` tries SDL, then DRM, then
+fbdev.
+
 ### Headless capture and scripted input
 
 Headless builds can dump guest framebuffers as BMP and drive the pad from a

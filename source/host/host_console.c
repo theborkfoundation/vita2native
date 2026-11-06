@@ -24,6 +24,7 @@
 
 #include <drm/drm.h>
 #include <drm/drm_mode.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/fb.h>
@@ -42,9 +43,55 @@
 #define DRM_MODE_CONNECTED 1
 #endif
 
+/*
+ * SDL is loaded with dlopen (the headless ARM build has no SDL at link time),
+ * using the renderer API only: its handles are opaque and the few constants
+ * below are part of SDL's stable ABI. The core guest framebuffer is
+ * A8B8G8R8, which is exactly SDL_PIXELFORMAT_ABGR8888 on little-endian hosts,
+ * so frames are uploaded without a CPU conversion.
+ */
+typedef struct SDL_Window SDL_Window;
+typedef struct SDL_Renderer SDL_Renderer;
+typedef struct SDL_Texture SDL_Texture;
+
+typedef struct SDL_Rect {
+    int x, y, w, h;
+} SDL_Rect;
+
+typedef struct {
+    void *library;
+    int (*init_subsystem)(unsigned int flags);
+    void (*quit_subsystem)(unsigned int flags);
+    const char *(*get_error)(void);
+    SDL_Window *(*create_window)(const char *, int, int, int, int, unsigned int);
+    void (*destroy_window)(SDL_Window *);
+    SDL_Renderer *(*create_renderer)(SDL_Window *, int, unsigned int);
+    void (*destroy_renderer)(SDL_Renderer *);
+    SDL_Texture *(*create_texture)(SDL_Renderer *, unsigned int, int, int, int);
+    void (*destroy_texture)(SDL_Texture *);
+    int (*update_texture)(SDL_Texture *, const SDL_Rect *, const void *, int);
+    int (*render_clear)(SDL_Renderer *);
+    int (*render_copy)(SDL_Renderer *, SDL_Texture *, const SDL_Rect *, const SDL_Rect *);
+    void (*render_present)(SDL_Renderer *);
+    int (*render_set_logical_size)(SDL_Renderer *, int, int);
+    int (*get_window_size)(SDL_Window *, int *, int *);
+    const char *(*get_current_video_driver)(void);
+    int (*show_cursor)(int);
+} SdlApi;
+
+#define SDL_INIT_VIDEO 0x00000020u
+#define SDL_WINDOW_SHOWN 0x00000004u
+#define SDL_WINDOW_FULLSCREEN_DESKTOP 0x00001001u
+#define SDL_RENDERER_ACCELERATED 0x00000002u
+#define SDL_RENDERER_PRESENTVSYNC 0x00000004u
+#define SDL_PIXELFORMAT_ABGR8888 0x16762004u
+#define SDL_TEXTUREACCESS_STREAMING 1
+#define SDL_WINDOWPOS_UNDEFINED 0x1FFF0000u
+
 enum {
     CONSOLE_BACKEND_DRM = 0,
     CONSOLE_BACKEND_FBDEV = 1,
+    CONSOLE_BACKEND_SDL = 2,
 };
 
 typedef struct {
@@ -82,6 +129,14 @@ struct HostConsole {
     int back;
     bool flip_pending;
     bool use_flip;
+
+    /* SDL */
+    SdlApi *sdl;
+    SDL_Window *sdl_window;
+    SDL_Renderer *sdl_renderer;
+    SDL_Texture *sdl_texture;
+    int sdl_texture_width;
+    int sdl_texture_height;
 };
 
 static bool console_debug;
@@ -624,16 +679,169 @@ fail:
 }
 
 /* ------------------------------------------------------------------------- */
+/* SDL                                                                        */
+/* ------------------------------------------------------------------------- */
+
+static HostConsole *console_open_sdl(void)
+{
+    static const char *const library_names[] = {
+        "libSDL2-2.0.so.0", "libSDL2-2.0.so", "libSDL2.so", NULL,
+    };
+    SdlApi *api;
+    HostConsole *console = NULL;
+    const char *video_driver = getenv("VITA2NATIVE_SDL_DRIVER");
+    unsigned int window_flags = SDL_WINDOW_SHOWN;
+    int panel_width = 0, panel_height = 0;
+
+    api = calloc(1, sizeof(*api));
+    if (!api)
+        return NULL;
+
+    for (int i = 0; library_names[i] && !api->library; i++)
+        api->library = dlopen(library_names[i], RTLD_NOW | RTLD_LOCAL);
+    if (!api->library) {
+        if (console_debug)
+            fprintf(stderr, "vita2native: SDL is not available\n");
+        goto fail;
+    }
+
+#define LOAD_SDL(field, name)                                                                      \
+    do {                                                                                           \
+        *(void **)(&api->field) = dlsym(api->library, name);                                       \
+        if (!api->field) {                                                                         \
+            fprintf(stderr, "vita2native: SDL is missing %s\n", name);                             \
+            goto fail;                                                                             \
+        }                                                                                          \
+    } while (0)
+
+    LOAD_SDL(init_subsystem, "SDL_InitSubSystem");
+    LOAD_SDL(quit_subsystem, "SDL_QuitSubSystem");
+    LOAD_SDL(get_error, "SDL_GetError");
+    LOAD_SDL(create_window, "SDL_CreateWindow");
+    LOAD_SDL(destroy_window, "SDL_DestroyWindow");
+    LOAD_SDL(create_renderer, "SDL_CreateRenderer");
+    LOAD_SDL(destroy_renderer, "SDL_DestroyRenderer");
+    LOAD_SDL(create_texture, "SDL_CreateTexture");
+    LOAD_SDL(destroy_texture, "SDL_DestroyTexture");
+    LOAD_SDL(update_texture, "SDL_UpdateTexture");
+    LOAD_SDL(render_clear, "SDL_RenderClear");
+    LOAD_SDL(render_copy, "SDL_RenderCopy");
+    LOAD_SDL(render_present, "SDL_RenderPresent");
+    LOAD_SDL(render_set_logical_size, "SDL_RenderSetLogicalSize");
+    LOAD_SDL(get_window_size, "SDL_GetWindowSize");
+    LOAD_SDL(show_cursor, "SDL_ShowCursor");
+    *(void **)(&api->get_current_video_driver) = dlsym(api->library, "SDL_GetCurrentVideoDriver");
+
+#undef LOAD_SDL
+
+    if (video_driver && video_driver[0])
+        setenv("SDL_VIDEODRIVER", video_driver, 1);
+
+    if (api->init_subsystem(SDL_INIT_VIDEO) != 0) {
+        if (console_debug)
+            fprintf(stderr, "vita2native: SDL video init failed: %s\n", api->get_error());
+        goto fail;
+    }
+
+    console = calloc(1, sizeof(*console));
+    if (!console)
+        goto fail;
+
+    console->sdl = api;
+    console->backend = CONSOLE_BACKEND_SDL;
+    console->stretch = getenv("VITA2NATIVE_STRETCH") != NULL;
+
+    if (!getenv("VITA2NATIVE_SDL_WINDOWED"))
+        window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+
+    console->sdl_window = api->create_window("vita2native", SDL_WINDOWPOS_UNDEFINED,
+                                             SDL_WINDOWPOS_UNDEFINED, 960, 544, window_flags);
+    if (!console->sdl_window) {
+        fprintf(stderr, "vita2native: SDL window creation failed: %s\n", api->get_error());
+        goto fail_console;
+    }
+
+    console->sdl_renderer = api->create_renderer(
+        console->sdl_window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if (!console->sdl_renderer)
+        console->sdl_renderer = api->create_renderer(console->sdl_window, -1, 0);
+    if (!console->sdl_renderer) {
+        fprintf(stderr, "vita2native: SDL renderer creation failed: %s\n", api->get_error());
+        goto fail_console;
+    }
+
+    api->show_cursor(0);
+    api->get_window_size(console->sdl_window, &panel_width, &panel_height);
+    console->width = panel_width > 0 ? panel_width : 960;
+    console->height = panel_height > 0 ? panel_height : 544;
+
+    fprintf(stderr, "vita2native: presenting through SDL (%s video, %dx%d window)\n",
+            api->get_current_video_driver ? api->get_current_video_driver() : "unknown",
+            console->width, console->height);
+    return console;
+
+fail_console:
+    if (console->sdl_renderer)
+        api->destroy_renderer(console->sdl_renderer);
+    if (console->sdl_window)
+        api->destroy_window(console->sdl_window);
+    api->quit_subsystem(SDL_INIT_VIDEO);
+    free(console);
+    console = NULL;
+fail:
+    if (api->library)
+        dlclose(api->library);
+    free(api);
+    return NULL;
+}
+
+static void console_present_sdl(HostConsole *console, const void *rgba, int width, int height,
+                                int pitch_pixels)
+{
+    SdlApi *api = console->sdl;
+
+    if (!api || !console->sdl_renderer)
+        return;
+
+    if (!console->sdl_texture || console->sdl_texture_width != width ||
+        console->sdl_texture_height != height) {
+        if (console->sdl_texture)
+            api->destroy_texture(console->sdl_texture);
+        console->sdl_texture = api->create_texture(console->sdl_renderer,
+                                                   SDL_PIXELFORMAT_ABGR8888,
+                                                   SDL_TEXTUREACCESS_STREAMING, width, height);
+        if (!console->sdl_texture) {
+            console->sdl_texture_width = 0;
+            console->sdl_texture_height = 0;
+            return;
+        }
+        console->sdl_texture_width = width;
+        console->sdl_texture_height = height;
+        if (!console->stretch)
+            api->render_set_logical_size(console->sdl_renderer, width, height);
+    }
+
+    /* Guest pixels are A8B8G8R8, which is SDL_PIXELFORMAT_ABGR8888 on a
+       little-endian host: no per-pixel conversion is needed. */
+    api->update_texture(console->sdl_texture, NULL, rgba, pitch_pixels * 4);
+    api->render_clear(console->sdl_renderer);
+    api->render_copy(console->sdl_renderer, console->sdl_texture, NULL, NULL);
+    api->render_present(console->sdl_renderer);
+}
+
+/* ------------------------------------------------------------------------- */
 /* Public API                                                                 */
 /* ------------------------------------------------------------------------- */
 
 HostConsole *host_console_open(const char *path)
 {
+    const char *preference = getenv("VITA2NATIVE_VIDEO");
     const char *forced_fbdev = getenv("VITA2NATIVE_FBDEV");
     const char *forced_drm = getenv("VITA2NATIVE_DRM");
 
-    console_debug = getenv("VITA2NATIVE_PRESENT_DEBUG") != NULL
-                    || getenv("VITA2NATIVE_DRM_DEBUG") != NULL;
+    console_debug = getenv("VITA2NATIVE_PRESENT_DEBUG") != NULL ||
+                    getenv("VITA2NATIVE_DRM_DEBUG") != NULL ||
+                    getenv("VITA2NATIVE_VIDEO_DEBUG") != NULL;
 
     /* An explicit path selects the backend by its device node. */
     if (path && path[0] && strcmp(path, "auto") != 0) {
@@ -644,21 +852,39 @@ HostConsole *host_console_open(const char *path)
 
     if (getenv("VITA2NATIVE_NO_PRESENT"))
         return NULL;
+    if (preference && strcmp(preference, "none") == 0)
+        return NULL;
+
+    /* Device-node overrides keep the previous behaviour. */
     if (forced_fbdev && forced_fbdev[0])
         return console_open_fbdev(forced_fbdev);
+    if (forced_drm && forced_drm[0])
+        return console_open_drm(forced_drm);
 
-    {
-        HostConsole *console = console_open_drm(forced_drm && forced_drm[0] ? forced_drm
-                                                                          : "/dev/dri/card0");
+    /* SDL first: it covers KMSDRM, X11 and Wayland, which is what handheld
+       frontends and desktops already use. */
+    if (!preference || strcmp(preference, "auto") == 0 || strcmp(preference, "sdl") == 0) {
+        HostConsole *console = console_open_sdl();
 
         if (console)
             return console;
-
-        /* fbdev is the only remaining option; honour an override if given. */
-        return console_open_fbdev(getenv("VITA2NATIVE_FBDEV") && getenv("VITA2NATIVE_FBDEV")[0]
-                                      ? getenv("VITA2NATIVE_FBDEV")
-                                      : "/dev/fb0");
+        if (preference && strcmp(preference, "sdl") == 0)
+            return NULL;
     }
+
+    if (!preference || strcmp(preference, "auto") == 0 || strcmp(preference, "drm") == 0) {
+        HostConsole *console = console_open_drm("/dev/dri/card0");
+
+        if (console)
+            return console;
+        if (preference && strcmp(preference, "drm") == 0)
+            return NULL;
+    }
+
+    if (!preference || strcmp(preference, "auto") == 0 || strcmp(preference, "fbdev") == 0)
+        return console_open_fbdev("/dev/fb0");
+
+    return NULL;
 }
 
 void host_console_close(HostConsole *console)
@@ -671,6 +897,22 @@ void host_console_close(HostConsole *console)
             drm_wait_flip(console, 100);
         drm_close_buffers(console);
         drm_ioctl(console->fd, DRM_IOCTL_DROP_MASTER, NULL);
+    } else if (console->backend == CONSOLE_BACKEND_SDL) {
+        SdlApi *api = console->sdl;
+
+        if (api) {
+            if (console->sdl_texture)
+                api->destroy_texture(console->sdl_texture);
+            if (console->sdl_renderer)
+                api->destroy_renderer(console->sdl_renderer);
+            if (console->sdl_window)
+                api->destroy_window(console->sdl_window);
+            api->quit_subsystem(SDL_INIT_VIDEO);
+            if (api->library)
+                dlclose(api->library);
+            free(api);
+            console->sdl = NULL;
+        }
     } else {
         if (console->memory && console->memory != MAP_FAILED)
             munmap(console->memory, console->size);
@@ -695,7 +937,15 @@ const char *host_console_backend(const HostConsole *console)
 {
     if (!console)
         return "none";
-    return console->backend == CONSOLE_BACKEND_DRM ? "drm" : "fbdev";
+
+    switch (console->backend) {
+    case CONSOLE_BACKEND_DRM:
+        return "drm";
+    case CONSOLE_BACKEND_SDL:
+        return "sdl";
+    default:
+        return "fbdev";
+    }
 }
 
 void host_console_present(HostConsole *console, const void *rgba, int width, int height,
@@ -703,6 +953,11 @@ void host_console_present(HostConsole *console, const void *rgba, int width, int
 {
     if (!console || !rgba || width <= 0 || height <= 0 || pitch_pixels < width)
         return;
+
+    if (console->backend == CONSOLE_BACKEND_SDL) {
+        console_present_sdl(console, rgba, width, height, pitch_pixels);
+        return;
+    }
 
     if (console->backend == CONSOLE_BACKEND_DRM) {
         int target;
