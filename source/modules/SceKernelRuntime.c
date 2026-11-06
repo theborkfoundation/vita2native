@@ -300,6 +300,12 @@ EXPORT(SceLibKernel, 0xB2700165, int, sceKernelGetRandomNumber, void *output, Sc
     return 0;
 }
 
+/* VitaSDK's SceLibRng imports the same function under its own library. */
+EXPORT(SceLibRng, 0xB2700165, int, sceKernelGetRandomNumberRng, void *output, SceSize size)
+{
+    return sceKernelGetRandomNumber(output, size);
+}
+
 EXPORT(SceLibKernel, 0x261E2C34, int, sceKernelGetOpenPsId, SceKernelOpenPsId *id)
 {
     if (!id)
@@ -310,3 +316,7 @@ EXPORT(SceLibKernel, 0x261E2C34, int, sceKernelGetOpenPsId, SceKernelOpenPsId *i
 
     return 0;
 }
+
+/* Compatibility NIDs used by older VitaSDK stubs. */
+DECLARE_LIBRARY(SceThreadmgrCoredumpTime, 0x00000052);
+DECLARE_LIBRARY(SceLibRng, 0xf9ac7cf8);
