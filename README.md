@@ -122,18 +122,13 @@ logs texture uploads, `VITA2NATIVE_NO_BATCH=1` disables draw batching and
 `tests/gpu_bench.c` measures the driver in isolation.
 
 The same ARM32 build also runs on an R36S handheld (Rockchip RK3326, Mali-G31
-through the proprietary Bifrost blob, 640x480 DSI panel). Its vendor kernel
-exposes `/dev/fb0` but does not scan it out — the VOP was reading a null buffer
-— so presentation goes through DRM/KMS directly: `source/host/host_console.c`
-allocates a dumb buffer, creates a framebuffer, sets the CRTC and writes each
-converted guest frame straight into the scanned buffer. Page flips are opt-in
-(`VITA2NATIVE_PAGE_FLIP=1`) because this kernel accepts them without re-pointing
-the VOP. fbdev remains as a fallback, and the backend is chosen automatically
-(`VITA2NATIVE_DRM`, `VITA2NATIVE_FBDEV`, `VITA2NATIVE_NO_PRESENT`, and
-`VITA2NATIVE_STRETCH` override it).
-`tests/present_probe.c` cycles colours and a moving marker on the panel without
-starting the emulator. On this board VitaShell renders on the panel at ~1.3 fps;
-the blob's per-draw overhead is the bottleneck (about 5 ms per `glDrawElements`).
+through the proprietary Bifrost blob, 640x480 DSI panel). Output goes through
+SDL's KMSDRM driver, which is what the handheld's other titles use;
+`source/host/host_video_sdl.c` only uploads the guest frame as an ABGR8888
+texture and lets SDL scale, letterbox and present. `tests/present_probe.c`
+cycles colours and a moving marker on the panel without starting the emulator.
+On this board VitaShell renders at ~1.3 fps; the blob's per-draw overhead is the
+bottleneck (about 5 ms per `glDrawElements`).
 
 The headless build now also reads the pad directly from evdev
 (`/dev/input/event*`), so the R36S controls work without SDL: face buttons,
@@ -142,21 +137,14 @@ D-pad, shoulders, `BTN_SELECT/START`, the F1–F5 buttons and both sticks.
 `VITA2NATIVE_CTRL_SWAP_AB` swaps cross/circle; scripted input still works and is
 ORed with the physical pad.
 
-Video output is pluggable and selected at runtime:
-
-```
-VITA2NATIVE_VIDEO=sdl     # default: SDL renderer (KMSDRM, X11, Wayland)
-VITA2NATIVE_VIDEO=drm     # raw KMS dumb-buffer presenter
-VITA2NATIVE_VIDEO=fbdev   # /dev/fb0
-VITA2NATIVE_VIDEO=none    # headless
-```
-
-The SDL backend is loaded with `dlopen`, so the headless ARM binary still has no
-SDL build dependency; it uploads the guest frame as `SDL_PIXELFORMAT_ABGR8888`
-(which is the guest's A8B8G8R8 byte order) and lets SDL scale, letterbox and
-present. `VITA2NATIVE_SDL_DRIVER=kmsdrm` forces an SDL video driver and
-`VITA2NATIVE_SDL_WINDOWED=1` avoids fullscreen. `auto` tries SDL, then DRM, then
-fbdev.
+Video output goes through SDL, loaded with `dlopen` so the headless ARM binary
+keeps no SDL build dependency. SDL chooses the platform driver itself: KMSDRM
+on handhelds, X11 or Wayland on desktops, and offscreen/dummy on headless
+machines (`SDL_VIDEODRIVER=dummy` forces a no-op output). The guest frame is
+uploaded as `SDL_PIXELFORMAT_ABGR8888` — the guest's A8B8G8R8 byte order — so
+SDL does the scaling and letterboxing without a CPU conversion.
+`VITA2NATIVE_STRETCH=1` fills the display and `VITA2NATIVE_SDL_WINDOWED=1` keeps
+a window instead of going fullscreen.
 
 ### Headless capture and scripted input
 

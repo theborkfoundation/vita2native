@@ -14,32 +14,22 @@
 static SceDisplayFrameBuf g_vita_conf_fb;
 static int g_vcount;
 static unsigned int g_frame_count;
-static HostConsole *g_console;
-static bool g_console_checked;
+static HostVideo *g_video;
+static bool g_video_checked;
 
-static HostConsole *display_console(void)
+static HostVideo *display_video(void)
 {
-    if (!g_console_checked) {
-        const char *path = NULL;
-
-        g_console_checked = true;
-        if (getenv("VITA2NATIVE_NO_PRESENT"))
-            return NULL;
-
-        /* An explicit fbdev override still wins; otherwise let the presenter
-           pick DRM/KMS first and fall back to fbdev. */
-        if (getenv("VITA2NATIVE_FBDEV"))
-            path = getenv("VITA2NATIVE_FBDEV");
-
-        g_console = host_console_open(path);
-        if (g_console)
-            LOG("SceDisplay: presenting through %s (%dx%d)", host_console_backend(g_console),
-                host_console_width(g_console), host_console_height(g_console));
+    if (!g_video_checked) {
+        g_video_checked = true;
+        g_video = host_video_open();
+        if (g_video)
+            LOG("SceDisplay: presenting through SDL (%dx%d)", host_video_width(g_video),
+                host_video_height(g_video));
         else
-            LOG("SceDisplay: no display backend available, frames stay headless");
+            LOG("SceDisplay: no video output, frames stay headless");
     }
 
-    return g_console;
+    return g_video;
 }
 
 #define MAX_CAPTURES 64
@@ -226,11 +216,11 @@ EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayF
         dump_framebuffer(pParam);
 
         {
-            HostConsole *console = display_console();
+            HostVideo *video = display_video();
 
-            if (console && pParam->base && pParam->width && pParam->height)
-                host_console_present(console, pParam->base, (int)pParam->width,
-                                     (int)pParam->height, (int)pParam->pitch);
+            if (video && pParam->base && pParam->width && pParam->height)
+                host_video_present(video, pParam->base, (int)pParam->width, (int)pParam->height,
+                                   (int)pParam->pitch);
         }
     }
     g_frame_count++;

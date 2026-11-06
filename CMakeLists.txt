@@ -54,7 +54,7 @@ add_subdirectory(external)
 add_link_options("-Wl,--no-gc-sections")
 
 add_executable(vita2native
-    source/host/host_console.c
+    source/host/host_video_sdl.c
     source/host/host_fs.c
     source/host/host_gfx.c
     source/host/host_gfx_gl.c
@@ -370,7 +370,7 @@ if(BUILD_TESTING)
     # requested duration expires.
     add_executable(present_probe
         tests/present_probe.c
-        source/host/host_console.c
+        source/host/host_video_sdl.c
     )
     target_include_directories(present_probe PRIVATE include)
     target_compile_definitions(present_probe PRIVATE

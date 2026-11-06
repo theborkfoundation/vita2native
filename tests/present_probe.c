@@ -1,11 +1,13 @@
 /*
  * Display presenter probe.
  *
- * Exercises host_console.c without the emulator: cycles a few solid colours and
- * a moving marker on the panel, printing how long each present takes. This is
- * the fastest way to tell a KMS/modeset problem apart from an emulation one.
+ * Exercises the SDL video path without the emulator: cycles a few solid colours
+ * and a moving marker, printing how long each present takes. This is the
+ * fastest way to tell a display problem apart from an emulation one.
  *
- *   ./present_probe [device|auto] [seconds]     (0 seconds = run until Ctrl-C)
+ *   ./present_probe [seconds]     (0 seconds = run until Ctrl-C)
+ *
+ * SDL_VIDEODRIVER=dummy gives a headless (software-rendered) run.
  */
 #include <signal.h>
 #include <stdint.h>
@@ -57,12 +59,11 @@ int main(int argc, char **argv)
         0xFF00FFFFu, /* yellow */
         0xFFFF00FFu, /* magenta */
     };
-    const char *path = argc > 1 ? argv[1] : NULL;
-    double seconds = argc > 2 ? strtod(argv[2], NULL) : 15.0;
+    double seconds = argc > 1 ? strtod(argv[1], NULL) : 15.0;
     const int width = 960;
     const int height = 544;
     uint32_t *frame;
-    HostConsole *console;
+    HostVideo *video;
     uint64_t deadline = 0;
     unsigned int frame_index = 0;
     int failures = 0;
@@ -70,19 +71,18 @@ int main(int argc, char **argv)
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
-    console = host_console_open(path);
-    if (!console) {
-        fprintf(stderr, "present_probe: no display backend (tried %s)\n", path ? path : "auto");
+    video = host_video_open();
+    if (!video) {
+        fprintf(stderr, "present_probe: SDL video unavailable\n");
         return 1;
     }
 
-    printf("present_probe: backend=%s size=%dx%d stretch=%s\n", host_console_backend(console),
-           host_console_width(console), host_console_height(console),
-           getenv("VITA2NATIVE_STRETCH") ? "yes" : "no");
+    printf("present_probe: SDL output %dx%d stretch=%s\n", host_video_width(video),
+           host_video_height(video), getenv("VITA2NATIVE_STRETCH") ? "yes" : "no");
 
     frame = calloc((size_t)width * height, sizeof(*frame));
     if (!frame) {
-        host_console_close(console);
+        host_video_close(video);
         return 1;
     }
 
@@ -112,7 +112,7 @@ int main(int argc, char **argv)
                   0xFF000000u);
 
         start = now_ns();
-        host_console_present(console, frame, width, height, width);
+        host_video_present(video, frame, width, height, width);
         elapsed = now_ns() - start;
         if (elapsed > 200000000ull) {
             failures++;
@@ -127,6 +127,6 @@ int main(int argc, char **argv)
 
     printf("present_probe: finished after %u frames (%d slow presents)\n", frame_index, failures);
     free(frame);
-    host_console_close(console);
+    host_video_close(video);
     return 0;
 }
