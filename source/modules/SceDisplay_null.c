@@ -14,6 +14,33 @@
 static SceDisplayFrameBuf g_vita_conf_fb;
 static int g_vcount;
 static unsigned int g_frame_count;
+static HostConsole *g_console;
+static bool g_console_checked;
+
+static HostConsole *display_console(void)
+{
+    if (!g_console_checked) {
+        const char *path = NULL;
+
+        g_console_checked = true;
+        if (getenv("VITA2NATIVE_NO_PRESENT"))
+            return NULL;
+
+        /* An explicit fbdev override still wins; otherwise let the presenter
+           pick DRM/KMS first and fall back to fbdev. */
+        if (getenv("VITA2NATIVE_FBDEV"))
+            path = getenv("VITA2NATIVE_FBDEV");
+
+        g_console = host_console_open(path);
+        if (g_console)
+            LOG("SceDisplay: presenting through %s (%dx%d)", host_console_backend(g_console),
+                host_console_width(g_console), host_console_height(g_console));
+        else
+            LOG("SceDisplay: no display backend available, frames stay headless");
+    }
+
+    return g_console;
+}
 
 #define MAX_CAPTURES 64
 static long g_captures[MAX_CAPTURES];
@@ -197,6 +224,14 @@ EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayF
             SceCommonDialog_overlayPresented();
         }
         dump_framebuffer(pParam);
+
+        {
+            HostConsole *console = display_console();
+
+            if (console && pParam->base && pParam->width && pParam->height)
+                host_console_present(console, pParam->base, (int)pParam->width,
+                                     (int)pParam->height, (int)pParam->pitch);
+        }
     }
     g_frame_count++;
     display_log_fps();

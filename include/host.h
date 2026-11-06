@@ -92,6 +92,22 @@ void *threadTlsGet(int slot);
 
 void host_sleep_ns(int64_t nanoseconds);
 
+/*
+ * Framebuffer presentation. On a handheld the panel is typically only
+ * reachable through DRM/KMS; the presenter allocates its own scanout buffers
+ * and drives the CRTC directly, with fbdev as a fallback. Passing NULL (or
+ * "auto") selects the first working backend, VITA2NATIVE_DRM /
+ * VITA2NATIVE_FBDEV force one, and VITA2NATIVE_NO_PRESENT disables output.
+ */
+typedef struct HostConsole HostConsole;
+HostConsole *host_console_open(const char *path);
+void host_console_close(HostConsole *console);
+int host_console_width(const HostConsole *console);
+int host_console_height(const HostConsole *console);
+const char *host_console_backend(const HostConsole *console);
+void host_console_present(HostConsole *console, const void *rgba, int width, int height,
+                          int pitch_pixels);
+
 /* Mutexes. */
 void mutexInit(Mutex *mutex);
 void mutexLock(Mutex *mutex);

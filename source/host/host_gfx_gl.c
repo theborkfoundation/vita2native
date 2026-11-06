@@ -8,10 +8,12 @@
  * guest memory.
  */
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "host_gfx_gl.h"
 #include "host_gfx_internal.h"
@@ -151,6 +153,50 @@ static void *open_first(const char *const *names)
         }                                                                                          \
     } while (0)
 
+/*
+ * Some handhelds ship a vendor GLES blob (ARM Bifrost) behind EGL 1.4 with no
+ * surfaceless platform and no DRM render driver, so Mesa cannot create a
+ * screen. The blob does accept a GBM device, so create one when libgbm is
+ * available and offer it as a display candidate.
+ */
+static void *gxm_gbm_device_create(HostGles *g)
+{
+    typedef void *(*gbm_create_device_fn)(int fd);
+    static const char *const drm_paths[] = {
+        "/dev/dri/card0",
+        "/dev/dri/renderD128",
+    };
+    gbm_create_device_fn create_device;
+
+    if (g->gbm_device)
+        return g->gbm_device;
+
+    g->gbm_lib = dlopen("libgbm.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (!g->gbm_lib)
+        g->gbm_lib = dlopen("libgbm.so", RTLD_NOW | RTLD_LOCAL);
+    if (!g->gbm_lib)
+        return NULL;
+
+    create_device = (gbm_create_device_fn)dlsym(g->gbm_lib, "gbm_create_device");
+    if (!create_device)
+        return NULL;
+
+    for (size_t i = 0; i < sizeof(drm_paths) / sizeof(drm_paths[0]); i++) {
+        int fd = open(drm_paths[i], O_RDWR | O_CLOEXEC);
+
+        if (fd < 0)
+            continue;
+        g->gbm_device = create_device(fd);
+        if (g->gbm_device) {
+            g->drm_fd = fd;
+            return g->gbm_device;
+        }
+        close(fd);
+    }
+
+    return NULL;
+}
+
 static void gles_destroy_impl(HostGles *g)
 {
     if (!g)
@@ -187,6 +233,19 @@ static void gles_destroy_impl(HostGles *g)
             g->eglReleaseThread();
         g->eglTerminate(g->display);
     }
+
+    if (g->gbm_device) {
+        typedef void (*gbm_device_destroy_fn)(void *device);
+        gbm_device_destroy_fn destroy_device =
+            g->gbm_lib ? (gbm_device_destroy_fn)dlsym(g->gbm_lib, "gbm_device_destroy") : NULL;
+
+        if (destroy_device)
+            destroy_device(g->gbm_device);
+    }
+    if (g->drm_fd >= 0)
+        close(g->drm_fd);
+    if (g->gbm_lib)
+        dlclose(g->gbm_lib);
 
     if (g->egl_lib)
         dlclose(g->egl_lib);
@@ -248,6 +307,7 @@ HostGpuDevice host_gfx_gl_create(const HostGpuConfig *config)
     g->window_surface = EGL_NO_SURFACE;
     g->width = config->width > 0 ? config->width : 1;
     g->height = config->height > 0 ? config->height : 1;
+    g->drm_fd = -1;
 
     g->egl_lib = open_first(egl_names);
     if (!g->egl_lib)
@@ -281,7 +341,7 @@ HostGpuDevice host_gfx_gl_create(const HostGpuConfig *config)
      * the other options are fallbacks.
      */
     {
-        EGLDisplay candidates[4];
+        EGLDisplay candidates[8];
         int num_candidates = 0;
         bool initialized = false;
 
@@ -303,6 +363,19 @@ HostGpuDevice host_gfx_gl_create(const HostGpuConfig *config)
             GXM_ADD_SURFACELESS();
         }
 #undef GXM_ADD_SURFACELESS
+
+        /* Vendor blobs on handhelds need a GBM device; Mesa ignores this when
+           one of the platforms above already worked. */
+        {
+            void *gbm = gxm_gbm_device_create(g);
+
+            if (gbm) {
+                if (g->eglGetPlatformDisplayEXT)
+                    candidates[num_candidates++] = g->eglGetPlatformDisplayEXT(
+                        EGL_PLATFORM_GBM_KHR, (EGLNativeDisplayType)gbm, NULL);
+                candidates[num_candidates++] = g->eglGetDisplay((EGLNativeDisplayType)gbm);
+            }
+        }
 
         for (int i = 0; i < num_candidates && !initialized; i++) {
             if (candidates[i] == EGL_NO_DISPLAY)
@@ -371,6 +444,12 @@ HostGpuDevice host_gfx_gl_create(const HostGpuConfig *config)
 
     version = (const char *)g->glGetString(GL_VERSION);
     renderer = (const char *)g->glGetString(GL_RENDERER);
+
+    if (getenv("VITA2NATIVE_GL_INFO")) {
+        const char *extensions = (const char *)g->glGetString(GL_EXTENSIONS);
+
+        fprintf(stderr, "vita2native: GL extensions: %s\n", extensions ? extensions : "(none)");
+    }
     {
         const char *number = version ? strstr(version, "OpenGL ES ") : NULL;
         number = number ? number + strlen("OpenGL ES ") : version;

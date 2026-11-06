@@ -121,6 +121,18 @@ add bridging triangles. `VITA2NATIVE_PROFILE=1` prints the frame breakdown,
 logs texture uploads, `VITA2NATIVE_NO_BATCH=1` disables draw batching and
 `tests/gpu_bench.c` measures the driver in isolation.
 
+The same ARM32 build also runs on an R36S handheld (Rockchip RK3326, Mali-G31
+through the proprietary Bifrost blob, 640x480 DSI panel). Its vendor kernel
+exposes `/dev/fb0` but does not scan it out — the VOP was reading a null buffer
+— so presentation goes through DRM/KMS directly: `source/host/host_console.c`
+allocates dumb buffers, creates framebuffers, sets the CRTC and page-flips each
+converted guest frame. fbdev remains as a fallback, and the backend is chosen
+automatically (`VITA2NATIVE_DRM`, `VITA2NATIVE_FBDEV`,
+`VITA2NATIVE_NO_PRESENT`, and `VITA2NATIVE_STRETCH` override it).
+`tests/present_probe.c` cycles colours and a moving marker on the panel without
+starting the emulator. On this board VitaShell renders on the panel at ~1.3 fps;
+the blob's per-draw overhead is the bottleneck (about 5 ms per `glDrawElements`).
+
 ### Headless capture and scripted input
 
 Headless builds can dump guest framebuffers as BMP and drive the pad from a

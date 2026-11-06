@@ -105,6 +105,9 @@
 typedef struct HostGles {
     void *egl_lib;
     void *gles_lib;
+    void *gbm_lib;
+    void *gbm_device;
+    int drm_fd;
 
     EGLDisplay display;
     EGLContext context;

@@ -54,6 +54,7 @@ add_subdirectory(external)
 add_link_options("-Wl,--no-gc-sections")
 
 add_executable(vita2native
+    source/host/host_console.c
     source/host/host_fs.c
     source/host/host_gfx.c
     source/host/host_gfx_gl.c
@@ -363,6 +364,19 @@ if(BUILD_TESTING)
     target_compile_definitions(gl_thread_smoke PRIVATE _GNU_SOURCE=1)
     target_link_libraries(gl_thread_smoke PRIVATE pthread ${CMAKE_DL_LIBS} m)
     add_test(NAME gl_thread_smoke COMMAND gl_thread_smoke)
+
+    # Interactive display check: presents a moving pattern through DRM/KMS or
+    # fbdev. Not a ctest entry because it needs a real panel and runs until the
+    # requested duration expires.
+    add_executable(present_probe
+        tests/present_probe.c
+        source/host/host_console.c
+    )
+    target_include_directories(present_probe PRIVATE include)
+    target_compile_definitions(present_probe PRIVATE
+        _GNU_SOURCE=1
+        _FILE_OFFSET_BITS=64
+    )
 
     add_executable(audio_smoke
         tests/audio_smoke.c
