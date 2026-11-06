@@ -271,6 +271,18 @@ static bool drm_dirty(HostConsole *console, const ConsoleBuffer *buffer)
     return drm_ioctl(console->fd, DRM_IOCTL_MODE_DIRTYFB, &dirty) == 0;
 }
 
+static void drm_wait_vblank(HostConsole *console)
+{
+    union drm_wait_vblank vblank;
+
+    memset(&vblank, 0, sizeof(vblank));
+    vblank.request.type = _DRM_VBLANK_RELATIVE;
+    vblank.request.sequence = 1;
+    /* Returns an error immediately if the CRTC is not scanning, so this cannot
+       wedge a headless run. */
+    drm_ioctl(console->fd, DRM_IOCTL_WAIT_VBLANK, &vblank);
+}
+
 static bool drm_flip(HostConsole *console, int target)
 {
     struct drm_mode_crtc_page_flip flip = {
@@ -714,6 +726,11 @@ void host_console_present(HostConsole *console, const void *rgba, int width, int
 
             console_blit(console, stage->map, stage->pitch, console->width, console->height, rgba,
                          width, height, pitch_pixels);
+
+            /* Start the copy at the top of a frame and finish it before the
+               beam gets far: the copy is much faster than the scanout, so the
+               panel never sees a half-updated buffer. */
+            drm_wait_vblank(console);
             memcpy(scanout->map, stage->map, (size_t)stage->pitch * (size_t)console->height);
             target = 0;
         }
