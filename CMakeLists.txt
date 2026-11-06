@@ -24,6 +24,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(VITA2NATIVE_HEADLESS
     "Build without SDL2 (null display/input; useful for local testing and QEMU)" OFF)
 
+option(VITA2NATIVE_SOFTFP
+    "Use the base AAPCS float ABI for guest exports (older VitaSDK builds)" OFF)
+
+if(VITA2NATIVE_SOFTFP)
+    add_compile_definitions(VITA2NATIVE_SOFTFP=1)
+endif()
+
 if(VITA2NATIVE_HEADLESS)
     set(VITA2NATIVE_DISPLAY_SOURCE source/modules/SceDisplay_null.c)
     set(VITA2NATIVE_CTRL_SOURCE source/modules/SceCtrl_null.c)

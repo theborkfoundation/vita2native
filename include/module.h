@@ -5,11 +5,14 @@
 #include <stdint.h>
 
 /*
- * The guest targets the Vita's base AAPCS (softfp) ABI, while the ARM Linux
- * host uses the hard-float ABI. Export functions that pass or return floats
- * must opt back into the base PCS; integer-only functions are unaffected.
+ * Float ABI for exports that pass or return float by value. The current
+ * VitaSDK toolchain defaults to hard-float (-mfloat-abi=hard), so guest code
+ * puts those arguments in VFP registers. Older SDK builds (and the optional
+ * softfp VitaSDK profile) use base AAPCS; configure with
+ * -DVITA2NATIVE_SOFTFP=ON to build that variant. Integer-only functions are
+ * unaffected either way.
  */
-#if defined(__arm__)
+#if defined(__arm__) && defined(VITA2NATIVE_SOFTFP)
 #define GUEST_SOFTFP_ABI __attribute__((pcs("aapcs")))
 #else
 #define GUEST_SOFTFP_ABI

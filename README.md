@@ -45,6 +45,10 @@ cmake -S . -B build/Linux-Headless -G Ninja -DVITA2NATIVE_HEADLESS=ON
 cmake --build build/Linux-Headless
 ```
 
+Guest exports that pass or return floats use the host hard-float ABI, matching
+the default VitaSDK toolchain (`-mfloat-abi=hard`). For homebrew built with the
+old base-AAPCS/softfp profile, configure with `-DVITA2NATIVE_SOFTFP=ON`.
+
 ## Running
 
 Run with the default layout (`vita2native/executable` relative to the current

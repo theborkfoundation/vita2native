@@ -2627,12 +2627,11 @@ EXPORT(SceGxm, 0x1A68C8D2, void, sceGxmSetBackStencilFunc, SceGxmContext *contex
     context->back_stencil_write_mask = writeMask;
 }
 
-static void gxm_set_viewport_softfp(SceGxmContext *context, float x_offset, float x_scale,
-                                    float y_offset, float y_scale, float z_offset,
-                                    float z_scale) GUEST_SOFTFP_ABI;
-static void gxm_set_viewport_softfp(SceGxmContext *context, float x_offset, float x_scale,
-                                    float y_offset, float y_scale, float z_offset,
-                                    float z_scale)
+static void gxm_set_viewport(SceGxmContext *context, float x_offset, float x_scale,
+                             float y_offset, float y_scale, float z_offset,
+                             float z_scale) GUEST_SOFTFP_ABI;
+static void gxm_set_viewport(SceGxmContext *context, float x_offset, float x_scale,
+                             float y_offset, float y_scale, float z_offset, float z_scale)
 {
     context->viewport_x_offset = x_offset;
     context->viewport_x_scale = x_scale;
@@ -2642,7 +2641,7 @@ static void gxm_set_viewport_softfp(SceGxmContext *context, float x_offset, floa
     context->viewport_z_scale = z_scale;
     context->viewport_enable = SCE_GXM_VIEWPORT_ENABLED;
 }
-EXPORT_FUNC(SceGxm, 0x3EB3380B, gxm_set_viewport_softfp);
+EXPORT_FUNC(SceGxm, 0x3EB3380B, gxm_set_viewport);
 
 EXPORT(SceGxm, 0x814F61EB, void, sceGxmSetViewportEnable, SceGxmContext *context,
        SceGxmViewportMode enable)
