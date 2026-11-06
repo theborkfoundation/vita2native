@@ -32,6 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <psp2/ctrl.h>
 
@@ -53,6 +54,23 @@ typedef struct SDL_RendererInfo {
     int max_texture_width;
     int max_texture_height;
 } SDL_RendererInfo;
+
+/* SDL_Event is a 56-byte union in SDL 2.x; only the common header and the
+   window-event prefix are needed. */
+typedef struct {
+    uint32_t type;
+    uint8_t padding[60];
+} SdlEvent;
+
+typedef struct {
+    uint32_t type;
+    uint32_t timestamp;
+    uint32_t window_id;
+    uint8_t event;
+    uint8_t padding[3];
+    int32_t data1;
+    int32_t data2;
+} SdlWindowEvent;
 
 typedef struct {
     void *library;
@@ -95,6 +113,9 @@ typedef struct {
     char *(*game_controller_mapping)(SDL_GameController *);
     void (*free)(void *);
     unsigned int (*get_mouse_state)(int *, int *);
+    int (*game_controller_rumble)(SDL_GameController *, unsigned short low,
+                                  unsigned short high, unsigned int duration_ms);
+    int (*poll_event)(void *event);
 } SdlApi;
 
 #define SDL_INIT_VIDEO 0x00000020u
@@ -148,6 +169,11 @@ typedef struct {
 #define SDL_SCANCODE_DOWN 81
 #define SDL_SCANCODE_UP 82
 
+#define SDL_QUIT 0x100u
+#define SDL_WINDOWEVENT 0x200u
+#define SDL_WINDOWEVENT_SIZE_CHANGED 6
+#define SDL_WINDOWEVENT_CLOSE 14
+
 /* Vita front touch panel. */
 #define TOUCH_PANEL_WIDTH 1920
 #define TOUCH_PANEL_HEIGHT 1088
@@ -195,6 +221,10 @@ struct HostVideo {
     HostPadState pad;
     HostTouchState touch;
     bool touch_latched;
+    bool rumble_pending;
+    uint16_t rumble_low;
+    uint16_t rumble_high;
+    bool window_closed;
 };
 
 static HostVideo *g_active_video;
@@ -523,6 +553,43 @@ static uint8_t sdl_axis_to_vita(int value, bool invert)
 
 /* Runs on the video thread: SDL event/video calls must stay on the thread that
    initialised the subsystem. */
+static void video_poll_events(HostVideo *video)
+{
+    SdlApi *api = video->api;
+    SdlEvent event;
+
+    if (api->poll_event) {
+        while (api->poll_event(&event)) {
+            if (event.type == SDL_QUIT) {
+                if (getenv("VITA2NATIVE_INPUT_DEBUG")) {
+                    fprintf(stderr, "vita2native: SDL quit event\n");
+                    fflush(stderr);
+                }
+                video->window_closed = true;
+            } else if (event.type == SDL_WINDOWEVENT) {
+                const SdlWindowEvent *window_event = (const SdlWindowEvent *)&event;
+
+                if (getenv("VITA2NATIVE_INPUT_DEBUG")) {
+                    fprintf(stderr, "vita2native: SDL window event %u (%dx%d)\n",
+                            window_event->event, window_event->data1, window_event->data2);
+                    fflush(stderr);
+                }
+                if (window_event->event == SDL_WINDOWEVENT_CLOSE) {
+                    video->window_closed = true;
+                } else if (window_event->event == SDL_WINDOWEVENT_SIZE_CHANGED &&
+                           window_event->data1 > 0 && window_event->data2 > 0) {
+                    pthread_mutex_lock(&video->lock);
+                    video->width = window_event->data1;
+                    video->height = window_event->data2;
+                    pthread_mutex_unlock(&video->lock);
+                }
+            }
+        }
+    } else if (api->pump_events) {
+        api->pump_events();
+    }
+}
+
 static void video_sample_touch(HostVideo *video)
 {
     SdlApi *api = video->api;
@@ -594,11 +661,13 @@ static void video_sample_input(HostVideo *video)
     unsigned int buttons = 0;
     uint8_t lx = 128, ly = 128, rx = 128, ry = 128;
     bool active = false;
+    bool rumble = false;
+    uint16_t rumble_low = 0, rumble_high = 0;
 
-    if (!api || !api->pump_events)
+    if (!api)
         return;
 
-    api->pump_events();
+    video_poll_events(video);
     video_sample_touch(video);
 
     if (api->get_keyboard_state) {
@@ -678,6 +747,29 @@ static void video_sample_input(HostVideo *video)
     video->pad.rx = rx;
     video->pad.ry = ry;
     video->pad.active = active;
+    if (video->controller && video->rumble_pending) {
+        rumble = true;
+        rumble_low = video->rumble_low;
+        rumble_high = video->rumble_high;
+        video->rumble_pending = false;
+    }
+    pthread_mutex_unlock(&video->lock);
+
+    if (rumble && api->game_controller_rumble)
+        api->game_controller_rumble(video->controller, rumble_low, rumble_high, 0xFFFFFFFFu);
+}
+
+void host_video_rumble(uint8_t small, uint8_t large)
+{
+    HostVideo *video = g_active_video;
+
+    if (!video)
+        return;
+
+    pthread_mutex_lock(&video->lock);
+    video->rumble_low = (uint16_t)large * 257u;
+    video->rumble_high = (uint16_t)small * 257u;
+    video->rumble_pending = true;
     pthread_mutex_unlock(&video->lock);
 }
 
@@ -739,6 +831,12 @@ static void *video_thread(void *arg)
         /* Poll input even when no frame is waiting, so a desktop keyboard or
            controller stays responsive while the guest is busy. */
         video_sample_input(video);
+
+        if (video->window_closed) {
+            fprintf(stderr, "vita2native: window closed, exiting\n");
+            fflush(stderr);
+            _exit(0);
+        }
 
         clock_gettime(CLOCK_REALTIME, &wait_until);
         wait_until.tv_nsec += 16 * 1000000L;
@@ -859,6 +957,8 @@ HostVideo *host_video_open(void)
     *(void **)(&api->game_controller_mapping) = dlsym(api->library, "SDL_GameControllerMapping");
     *(void **)(&api->free) = dlsym(api->library, "SDL_free");
     *(void **)(&api->get_mouse_state) = dlsym(api->library, "SDL_GetMouseState");
+    *(void **)(&api->game_controller_rumble) = dlsym(api->library, "SDL_GameControllerRumble");
+    *(void **)(&api->poll_event) = dlsym(api->library, "SDL_PollEvent");
 
 #undef LOAD_SDL
 

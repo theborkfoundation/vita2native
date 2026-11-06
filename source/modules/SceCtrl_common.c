@@ -9,6 +9,7 @@
 #include <psp2/ctrl.h>
 #include <string.h>
 
+#include "host.h"
 #include "module.h"
 
 int sceCtrlPeekBufferPositive(int port, SceCtrlData *pad_data, int count);
@@ -236,7 +237,9 @@ EXPORT(SceCtrl, 0x324F1B66, int, sceCtrlGetControllerPortInfo, SceCtrlPortInfo *
 EXPORT(SceCtrl, 0xDBCAA0C9, int, sceCtrlSetActuator, int port, const SceCtrlActuator *state)
 {
     (void)port;
-    (void)state;
+
+    if (state)
+        host_video_rumble(state->small, state->large);
 
     return 0;
 }

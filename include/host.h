@@ -139,6 +139,11 @@ typedef struct {
 
 bool host_video_touch_state(HostTouchState *state);
 
+/* Drive the attached game controller's motors. `small` and `large` are the
+   Vita actuator strengths (0..255); the request is applied on the video
+   thread, which owns the SDL controller. */
+void host_video_rumble(uint8_t small, uint8_t large);
+
 /* Mutexes. */
 void mutexInit(Mutex *mutex);
 void mutexLock(Mutex *mutex);

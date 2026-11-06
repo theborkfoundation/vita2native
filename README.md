@@ -141,7 +141,9 @@ latched until the guest polls, so a tap is not lost on a title running at 1 fps.
 mapping SDL picked for a controller). The same video-thread poll reads the
 pointer: the front touch panel follows the mouse, mapped through the letterbox
 rectangle into the Vita's 1920x1088 active area, and a click is latched until
-the guest reads it. Clicks on the black bars are ignored.
+the guest reads it. Clicks on the black bars are ignored. `sceCtrlSetActuator`
+feeds the attached controller's rumble motors through SDL, and closing the SDL
+window (or SDL_QUIT) exits the emulator cleanly.
 
 When SDL is unavailable, the headless build reads the pad directly from evdev
 (`/dev/input/event*`), which remains the reliable path on the R36S: face
