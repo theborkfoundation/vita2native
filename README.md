@@ -142,7 +142,9 @@ keeps no SDL build dependency. SDL chooses the platform driver itself: KMSDRM
 on handhelds, X11 or Wayland on desktops, and offscreen/dummy on headless
 machines (`SDL_VIDEODRIVER=dummy` forces a no-op output). The guest frame is
 uploaded as `SDL_PIXELFORMAT_ABGR8888` — the guest's A8B8G8R8 byte order — so
-SDL does the scaling and letterboxing without a CPU conversion.
+SDL does the scaling and letterboxing without a CPU conversion. Frames are
+handed to a dedicated video thread, so SDL's own GL context never touches the
+guest's rendering context.
 `VITA2NATIVE_STRETCH=1` fills the display and `VITA2NATIVE_SDL_WINDOWED=1` keeps
 a window instead of going fullscreen.
 
