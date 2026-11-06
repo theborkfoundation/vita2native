@@ -246,6 +246,21 @@ static void draw_quad(Scene *scene, const SceGxmTexture *texture)
                       quad_indices, 6) == 0);
 }
 
+static void draw_strip(Scene *scene, const SceGxmTexture *texture, const float verts[4][4],
+                       const float uvs[4][2])
+{
+    static const uint16_t strip_indices[4] = { 0, 1, 2, 3 };
+
+    sceGxmSetVertexProgram(scene->context, scene->vertex_program);
+    sceGxmSetFragmentProgram(scene->context, scene->fragment_program);
+    assert(sceGxmSetFragmentTexture(scene->context, 0, texture) == 0);
+    assert(sceGxmSetVertexStream(scene->context, 0, verts) == 0);
+    assert(sceGxmSetVertexStream(scene->context, 1, uvs) == 0);
+    set_identity_wvp(scene);
+    assert(sceGxmDraw(scene->context, SCE_GXM_PRIMITIVE_TRIANGLE_STRIP, SCE_GXM_INDEX_FORMAT_U16,
+                      strip_indices, 4) == 0);
+}
+
 static void draw_quad_at_z(Scene *scene, const SceGxmTexture *texture, float z)
 {
     float vertices[4][4];
@@ -488,6 +503,51 @@ int main(int argc, char **argv)
         }
     }
     printf("solid textured quad: ok\n");
+
+    /* 1b: two triangle strips sharing program, texture and uniforms must merge
+       without a bridging triangle between them. The FBO still holds scene 1's
+       colour, so the gap between the strips must keep it. */
+    {
+        const float left_verts[4][4] = {
+            { -1.0f, -1.0f, 0.0f, 1.0f },
+            { -1.0f, 1.0f, 0.0f, 1.0f },
+            { -0.25f, -1.0f, 0.0f, 1.0f },
+            { -0.25f, 1.0f, 0.0f, 1.0f },
+        };
+        const float right_verts[4][4] = {
+            { 0.25f, -1.0f, 0.0f, 1.0f },
+            { 0.25f, 1.0f, 0.0f, 1.0f },
+            { 1.0f, -1.0f, 0.0f, 1.0f },
+            { 1.0f, 1.0f, 0.0f, 1.0f },
+        };
+        const float left_uvs[4][2] = {
+            { 0.25f, 0.25f }, { 0.25f, 0.25f }, { 0.25f, 0.25f }, { 0.25f, 0.25f },
+        };
+        const float right_uvs[4][2] = {
+            { 0.75f, 0.75f }, { 0.75f, 0.75f }, { 0.75f, 0.75f }, { 0.75f, 0.75f },
+        };
+
+        begin_frame(&scene);
+        draw_strip(&scene, &quad_texture, left_verts, left_uvs);
+        draw_strip(&scene, &quad_texture, right_verts, right_uvs);
+        end_frame(&scene);
+
+        if (!pixel_is(scene.pixels, WIDTH / 8, HEIGHT / 2, 255, 0, 0, 255) ||
+            !pixel_is(scene.pixels, WIDTH - WIDTH / 8, HEIGHT / 2, 255, 255, 255, 255) ||
+            !pixel_is(scene.pixels, WIDTH / 2, HEIGHT / 2, 10, 20, 30, 40)) {
+            const uint8_t *left = (const uint8_t *)&scene.pixels[(HEIGHT / 2) * WIDTH + WIDTH / 8];
+            const uint8_t *right = (const uint8_t *)&scene.pixels[(HEIGHT / 2) * WIDTH + WIDTH -
+                                                                  WIDTH / 8];
+            const uint8_t *gap = (const uint8_t *)&scene.pixels[(HEIGHT / 2) * WIDTH + WIDTH / 2];
+
+            fprintf(stderr, "batched strips failed: left %02x%02x%02x%02x right %02x%02x%02x%02x "
+                            "gap %02x%02x%02x%02x\n",
+                    left[0], left[1], left[2], left[3], right[0], right[1], right[2], right[3],
+                    gap[0], gap[1], gap[2], gap[3]);
+            goto done;
+        }
+    }
+    printf("batched triangle strips: ok\n");
 
     /* 2: region clip restricts the second draw to the top-left quadrant. */
     begin_frame(&scene);

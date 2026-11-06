@@ -79,6 +79,63 @@ typedef struct {
     uint32_t used;
 } GxmBufferArena;
 
+/*
+ * Everything a draw needs besides its vertex and index data. Consecutive
+ * draws whose state compares equal can be appended to one GL draw, which is
+ * the difference between 847 tiny draws and a handful of larger ones on a
+ * tile-based GPU.
+ */
+typedef struct {
+    GLuint program;
+    const SceGxmColorSurfaceInner *color_surface;
+    uint32_t surface_width;
+    uint32_t surface_height;
+    const SceGxmDepthStencilSurface *ds_surface;
+    SceGxmViewportMode viewport_enable;
+    float viewport_x_offset, viewport_x_scale;
+    float viewport_y_offset, viewport_y_scale;
+    float viewport_z_offset, viewport_z_scale;
+    SceGxmRegionClipMode region_clip_mode;
+    unsigned int region_clip_xmin, region_clip_ymin;
+    unsigned int region_clip_xmax, region_clip_ymax;
+    SceGxmCullMode cull_mode;
+    SceGxmPolygonMode polygon_mode;
+    unsigned int point_line_width;
+    int depth_bias_factor, depth_bias_units;
+    SceGxmTwoSidedMode two_sided;
+    SceGxmFragmentProgramMode front_fragment_program_enable;
+    SceGxmFragmentProgramMode back_fragment_program_enable;
+    SceGxmDepthFunc depth_func;
+    SceGxmDepthWriteMode depth_write;
+    SceGxmStencilFunc front_stencil_func, back_stencil_func;
+    SceGxmStencilOp front_stencil_fail, front_stencil_depth_fail, front_stencil_pass;
+    SceGxmStencilOp back_stencil_fail, back_stencil_depth_fail, back_stencil_pass;
+    uint8_t front_stencil_compare_mask, front_stencil_write_mask;
+    uint8_t back_stencil_compare_mask, back_stencil_write_mask;
+    unsigned int front_stencil_ref, back_stencil_ref;
+    SceGxmPrimitiveType prim;
+    SceGxmIndexFormat index_format;
+    unsigned int instances;
+} GxmDrawState;
+
+typedef struct {
+    bool active;
+    GxmDrawState state;
+    SceGxmTextureInner fragment_textures[SCE_GXM_MAX_TEXTURE_UNITS];
+    SceGxmTextureInner vertex_textures[SCE_GXM_MAX_TEXTURE_UNITS];
+    uint8_t *vertex_uniforms;
+    uint8_t *fragment_uniforms;
+    uint32_t vertex_uniform_size;
+    uint32_t fragment_uniform_size;
+    uint32_t index_start;
+    uint32_t index_count;
+    uint32_t vertex_count;
+    uint32_t draws;
+    uint32_t stream_start[SCE_GXM_MAX_VERTEX_STREAMS];
+    GLenum gl_index_type;
+    GLenum gl_primitive;
+} GxmDrawBatch;
+
 typedef struct {
     GLuint tex;
     GLenum target;
@@ -112,6 +169,7 @@ static unsigned int g_profile_vertices;
 static unsigned int g_profile_uploads;
 static uint64_t g_profile_upload_bytes;
 static uint64_t g_profile_draw_ns;
+static uint64_t g_profile_ds_ns;
 static uint64_t g_profile_uniform_ns;
 static uint64_t g_profile_state_ns;
 static uint64_t g_profile_texture_ns;
@@ -230,8 +288,11 @@ typedef struct SceGxmContext {
     struct GXMRenderFragUniformBlock last_frag_info;
     bool vert_info_valid;
     bool frag_info_valid;
-    GxmBufferArena stream_arena;
+    GxmBufferArena stream_arena[SCE_GXM_MAX_VERTEX_STREAMS];
     GxmBufferArena index_arena;
+    GxmDrawBatch batch;
+    uint8_t *index_scratch;
+    uint32_t index_scratch_capacity;
 
     const SceGxmPrecomputedVertexState *precomputed_vertex;
     const SceGxmPrecomputedFragmentState *precomputed_fragment;
@@ -248,6 +309,8 @@ typedef struct SceGxmContext {
     void *fragment_buffer;
     uint32_t fragment_buffer_size;
 } SceGxmContext;
+
+static void gxm_batch_flush(SceGxmContext *context);
 
 typedef struct SceGxmSyncObject {
     int unused;
@@ -378,6 +441,7 @@ static HostGles *g_gl;
 static uint32_t *g_notification_region;
 static GxmLinkedProgram g_linked[GXM_MAX_LINKED_PROGRAMS];
 static unsigned int g_linked_count;
+static SceGxmContext *g_current_context;
 static GLuint g_bound_texture[2 * SCE_GXM_MAX_TEXTURE_UNITS];
 static unsigned int g_active_texture_unit = UINT_MAX;
 static GLuint g_bound_uniform_block[2];
@@ -1143,52 +1207,95 @@ static void gxm_upload_textures(SceGxmContext *context)
     }
 }
 
-static void gxm_arena_reset(GxmBufferArena *arena, GLenum target, uint32_t initial_capacity)
+static uint32_t gxm_align_up(uint32_t value, uint32_t alignment)
 {
-    if (!arena->buffer) {
-        g_gl->glGenBuffers(1, &arena->buffer);
-        arena->capacity = initial_capacity;
-    }
-    if (!arena->capacity)
-        arena->capacity = initial_capacity;
+    return alignment ? (value + alignment - 1) / alignment * alignment : value;
+}
+
+static void gxm_arena_init(GxmBufferArena *arena, GLenum target, uint32_t initial_capacity)
+{
+    if (arena->buffer)
+        return;
+
+    g_gl->glGenBuffers(1, &arena->buffer);
+    arena->capacity = initial_capacity;
+    arena->used = 0;
+    g_gl->glBindBuffer(target, arena->buffer);
+    g_gl->glBufferData(target, (GLsizeiptr)arena->capacity, NULL, GL_STREAM_DRAW);
+}
+
+static void gxm_arena_orphan(GxmBufferArena *arena, GLenum target)
+{
+    if (!arena->buffer)
+        return;
 
     g_gl->glBindBuffer(target, arena->buffer);
     g_gl->glBufferData(target, (GLsizeiptr)arena->capacity, NULL, GL_STREAM_DRAW);
     arena->used = 0;
 }
 
-static uint32_t gxm_arena_upload(GxmBufferArena *arena, GLenum target, const void *data,
-                                 uint32_t size, uint32_t alignment)
+/*
+ * Makes room for `size` more bytes. Growing discards the arena's contents, so
+ * callers must flush the pending draw batch before calling this.
+ */
+static void gxm_arena_reserve(GxmBufferArena *arena, GLenum target, uint32_t size,
+                              uint32_t alignment)
 {
     uint32_t offset;
 
     if (!arena->buffer)
-        gxm_arena_reset(arena, target, 256 * 1024);
+        gxm_arena_init(arena, target, 256 * 1024);
 
-    offset = (arena->used + alignment - 1) & ~(alignment - 1);
+    offset = gxm_align_up(arena->used, alignment);
+    if (offset + size <= arena->capacity)
+        return;
 
-    if (offset + size > arena->capacity) {
-        uint32_t capacity = arena->capacity ? arena->capacity : 256 * 1024;
-
-        while (capacity < offset + size)
-            capacity *= 2;
-
-        g_gl->glBindBuffer(target, arena->buffer);
-        g_gl->glBufferData(target, (GLsizeiptr)capacity, NULL, GL_STREAM_DRAW);
-        arena->capacity = capacity;
-        arena->used = 0;
-        offset = 0;
-    }
+    while (arena->capacity < offset + size)
+        arena->capacity *= 2;
 
     g_gl->glBindBuffer(target, arena->buffer);
-    g_gl->glBufferSubData(target, (GLintptr)offset, (GLsizeiptr)size, data);
+    g_gl->glBufferData(target, (GLsizeiptr)arena->capacity, NULL, GL_STREAM_DRAW);
+    arena->used = 0;
+}
+
+static uint32_t gxm_arena_reserve_offset(GxmBufferArena *arena, uint32_t alignment)
+{
+    if (!arena->buffer)
+        gxm_arena_init(arena, GL_ARRAY_BUFFER, 256 * 1024);
+    arena->used = gxm_align_up(arena->used, alignment);
+    return arena->used;
+}
+
+static bool gxm_arena_fits(const GxmBufferArena *arena, uint32_t size, uint32_t alignment)
+{
+    uint32_t offset = gxm_align_up(arena->used, alignment);
+
+    return arena->buffer && offset + size <= arena->capacity;
+}
+
+static uint32_t gxm_arena_upload(GxmBufferArena *arena, GLenum target, const void *data,
+                                 uint32_t size, uint32_t alignment)
+{
+    uint32_t offset = gxm_align_up(arena->used, alignment);
+
+    g_gl->glBindBuffer(target, arena->buffer);
+    if (data && size)
+        g_gl->glBufferSubData(target, (GLintptr)offset, (GLsizeiptr)size, data);
     arena->used = offset + size;
 
     return offset;
 }
 
-static void gxm_upload_uniforms(SceGxmContext *context, const SceGxmRegisteredProgram *program,
-                                bool vertex)
+static uint32_t gxm_arena_advance(GxmBufferArena *arena, uint32_t size, uint32_t alignment)
+{
+    uint32_t offset = gxm_align_up(arena->used, alignment);
+
+    arena->used = offset + size;
+    return offset;
+}
+
+static uint32_t gxm_build_uniforms(SceGxmContext *context, const SceGxmRegisteredProgram *program,
+                                 bool vertex)
 {
     const void *default_buffer = vertex ? context->vertex_uniforms : context->fragment_uniforms;
     const void *const *buffers =
@@ -1196,11 +1303,9 @@ static void gxm_upload_uniforms(SceGxmContext *context, const SceGxmRegisteredPr
     uint8_t **data = vertex ? &context->vertex_block_data : &context->fragment_block_data;
     uint32_t *capacity = vertex ? &context->vertex_block_size : &context->fragment_block_size;
     uint32_t total = program ? program->uniform_buffer_size : 0;
-    unsigned int index = vertex ? 0 : 1;
-    GLuint buffer = context->uniform_block[index];
 
     if (!total)
-        return;
+        return 0;
 
     if (*capacity != total) {
         free(*data);
@@ -1208,7 +1313,7 @@ static void gxm_upload_uniforms(SceGxmContext *context, const SceGxmRegisteredPr
         *capacity = *data ? total : 0;
     }
     if (!*data)
-        return;
+        return 0;
 
     memset(*data, 0, total);
 
@@ -1230,6 +1335,21 @@ static void gxm_upload_uniforms(SceGxmContext *context, const SceGxmRegisteredPr
         memcpy(*data + layout->offset, source, size);
     }
 
+    return total;
+}
+
+/* Uploads the container most recently filled in by gxm_build_uniforms(). */
+static void gxm_upload_uniforms(SceGxmContext *context, const SceGxmRegisteredProgram *program,
+                                bool vertex)
+{
+    uint32_t total = program ? program->uniform_buffer_size : 0;
+    unsigned int index = vertex ? 0 : 1;
+    uint8_t *data = vertex ? context->vertex_block_data : context->fragment_block_data;
+    GLuint buffer = context->uniform_block[index];
+
+    if (!total || !data)
+        return;
+
     if (!buffer) {
         g_gl->glGenBuffers(1, &buffer);
         context->uniform_block[index] = buffer;
@@ -1237,10 +1357,10 @@ static void gxm_upload_uniforms(SceGxmContext *context, const SceGxmRegisteredPr
 
     g_gl->glBindBuffer(GL_UNIFORM_BUFFER, buffer);
     if (context->uniform_block_capacity[index] < total) {
-        g_gl->glBufferData(GL_UNIFORM_BUFFER, (GLsizeiptr)total, *data, GL_STREAM_DRAW);
+        g_gl->glBufferData(GL_UNIFORM_BUFFER, (GLsizeiptr)total, data, GL_STREAM_DRAW);
         context->uniform_block_capacity[index] = total;
     } else {
-        g_gl->glBufferSubData(GL_UNIFORM_BUFFER, 0, (GLsizeiptr)total, *data);
+        g_gl->glBufferSubData(GL_UNIFORM_BUFFER, 0, (GLsizeiptr)total, data);
     }
 
     if (g_bound_uniform_block[index] != buffer) {
@@ -1349,7 +1469,7 @@ typedef struct {
 static GxmDsLayout gxm_ds_layout(SceGxmDepthStencilFormat format);
 
 static void gxm_flush_state(SceGxmContext *context, const GxmLinkedProgram *linked,
-                           uint32_t max_index)
+                           const uint32_t *stream_starts)
 {
     const SceGxmVertexProgram *vp = context->vertex_program;
     const SceGxmFragmentProgram *fp = context->fragment_program;
@@ -1541,23 +1661,9 @@ static void gxm_flush_state(SceGxmContext *context, const GxmLinkedProgram *link
     g_profile_texture_ns += gxm_time_ns() - prof;
     prof = gxm_time_ns();
 
-    /* Vertex attributes: stream data is appended to the per-frame arena. */
-    if (vp) {
-        uint32_t stream_offsets[SCE_GXM_MAX_VERTEX_STREAMS] = { 0 };
-
-        for (unsigned int i = 0; i < vp->streamCount && i < SCE_GXM_MAX_VERTEX_STREAMS; i++) {
-            const SceGxmVertexStream *s = &vp->streams[i];
-            GxmStream *stream = &context->streams[i];
-            uint32_t size;
-
-            if (!stream->data || !s->stride)
-                continue;
-
-            size = (max_index + 1) * s->stride;
-            stream_offsets[i] = gxm_arena_upload(&context->stream_arena, GL_ARRAY_BUFFER,
-                                                 stream->data, size, 4);
-        }
-
+    /* Vertex attributes read from the per-stream arenas; stream_starts are the
+       byte offsets that batch vertex 0 was written to. */
+    if (vp && stream_starts) {
         for (unsigned int i = 0; i < vp->attributeCount; i++) {
             const SceGxmVertexAttribute *a = &vp->attributes[i];
             const SceGxmVertexStream *s;
@@ -1565,7 +1671,8 @@ static void gxm_flush_state(SceGxmContext *context, const GxmLinkedProgram *link
             GxmStream *stream;
             GLenum type;
 
-            if (a->streamIndex >= vp->streamCount)
+            if (a->streamIndex >= vp->streamCount ||
+                a->streamIndex >= SCE_GXM_MAX_VERTEX_STREAMS)
                 continue;
 
             location = vita3k_gxm_get_attribute_location(vp->programId->programHeader, a->regIndex);
@@ -1579,10 +1686,11 @@ static void gxm_flush_state(SceGxmContext *context, const GxmLinkedProgram *link
 
             type = gxm_attribute_type((SceGxmAttributeFormat)a->format);
             g_gl->glEnableVertexAttribArray((GLuint)location);
+            g_gl->glBindBuffer(GL_ARRAY_BUFFER, context->stream_arena[a->streamIndex].buffer);
             g_gl->glVertexAttribPointer(
                 (GLuint)location, a->componentCount, type,
                 gxm_attribute_normalized((SceGxmAttributeFormat)a->format), s->stride,
-                (const void *)(uintptr_t)(stream_offsets[a->streamIndex] + a->offset));
+                (const void *)(uintptr_t)(stream_starts[a->streamIndex] + a->offset));
         }
     }
 
@@ -1661,6 +1769,10 @@ EXPORT(SceGxm, 0x9F448E79, int, sceGxmNotificationWait, const SceGxmNotification
 {
     if (!notification || !notification->address)
         return SCE_GXM_ERROR_INVALID_POINTER;
+
+    /* Pending draws would otherwise never signal the notification. */
+    if (g_current_context)
+        gxm_batch_flush(g_current_context);
 
     while (*notification->address != notification->value)
         host_sleep_ns(1000000);
@@ -1765,16 +1877,22 @@ EXPORT(SceGxm, 0xEDDC5FB2, int, sceGxmDestroyContext, SceGxmContext *context)
         return SCE_GXM_ERROR_INVALID_POINTER;
 
     if (g_gl && !context->deferred) {
+        gxm_batch_flush(context);
         if (context->ubo[0] || context->ubo[1])
             g_gl->glDeleteBuffers(2, context->ubo);
-        if (context->stream_arena.buffer)
-            g_gl->glDeleteBuffers(1, &context->stream_arena.buffer);
+        for (unsigned int i = 0; i < SCE_GXM_MAX_VERTEX_STREAMS; i++) {
+            if (context->stream_arena[i].buffer)
+                g_gl->glDeleteBuffers(1, &context->stream_arena[i].buffer);
+        }
         if (context->index_arena.buffer)
             g_gl->glDeleteBuffers(1, &context->index_arena.buffer);
         if (context->uniform_block[0] || context->uniform_block[1])
             g_gl->glDeleteBuffers(2, context->uniform_block);
     }
 
+    free(context->batch.vertex_uniforms);
+    free(context->batch.fragment_uniforms);
+    free(context->index_scratch);
     free(context->vertex_block_data);
     free(context->fragment_block_data);
     free(context->vertex_uniform_arena);
@@ -1782,6 +1900,8 @@ EXPORT(SceGxm, 0xEDDC5FB2, int, sceGxmDestroyContext, SceGxmContext *context)
     gxm_command_free(context->cmd_head);
     context->cmd_head = NULL;
     context->cmd_tail = NULL;
+    if (g_current_context == context)
+        g_current_context = NULL;
     if (context->owns_memory)
         free(context);
     return 0;
@@ -1789,7 +1909,8 @@ EXPORT(SceGxm, 0xEDDC5FB2, int, sceGxmDestroyContext, SceGxmContext *context)
 
 EXPORT(SceGxm, 0x0733D8AE, void, sceGxmFinish, SceGxmContext *context)
 {
-    (void)context;
+    if (context)
+        gxm_batch_flush(context);
     if (g_gl)
         g_gl->glFinish();
 }
@@ -2713,6 +2834,7 @@ EXPORT(SceGxm, 0x2B5C0444, int, sceGxmMidSceneFlush, SceGxmContext *context, uns
     (void)vertexNotification;
     if (!context->in_scene)
         return SCE_GXM_ERROR_NOT_WITHIN_SCENE;
+    gxm_batch_flush(context);
     if (g_gl)
         g_gl->glFinish();
     return 0;
@@ -3110,14 +3232,17 @@ EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsign
     context->precomputed_vertex = NULL;
     context->precomputed_fragment = NULL;
     context->in_scene = true;
+    g_current_context = context;
 
     if (g_gl) {
         GLuint draw_fbo = renderTarget->msaa_fbo ? renderTarget->msaa_fbo : renderTarget->fbo;
 
         /* The GPU is idle here (the previous frame ended with a finish), so
            orphaning the upload arenas once per frame is cheap. */
-        gxm_arena_reset(&context->stream_arena, GL_ARRAY_BUFFER, 1024 * 1024);
-        gxm_arena_reset(&context->index_arena, GL_ELEMENT_ARRAY_BUFFER, 256 * 1024);
+        for (unsigned int i = 0; i < SCE_GXM_MAX_VERTEX_STREAMS; i++)
+            gxm_arena_orphan(&context->stream_arena[i], GL_ARRAY_BUFFER);
+        gxm_arena_orphan(&context->index_arena, GL_ELEMENT_ARRAY_BUFFER);
+        context->batch.active = false;
 
         g_gl->glBindFramebuffer(GL_FRAMEBUFFER, draw_fbo);
         g_gl->glViewport(0, 0, renderTarget->params.width, renderTarget->params.height);
@@ -3372,18 +3497,20 @@ static void gxm_profile_frame(uint64_t resolve_ns, uint64_t finish_ns, uint64_t 
         return;
 
     LOG("SceGxm: %u frames in %.1f s: draw %.1f (uniform %.1f state %.1f tex %.1f attrib "
-        "%.1f) resolve %.1f finish %.1f read %.1f convert %.1f ms/frame "
-        "(%u draws, %u vertices, %u uploads/%llu KiB per frame)",
+        "%.1f) resolve %.1f finish %.1f read %.1f convert %.1f ds %.1f ms/frame "
+        "(%u gl draws, %u vertices, %u uploads/%llu KiB per frame)",
         frames, (double)(now - last) / 1e9, (double)g_profile_draw_ns / frames / 1e6,
         (double)g_profile_uniform_ns / frames / 1e6, (double)g_profile_state_ns / frames / 1e6,
         (double)g_profile_texture_ns / frames / 1e6, (double)g_profile_attrib_ns / frames / 1e6,
         (double)resolve_total / frames / 1e6, (double)finish_total / frames / 1e6,
         (double)read_total / frames / 1e6, (double)convert_total / frames / 1e6,
-        g_profile_draws / frames, g_profile_vertices / frames, g_profile_uploads / frames,
+        (double)g_profile_ds_ns / frames / 1e6, g_profile_draws / frames,
+        g_profile_vertices / frames, g_profile_uploads / frames,
         (unsigned long long)(g_profile_upload_bytes / frames / 1024));
 
     resolve_total = finish_total = read_total = convert_total = 0;
     g_profile_draws = g_profile_vertices = g_profile_uploads = 0;
+    g_profile_ds_ns = 0;
     g_profile_upload_bytes = 0;
     g_profile_draw_ns = 0;
     g_profile_uniform_ns = 0;
@@ -3416,6 +3543,8 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
 
     context->in_scene = false;
     g_gxm_frame++;
+
+    gxm_batch_flush(context);
 
     if (!g_gl || !context->render_target)
         return 0;
@@ -3471,11 +3600,34 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
             uint32_t clip_y1 = surface->clipYMax;
             bool gamma = surface->gamma_mode != 0;
             bool dither = surface->dither_mode != 0;
+            uint32_t row_pixels = surface->width < width ? surface->width : width;
+            uint32_t row_count = surface->height < height ? surface->height : height;
+            uint32_t stride = surface->strideInPixels ? surface->strideInPixels : surface->width;
+            bool direct = !gamma && !dither && scale == 1 && bytes_per_pixel == 4 &&
+                          surface->surfaceType != SCE_GXM_COLOR_SURFACE_TILED &&
+                          surface->surfaceType != SCE_GXM_COLOR_SURFACE_SWIZZLED &&
+                          (surface->colorFormat & SCE_GXM_COLOR_BASE_FORMAT_MASK) ==
+                              SCE_GXM_COLOR_BASE_FORMAT_U8U8U8U8 &&
+                          ((surface->colorFormat >> 20) & 3) == 0; /* ABGR == GL byte order */
 
             if (clip_x1 >= surface->width)
                 clip_x1 = surface->width - 1;
             if (clip_y1 >= surface->height)
                 clip_y1 = surface->height - 1;
+
+            /* The common Vita format (A8B8G8R8) is byte-identical to the GL
+               readback, so full-surface frames are a row-wise memcpy. */
+            if (direct && clip_x0 == 0 && clip_y0 == 0 && clip_x1 + 1 == row_pixels &&
+                clip_y1 + 1 == row_count) {
+                for (uint32_t y = 0; y < row_count; y++) {
+                    memcpy((uint8_t *)surface->data + (size_t)y * stride * 4,
+                           rgba + (size_t)(height - 1 - y) * width * 4,
+                           (size_t)row_pixels * 4);
+                }
+                free(rgba);
+                gxm_profile_frame(t_resolve, t1 - t0, t2 - t1, gxm_time_ns() - t2);
+                goto convert_done;
+            }
 
             for (uint32_t y = clip_y0; y <= clip_y1; y++) {
                 uint32_t sy = scale > 1 ? y / scale : y;
@@ -3504,9 +3656,15 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
         gxm_profile_frame(t_resolve, t1 - t0, t2 - t1, gxm_time_ns() - t2);
     }
 
-    if (context->ds_store_surface)
+convert_done:
+
+    if (context->ds_store_surface) {
+        uint64_t ds_started = gxm_time_ns();
+
         gxm_ds_store_surface((SceGxmRenderTarget *)context->render_target,
                              context->ds_store_surface);
+        g_profile_ds_ns += gxm_time_ns() - ds_started;
+    }
 
     if (fragmentNotification && fragmentNotification->address) {
         __sync_synchronize();
@@ -3531,6 +3689,9 @@ EXPORT(SceGxm, 0xEC5C26B5, int, sceGxmDisplayQueueAddEntry, SceGxmSyncObject *ol
     /* The callback is where libvita2d blits the render target to the front
        buffer, so it runs GL work on this thread. */
     host_gpu_thread_enter(g_device);
+
+    if (g_current_context)
+        gxm_batch_flush(g_current_context);
 
     if (g_display_callback && callbackData)
         g_display_callback((void *)callbackData);
@@ -4484,6 +4645,281 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
                            SceGxmIndexFormat indexType, const void *indexData,
                            unsigned int indexCount, unsigned int instances);
 
+static void gxm_fill_draw_state(SceGxmContext *context, GLuint program,
+                                SceGxmPrimitiveType prim, SceGxmIndexFormat index_format,
+                                unsigned int instances, GxmDrawState *state)
+{
+    memset(state, 0, sizeof(*state));
+    state->program = program;
+    state->color_surface = context->color_surface;
+    state->surface_width =
+        context->color_surface && context->color_surface->width ? context->color_surface->width : 960;
+    state->surface_height = context->color_surface && context->color_surface->height
+                                ? context->color_surface->height
+                                : 544;
+    state->ds_surface = context->ds_surface;
+    state->viewport_enable = context->viewport_enable;
+    state->viewport_x_offset = context->viewport_x_offset;
+    state->viewport_x_scale = context->viewport_x_scale;
+    state->viewport_y_offset = context->viewport_y_offset;
+    state->viewport_y_scale = context->viewport_y_scale;
+    state->viewport_z_offset = context->viewport_z_offset;
+    state->viewport_z_scale = context->viewport_z_scale;
+    state->region_clip_mode = context->region_clip_mode;
+    state->region_clip_xmin = context->region_clip_xmin;
+    state->region_clip_ymin = context->region_clip_ymin;
+    state->region_clip_xmax = context->region_clip_xmax;
+    state->region_clip_ymax = context->region_clip_ymax;
+    state->cull_mode = context->cull_mode;
+    state->polygon_mode = context->front_polygon_mode;
+    state->point_line_width = context->front_point_line_width;
+    state->depth_bias_factor = context->front_depth_bias_factor;
+    state->depth_bias_units = context->front_depth_bias_units;
+    state->two_sided = context->two_sided;
+    state->front_fragment_program_enable = context->front_fragment_program_enable;
+    state->back_fragment_program_enable = context->back_fragment_program_enable;
+    state->depth_func = context->depth_func;
+    state->depth_write = context->depth_write;
+    state->front_stencil_func = context->front_stencil_func;
+    state->back_stencil_func = context->back_stencil_func;
+    state->front_stencil_fail = context->front_stencil_fail;
+    state->front_stencil_depth_fail = context->front_stencil_depth_fail;
+    state->front_stencil_pass = context->front_stencil_pass;
+    state->back_stencil_fail = context->back_stencil_fail;
+    state->back_stencil_depth_fail = context->back_stencil_depth_fail;
+    state->back_stencil_pass = context->back_stencil_pass;
+    state->front_stencil_compare_mask = context->front_stencil_compare_mask;
+    state->front_stencil_write_mask = context->front_stencil_write_mask;
+    state->back_stencil_compare_mask = context->back_stencil_compare_mask;
+    state->back_stencil_write_mask = context->back_stencil_write_mask;
+    state->front_stencil_ref = context->front_stencil_ref;
+    state->back_stencil_ref = context->back_stencil_ref;
+    state->prim = prim;
+    state->index_format = index_format;
+    state->instances = instances;
+}
+
+static bool gxm_batch_matches(SceGxmContext *context, const GxmDrawState *state,
+                              uint32_t vertex_uniform_size, uint32_t fragment_uniform_size)
+{
+    const GxmDrawBatch *batch = &context->batch;
+
+    if (!batch->active)
+        return false;
+    if (memcmp(&batch->state, state, sizeof(*state)) != 0)
+        return false;
+    if (batch->vertex_uniform_size != vertex_uniform_size ||
+        batch->fragment_uniform_size != fragment_uniform_size)
+        return false;
+    if (vertex_uniform_size &&
+        memcmp(batch->vertex_uniforms, context->vertex_block_data, vertex_uniform_size) != 0)
+        return false;
+    if (fragment_uniform_size &&
+        memcmp(batch->fragment_uniforms, context->fragment_block_data, fragment_uniform_size) != 0)
+        return false;
+    if (memcmp(batch->fragment_textures, context->fragment_textures,
+               sizeof(batch->fragment_textures)) != 0)
+        return false;
+    if (memcmp(batch->vertex_textures, context->vertex_textures, sizeof(batch->vertex_textures)) !=
+        0)
+        return false;
+
+    return true;
+}
+
+static void gxm_batch_flush(SceGxmContext *context)
+{
+    GxmDrawBatch *batch = &context->batch;
+
+    if (!batch->active)
+        return;
+
+    if (batch->index_count && context->index_arena.buffer) {
+        g_gl->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, context->index_arena.buffer);
+        if (batch->state.instances > 1 && batch->gl_primitive != GL_POINTS)
+            g_gl->glDrawElementsInstanced(batch->gl_primitive, (GLsizei)batch->index_count,
+                                          batch->gl_index_type,
+                                          (const void *)(uintptr_t)batch->index_start,
+                                          (GLsizei)batch->state.instances);
+        else
+            g_gl->glDrawElements(batch->gl_primitive, (GLsizei)batch->index_count,
+                                 batch->gl_index_type,
+                                 (const void *)(uintptr_t)batch->index_start);
+
+        g_profile_draws++;
+        g_profile_vertices += batch->index_count;
+    }
+
+    batch->active = false;
+}
+
+static void gxm_batch_begin(SceGxmContext *context, const GxmLinkedProgram *linked,
+                            const GxmDrawState *state, uint32_t vertex_uniform_size,
+                            uint32_t fragment_uniform_size, GLenum gl_index_type,
+                            GLenum gl_primitive, uint32_t index_alignment)
+{
+    GxmDrawBatch *batch = &context->batch;
+    const SceGxmVertexProgram *vp = context->vertex_program;
+
+    batch->state = *state;
+    batch->gl_index_type = gl_index_type;
+    batch->gl_primitive = gl_primitive;
+    batch->index_count = 0;
+    batch->vertex_count = 0;
+    batch->draws = 0;
+
+    if (batch->vertex_uniform_size != vertex_uniform_size) {
+        free(batch->vertex_uniforms);
+        batch->vertex_uniforms = vertex_uniform_size ? malloc(vertex_uniform_size) : NULL;
+        batch->vertex_uniform_size = batch->vertex_uniforms ? vertex_uniform_size : 0;
+    }
+    if (batch->fragment_uniform_size != fragment_uniform_size) {
+        free(batch->fragment_uniforms);
+        batch->fragment_uniforms = fragment_uniform_size ? malloc(fragment_uniform_size) : NULL;
+        batch->fragment_uniform_size = batch->fragment_uniforms ? fragment_uniform_size : 0;
+    }
+    if (batch->vertex_uniforms && vertex_uniform_size)
+        memcpy(batch->vertex_uniforms, context->vertex_block_data, vertex_uniform_size);
+    if (batch->fragment_uniforms && fragment_uniform_size)
+        memcpy(batch->fragment_uniforms, context->fragment_block_data, fragment_uniform_size);
+
+    memcpy(batch->fragment_textures, context->fragment_textures,
+           sizeof(batch->fragment_textures));
+    memcpy(batch->vertex_textures, context->vertex_textures, sizeof(batch->vertex_textures));
+
+    memset(batch->stream_start, 0, sizeof(batch->stream_start));
+    for (unsigned int i = 0; i < vp->streamCount && i < SCE_GXM_MAX_VERTEX_STREAMS; i++) {
+        uint32_t stride = vp->streams[i].stride;
+
+        if (!stride)
+            continue;
+        batch->stream_start[i] =
+            gxm_arena_reserve_offset(&context->stream_arena[i], stride);
+    }
+    batch->index_start = gxm_arena_reserve_offset(&context->index_arena, index_alignment);
+
+    gxm_flush_state(context, linked, batch->stream_start);
+    batch->active = true;
+}
+
+static uint32_t gxm_batch_expanded_count(SceGxmPrimitiveType prim, unsigned int count)
+{
+    switch (prim) {
+    case SCE_GXM_PRIMITIVE_TRIANGLE_STRIP:
+    case SCE_GXM_PRIMITIVE_TRIANGLE_FAN:
+        return count >= 3 ? 3 * (count - 2) : 0;
+    default:
+        return count;
+    }
+}
+
+/*
+ * Writes the draw's indices as a triangle list (or plain lines/points) so
+ * several draws can share one GL call. A GL triangle strip cannot simply be
+ * concatenated with the next strip: that adds bridging triangles between the
+ * two strips, which is exactly how the first batching attempt corrupted text.
+ */
+static void gxm_batch_write_indices(const void *indexData, SceGxmIndexFormat format,
+                                    SceGxmPrimitiveType prim, unsigned int count, uint32_t rebase,
+                                    uint8_t *out, uint32_t index_size)
+{
+    uint32_t written = 0;
+
+    for (unsigned int i = 0; i < count; i++) {
+        uint32_t index;
+
+#define EMIT(value)                                                                                \
+    do {                                                                                           \
+        uint32_t emit_value = (value) + rebase;                                                    \
+        if (index_size == 2)                                                                       \
+            ((uint16_t *)out)[written] = (uint16_t)emit_value;                                     \
+        else                                                                                       \
+            ((uint32_t *)out)[written] = emit_value;                                               \
+        written++;                                                                                 \
+    } while (0)
+
+        index = gxm_read_index(indexData, format, i);
+
+        switch (prim) {
+        case SCE_GXM_PRIMITIVE_TRIANGLE_STRIP:
+            if (i >= 2) {
+                uint32_t k = i - 2;
+
+                if (k & 1) {
+                    EMIT(gxm_read_index(indexData, format, k + 1));
+                    EMIT(gxm_read_index(indexData, format, k));
+                } else {
+                    EMIT(gxm_read_index(indexData, format, k));
+                    EMIT(gxm_read_index(indexData, format, k + 1));
+                }
+                EMIT(gxm_read_index(indexData, format, k + 2));
+            }
+            break;
+        case SCE_GXM_PRIMITIVE_TRIANGLE_FAN:
+            if (i >= 2) {
+                EMIT(gxm_read_index(indexData, format, 0));
+                EMIT(gxm_read_index(indexData, format, i - 1));
+                EMIT(index);
+            }
+            break;
+        default:
+            EMIT(index);
+            break;
+        }
+#undef EMIT
+    }
+}
+
+static bool gxm_batch_append(SceGxmContext *context, uint32_t max_index, const void *indexData,
+                             unsigned int indexCount, uint32_t index_size)
+{
+    GxmDrawBatch *batch = &context->batch;
+    const SceGxmVertexProgram *vp = context->vertex_program;
+    uint32_t expanded = gxm_batch_expanded_count(batch->state.prim, indexCount);
+    uint32_t bytes = expanded * index_size;
+    uint32_t rebase = batch->vertex_count;
+    uint8_t *scratch;
+
+    for (unsigned int i = 0; i < vp->streamCount && i < SCE_GXM_MAX_VERTEX_STREAMS; i++) {
+        uint32_t stride = vp->streams[i].stride;
+        uint32_t size;
+
+        if (!stride)
+            continue;
+
+        size = (max_index + 1) * stride;
+        if (context->streams[i].data)
+            gxm_arena_upload(&context->stream_arena[i], GL_ARRAY_BUFFER,
+                             context->streams[i].data, size, stride);
+        else
+            gxm_arena_advance(&context->stream_arena[i], size, stride);
+    }
+
+    if (context->index_scratch_capacity < bytes) {
+        uint32_t capacity = context->index_scratch_capacity ? context->index_scratch_capacity : 4096;
+
+        while (capacity < bytes)
+            capacity *= 2;
+        free(context->index_scratch);
+        context->index_scratch = malloc(capacity);
+        context->index_scratch_capacity = context->index_scratch ? capacity : 0;
+    }
+    if (!context->index_scratch)
+        return false;
+
+    scratch = context->index_scratch;
+    gxm_batch_write_indices(indexData, batch->state.index_format, batch->state.prim, indexCount,
+                            rebase, scratch, index_size);
+
+    gxm_arena_upload(&context->index_arena, GL_ELEMENT_ARRAY_BUFFER, scratch, bytes, index_size);
+
+    batch->index_count += expanded;
+    batch->vertex_count += max_index + 1;
+    batch->draws++;
+
+    return true;
+}
+
 static int gxm_replay_commands(SceGxmContext *context, GxmCommand *command)
 {
     for (; command; command = command->next) {
@@ -4500,6 +4936,8 @@ static int gxm_replay_commands(SceGxmContext *context, GxmCommand *command)
             return result;
     }
 
+    gxm_batch_flush(context);
+
     return 0;
 }
 
@@ -4512,8 +4950,11 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
     GLenum gl_index_type;
     GLenum gl_primitive;
     size_t index_size;
+    uint32_t vertex_uniform_size, fragment_uniform_size;
     uint32_t max_index = 0;
     SceGxmPolygonMode polygon_mode;
+    GxmDrawState state;
+    bool can_merge;
     uint64_t draw_started = gxm_time_ns();
 
     host_gpu_thread_enter(g_device);
@@ -4543,19 +4984,34 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
     if (!program)
         return SCE_GXM_ERROR_INVALID_VALUE;
 
-    {
-        for (unsigned int i = 0; i < indexCount; i++) {
-            uint32_t index = gxm_read_index(indexData, indexType, i);
-            if (index > max_index)
-                max_index = index;
-        }
-
-        if (getenv("VITA2NATIVE_GL_CHECK")) {
-            while (g_gl->glGetError() != GL_NO_ERROR) {
-            }
-        }
-        gxm_flush_state(context, linked, max_index);
+    for (unsigned int i = 0; i < indexCount; i++) {
+        uint32_t index = gxm_read_index(indexData, indexType, i);
+        if (index > max_index)
+            max_index = index;
     }
+
+    polygon_mode = context->front_polygon_mode;
+
+    /* Batched draws are expanded to lists, so strips and fans become
+       GL_TRIANGLES here. */
+    switch (primType) {
+    case SCE_GXM_PRIMITIVE_TRIANGLES:
+    case SCE_GXM_PRIMITIVE_TRIANGLE_STRIP:
+    case SCE_GXM_PRIMITIVE_TRIANGLE_FAN:
+        gl_primitive = GL_TRIANGLES;
+        break;
+    case SCE_GXM_PRIMITIVE_LINES:
+        gl_primitive = GL_LINES;
+        break;
+    case SCE_GXM_PRIMITIVE_POINTS:
+        gl_primitive = GL_POINTS;
+        break;
+    default:
+        gl_primitive = gxm_primitive_to_gl(primType);
+        break;
+    }
+    if (gxm_polygon_is_point(polygon_mode))
+        gl_primitive = GL_POINTS;
 
     if (indexType == SCE_GXM_INDEX_FORMAT_U32) {
         gl_index_type = GL_UNSIGNED_INT;
@@ -4565,50 +5021,145 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
         index_size = 2;
     }
 
-    {
-        uint32_t index_offset;
+    /* Wireframe mode expands every triangle into lines; keep it unbatched. */
+    if (gxm_polygon_is_line(polygon_mode)) {
+        uint32_t wire_count = 0;
+        uint32_t *wire;
+        uint32_t stream_starts[SCE_GXM_MAX_VERTEX_STREAMS] = { 0 };
+        const SceGxmVertexProgram *vp = context->vertex_program;
 
-        index_offset = gxm_arena_upload(&context->index_arena, GL_ELEMENT_ARRAY_BUFFER, indexData,
-                                        (uint32_t)(indexCount * index_size), 4);
+        gxm_batch_flush(context);
 
-        gl_primitive = gxm_primitive_to_gl(primType);
-        polygon_mode = context->front_polygon_mode;
+        for (unsigned int i = 0; i < vp->streamCount && i < SCE_GXM_MAX_VERTEX_STREAMS; i++) {
+            const SceGxmVertexStream *s = &vp->streams[i];
 
-        if (gxm_polygon_is_line(polygon_mode)) {
-            uint32_t wire_count = 0;
-            uint32_t *wire = gxm_wireframe_indices(primType, indexType, indexData, indexCount,
-                                                   &wire_count);
+            if (s->stride)
+                gxm_arena_reserve(&context->stream_arena[i], GL_ARRAY_BUFFER,
+                                  (max_index + 1) * s->stride, s->stride);
+        }
+        gxm_arena_reserve(&context->index_arena, GL_ELEMENT_ARRAY_BUFFER,
+                          (uint32_t)(indexCount * index_size), 4);
 
-            if (wire) {
-                uint32_t wire_offset = gxm_arena_upload(&context->index_arena,
-                                                        GL_ELEMENT_ARRAY_BUFFER, wire,
-                                                        wire_count * 4, 4);
-                free(wire);
-                g_gl->glDrawElements(GL_LINES, (GLsizei)wire_count, GL_UNSIGNED_INT,
-                                     (const void *)(uintptr_t)wire_offset);
-                g_profile_draws++;
-                g_profile_vertices += indexCount;
-                g_profile_draw_ns += gxm_time_ns() - draw_started;
-                return 0;
-            }
+        for (unsigned int i = 0; i < vp->streamCount && i < SCE_GXM_MAX_VERTEX_STREAMS; i++) {
+            const SceGxmVertexStream *s = &vp->streams[i];
+            uint32_t size;
+
+            if (!s->stride)
+                continue;
+            size = (max_index + 1) * s->stride;
+            stream_starts[i] = gxm_arena_reserve_offset(&context->stream_arena[i], s->stride);
+            if (context->streams[i].data)
+                gxm_arena_upload(&context->stream_arena[i], GL_ARRAY_BUFFER,
+                                 context->streams[i].data, size, s->stride);
+            else
+                gxm_arena_advance(&context->stream_arena[i], size, s->stride);
         }
 
-        if (gxm_polygon_is_point(polygon_mode))
-            gl_primitive = GL_POINTS;
+        gxm_flush_state(context, linked, stream_starts);
 
-        if (instances > 1 && gl_primitive != GL_POINTS)
-            g_gl->glDrawElementsInstanced(gl_primitive, (GLsizei)indexCount, gl_index_type,
-                                          (const void *)(uintptr_t)index_offset,
-                                          (GLsizei)instances);
-        else
-            g_gl->glDrawElements(gl_primitive, (GLsizei)indexCount, gl_index_type,
-                                 (const void *)(uintptr_t)index_offset);
+        wire = gxm_wireframe_indices(primType, indexType, indexData, indexCount, &wire_count);
+        if (wire) {
+            uint32_t wire_offset;
+
+            gxm_arena_reserve_offset(&context->index_arena, 4);
+            wire_offset = gxm_arena_upload(&context->index_arena, GL_ELEMENT_ARRAY_BUFFER, wire,
+                                           wire_count * 4, 4);
+            free(wire);
+            g_gl->glDrawElements(GL_LINES, (GLsizei)wire_count, GL_UNSIGNED_INT,
+                                 (const void *)(uintptr_t)wire_offset);
+            g_profile_draws++;
+            g_profile_vertices += indexCount;
+            g_profile_draw_ns += gxm_time_ns() - draw_started;
+        }
+        return 0;
+    }
+
+    vertex_uniform_size = gxm_build_uniforms(context, context->vertex_program->programId, true);
+    fragment_uniform_size = gxm_build_uniforms(context, context->fragment_program->programId, false);
+
+    gxm_fill_draw_state(context, program, primType, indexType, instances, &state);
+
+    can_merge = gxm_batch_matches(context, &state, vertex_uniform_size, fragment_uniform_size);
+    if (getenv("VITA2NATIVE_NO_BATCH"))
+        can_merge = false;
+    if (can_merge) {
+        const char *limit = getenv("VITA2NATIVE_BATCH_LIMIT");
+
+        if (limit && context->batch.draws >= (uint32_t)atoi(limit))
+            can_merge = false;
+    }
+
+    /* A 16-bit index buffer cannot address vertices past 65535. */
+    if (can_merge && index_size == 2 &&
+        context->batch.vertex_count + max_index + 1 > 0xFFFFu)
+        can_merge = false;
+
+    /* Appending must not overflow an arena; growing it would discard the
+       batch's earlier vertices. */
+    if (can_merge) {
+        for (unsigned int i = 0; i < context->vertex_program->streamCount &&
+                                 i < SCE_GXM_MAX_VERTEX_STREAMS;
+             i++) {
+            const SceGxmVertexStream *s = &context->vertex_program->streams[i];
+
+            if (!s->stride)
+                continue;
+            if (!gxm_arena_fits(&context->stream_arena[i], (max_index + 1) * s->stride,
+                                s->stride))
+                can_merge = false;
+        }
+        if (!gxm_arena_fits(&context->index_arena, (uint32_t)(indexCount * index_size),
+                            (uint32_t)index_size))
+            can_merge = false;
+    }
+
+    if (!can_merge) {
+        gxm_batch_flush(context);
+
+        for (unsigned int i = 0; i < context->vertex_program->streamCount &&
+                                 i < SCE_GXM_MAX_VERTEX_STREAMS;
+             i++) {
+            const SceGxmVertexStream *s = &context->vertex_program->streams[i];
+
+            if (!s->stride)
+                continue;
+            gxm_arena_reserve(&context->stream_arena[i], GL_ARRAY_BUFFER,
+                              (max_index + 1) * s->stride, s->stride);
+        }
+        gxm_arena_reserve(&context->index_arena, GL_ELEMENT_ARRAY_BUFFER,
+                          (uint32_t)(indexCount * index_size), (uint32_t)index_size);
+
+        gxm_batch_begin(context, linked, &state, vertex_uniform_size, fragment_uniform_size,
+                        gl_index_type, gl_primitive, (uint32_t)index_size);
+    }
+
+    if (!gxm_batch_append(context, max_index, indexData, indexCount, (uint32_t)index_size)) {
+        gxm_batch_flush(context);
+        return SCE_GXM_ERROR_OUT_OF_MEMORY;
+    }
+
+    if (getenv("VITA2NATIVE_TRACE_BATCH")) {
+        static unsigned int traced;
+
+        if (traced < 24) {
+            const SceGxmVertexProgram *tvp = context->vertex_program;
+            uint32_t i0 = indexCount > 0 ? gxm_read_index(indexData, indexType, 0) : 0;
+            uint32_t i1 = indexCount > 1 ? gxm_read_index(indexData, indexType, 1) : 0;
+            const uint8_t *vd = tvp && tvp->streamCount ? context->streams[0].data : NULL;
+
+            LOG("batch draw %u: prog=%u max=%u count=%u rebase=%u stream0=%p stride0=%u "
+                "offset0=%u idx=%u,%u v0=%08x,%08x,%08x,%08x,%08x",
+                traced, program, max_index, indexCount, context->batch.vertex_count - (max_index + 1),
+                vd, tvp && tvp->streamCount ? tvp->streams[0].stride : 0,
+                tvp && tvp->attributeCount ? tvp->attributes[0].offset : 0, i0, i1,
+                vd ? ((const uint32_t *)vd)[0] : 0, vd ? ((const uint32_t *)vd)[1] : 0,
+                vd ? ((const uint32_t *)vd)[2] : 0, vd ? ((const uint32_t *)vd)[3] : 0,
+                vd ? ((const uint32_t *)vd)[4] : 0);
+            traced++;
+        }
     }
 
     gxm_gl_check("draw");
-
-    g_profile_draws++;
-    g_profile_vertices += indexCount * (instances > 1 ? instances : 1);
     g_profile_draw_ns += gxm_time_ns() - draw_started;
 
     return 0;
@@ -4979,6 +5530,9 @@ EXPORT(SceGxm, 0x69DDFF5E, int, sceGxmTransferFill, uint32_t color,
     if (!destAddress || !destWidth || !destHeight || destStride <= 0)
         return SCE_GXM_ERROR_INVALID_POINTER;
 
+    if (g_current_context)
+        gxm_batch_flush(g_current_context);
+
     for (uint32_t y = 0; y < destHeight; y++) {
         uint8_t *row = (uint8_t *)destAddress + (size_t)(destY + y) * (size_t)destStride * bpp +
                        (size_t)destX * bpp;
@@ -5029,6 +5583,9 @@ EXPORT(SceGxm, 0x62312BF8, int, sceGxmTransferCopy, uint32_t width, uint32_t hei
     if (!srcAddress || !destAddress || !width || !height)
         return SCE_GXM_ERROR_INVALID_POINTER;
 
+    if (g_current_context)
+        gxm_batch_flush(g_current_context);
+
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t *src = (const uint8_t *)srcAddress +
                              (size_t)(srcY + y) * (size_t)srcStride * src_bpp +
@@ -5062,6 +5619,9 @@ EXPORT(SceGxm, 0xD10F7EAD, int, sceGxmTransferDownscale, SceGxmTransferFormat sr
 
     if (!srcAddress || !destAddress || !srcWidth || !srcHeight || src_bpp != dst_bpp)
         return SCE_GXM_ERROR_INVALID_VALUE;
+
+    if (g_current_context)
+        gxm_batch_flush(g_current_context);
 
     for (unsigned int y = 0; y < srcHeight / 2; y++) {
         for (unsigned int x = 0; x < srcWidth / 2; x++) {
@@ -5153,6 +5713,8 @@ EXPORT(SceGxm, 0xD6A2FF2F, int, sceGxmDestroyDeferredContext, SceGxmContext *con
     context->vertex_uniform_arena = NULL;
     context->fragment_uniform_arena = NULL;
     context->deferred = false;
+    if (g_current_context == context)
+        g_current_context = NULL;
     if (context->owns_memory)
         free(context);
     return 0;

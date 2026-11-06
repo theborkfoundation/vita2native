@@ -112,12 +112,14 @@ multiarch):
 Panfrost's tiled/AFBC layouts make `glReadPixels` about twice as slow, and the
 port reads the whole frame back every frame for `sceDisplaySetFrameBuf`.
 
-Performance is usable but not yet at native speed on that board: VitaShell
-runs at ~3 fps. The measured frame budget is dominated by the GPU 
-transition/readback (~160 ms), 847 small draws (~100 ms of CPU in GL setup) and
-the guest-surface conversion (~25 ms). `VITA2NATIVE_PROFILE=1` prints that
-breakdown, `VITA2NATIVE_FPS=1` prints the frame rate, `VITA2NATIVE_TRACE_TEXTURES=1`
-logs texture uploads, and `tests/gpu_bench.c` measures the driver in isolation.
+Performance on that board: VitaShell runs at ~4.8 fps. Consecutive GXM draws
+that share program, textures, uniforms and render state are merged into one GL
+draw (847 guest draws become ~119 GL draws per frame); triangle strips are
+expanded to triangle lists when merging, because concatenating two strips would
+add bridging triangles. `VITA2NATIVE_PROFILE=1` prints the frame breakdown,
+`VITA2NATIVE_FPS=1` prints the frame rate, `VITA2NATIVE_TRACE_TEXTURES=1`
+logs texture uploads, `VITA2NATIVE_NO_BATCH=1` disables draw batching and
+`tests/gpu_bench.c` measures the driver in isolation.
 
 ### Headless capture and scripted input
 
