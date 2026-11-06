@@ -384,9 +384,15 @@ EXPORT(SceLibKernel, 0x9C8B6624, int, sceIoDread, SceUID fd, SceIoDirent *dirent
     if (!vdir)
         return SCE_ERROR_ERRNO_EBADF;
 
-    de = readdir(vdir->dir);
-    if (!de)
-        return 0;
+    /* Vita callers (VitaShell included) add their own ".." entry and recurse
+       through every name returned here. The host readdir supplies ``.'' and
+       ``..''; returning them would duplicate the parent row and can make a
+       recursive copy/remove walk the parent tree. */
+    do {
+        de = readdir(vdir->dir);
+        if (!de)
+            return 0;
+    } while (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0);
 
     if (strcmp(vdir->path, "/") == 0) {
         path = de->d_name;
