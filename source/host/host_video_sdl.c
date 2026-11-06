@@ -164,6 +164,8 @@ typedef struct {
 #define SDL_SCANCODE_2 31
 #define SDL_SCANCODE_RETURN 40
 #define SDL_SCANCODE_BACKSPACE 42
+#define SDL_SCANCODE_TAB 43
+#define SDL_SCANCODE_SPACE 44
 #define SDL_SCANCODE_RIGHT 79
 #define SDL_SCANCODE_LEFT 80
 #define SDL_SCANCODE_DOWN 81
@@ -528,6 +530,8 @@ static unsigned int keyboard_button_mask(const unsigned char *keys, int numkeys)
     KEY(SDL_SCANCODE_E, SCE_CTRL_R1);
     KEY(SDL_SCANCODE_1, SCE_CTRL_L2);
     KEY(SDL_SCANCODE_2, SCE_CTRL_R2);
+    KEY(SDL_SCANCODE_TAB, SCE_CTRL_SELECT);
+    KEY(SDL_SCANCODE_SPACE, SCE_CTRL_START);
 
 #undef KEY
     return mask;

@@ -134,8 +134,9 @@ Input follows the same split. While SDL video is running, its dedicated video
 thread samples input too: keyboards, plus pads that SDL recognises through its
 controller database, with a raw-joystick fallback for unknown devices. Keyboard
 mapping is arrows for the D-pad, `Z`/`Enter` = cross, `X`/`Backspace` = circle,
-`A` = square, `S` = triangle, `Q`/`E` = L1/R1 and `1`/`2` = L2/R2. Presses are
-latched until the guest polls, so a tap is not lost on a title running at 1 fps.
+`A` = square, `S` = triangle, `Q`/`E` = L1/R1, `1`/`2` = L2/R2 and `Tab`/
+`Space` = Select/Start. Presses are latched until the guest polls, so a tap is
+not lost on a title running at 1 fps.
 `VITA2NATIVE_CTRL_SWAP_AB` swaps cross/circle on all sources, and
 `VITA2NATIVE_INPUT_DEBUG=1` logs the mapping (`SDL mapping ...` shows the
 mapping SDL picked for a controller). The same video-thread poll reads the

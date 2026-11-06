@@ -283,6 +283,10 @@ static unsigned int key_to_button(unsigned int code)
         return SCE_CTRL_L1;
     case KEY_E:
         return SCE_CTRL_R1;
+    case KEY_TAB:
+        return SCE_CTRL_SELECT;
+    case KEY_SPACE:
+        return SCE_CTRL_START;
     default:
         return 0;
     }
