@@ -133,6 +133,13 @@ automatically (`VITA2NATIVE_DRM`, `VITA2NATIVE_FBDEV`,
 starting the emulator. On this board VitaShell renders on the panel at ~1.3 fps;
 the blob's per-draw overhead is the bottleneck (about 5 ms per `glDrawElements`).
 
+The headless build now also reads the pad directly from evdev
+(`/dev/input/event*`), so the R36S controls work without SDL: face buttons,
+D-pad, shoulders, `BTN_SELECT/START`, the F1–F5 buttons and both sticks.
+`VITA2NATIVE_INPUT_DEBUG=1` logs the code-to-button mapping and
+`VITA2NATIVE_CTRL_SWAP_AB` swaps cross/circle; scripted input still works and is
+ORed with the physical pad.
+
 ### Headless capture and scripted input
 
 Headless builds can dump guest framebuffers as BMP and drive the pad from a

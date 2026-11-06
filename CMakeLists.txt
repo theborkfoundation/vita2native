@@ -378,6 +378,11 @@ if(BUILD_TESTING)
         _FILE_OFFSET_BITS=64
     )
 
+    # Virtual gamepad used to validate the evdev input path without touching
+    # the hardware (needs /dev/uinput and usually root).
+    add_executable(uinput_pad tests/uinput_pad.c)
+    target_compile_definitions(uinput_pad PRIVATE _GNU_SOURCE=1)
+
     add_executable(audio_smoke
         tests/audio_smoke.c
         source/modules/SceAudio.c
