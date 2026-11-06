@@ -108,6 +108,8 @@ struct HostVideo {
     int texture_height;
     int width;
     int height;
+    int window_width;
+    int window_height;
     bool stretch;
     bool windowed;
 };
@@ -173,7 +175,8 @@ static bool video_init_sdl(HostVideo *video)
         window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
 
     video->window = api->create_window("vita2native", SDL_WINDOWPOS_UNDEFINED,
-                                       SDL_WINDOWPOS_UNDEFINED, 960, 544, window_flags);
+                                       SDL_WINDOWPOS_UNDEFINED, video->window_width,
+                                       video->window_height, window_flags);
     if (!video->window) {
         fprintf(stderr, "vita2native: SDL window creation failed: %s\n", api->get_error());
         return false;
@@ -317,6 +320,23 @@ HostVideo *host_video_open(void)
     video->api = api;
     video->stretch = getenv("VITA2NATIVE_STRETCH") != NULL;
     video->windowed = getenv("VITA2NATIVE_SDL_WINDOWED") != NULL;
+    video->window_width = 960;
+    video->window_height = 544;
+
+    /* VITA2NATIVE_SDL_SIZE=480x272 makes the window smaller (X11 forwarding
+       and remote testing); the guest frame is still scaled/letterboxed. */
+    {
+        const char *size = getenv("VITA2NATIVE_SDL_SIZE");
+
+        if (size && sscanf(size, "%dx%d", &video->window_width, &video->window_height) != 2) {
+            video->window_width = 960;
+            video->window_height = 544;
+        }
+        if (video->window_width < 64 || video->window_height < 64) {
+            video->window_width = 960;
+            video->window_height = 544;
+        }
+    }
 
     pthread_mutex_init(&video->lock, NULL);
     pthread_cond_init(&video->cond, NULL);

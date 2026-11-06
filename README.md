@@ -148,6 +148,30 @@ guest's rendering context.
 `VITA2NATIVE_STRETCH=1` fills the display and `VITA2NATIVE_SDL_WINDOWED=1` keeps
 a window instead of going fullscreen.
 
+### Remote testing over X11
+
+Launch XQuartz, then connect with a local `DISPLAY` so ssh requests forwarding:
+
+```sh
+open -a XQuartz            # once
+DISPLAY=:0 ssh -X opiz3
+```
+
+On the device:
+
+```sh
+cd /tmp/v2n-run
+LD_LIBRARY_PATH=/usr/lib/arm-linux-gnueabihf \
+SDL_VIDEODRIVER=x11 VITA2NATIVE_SDL_WINDOWED=1 \
+/tmp/v2n-arm/vita2native-rel /tmp/VitaShell.vpk
+```
+
+`VITA2NATIVE_SDL_SIZE=480x272` uses a smaller window. The guest's GLES context
+stays offscreen (surfaceless with Panfrost or the vendor blob); only
+presentation goes through SDL's X11 driver. That split is deliberate: if the GL
+context is created on the X11 EGL platform, Mesa uses llvmpipe over the
+forwarded connection, which is roughly 5x slower and can crash in LLVM.
+
 ### Headless capture and scripted input
 
 Headless builds can dump guest framebuffers as BMP and drive the pad from a

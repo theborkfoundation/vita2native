@@ -426,6 +426,11 @@ void SceDisplay_get_window_size(int *width, int *height)
 int SceDisplay_init(HostGpuDevice device)
 {
     (void)device;
+
+    /* Bring SDL up before guest threads start rendering. SDL's X11/GLX
+       initialisation and the guest's llvmpipe shader JIT both touch LLVM, and
+       letting them run concurrently crashes in llvmpipe's MCJIT. */
+    display_video();
     return 0;
 }
 

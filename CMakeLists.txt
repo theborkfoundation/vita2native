@@ -164,6 +164,12 @@ set_source_files_properties(external/sqlite/sqlite3.c PROPERTIES COMPILE_OPTIONS
 
 if(NOT VITA2NATIVE_HEADLESS)
     target_compile_definitions(vita2native PRIVATE VITA2NATIVE_HAVE_SDL2=1)
+else()
+    # Presentation is the headless display backend's job (SDL); the GLES
+    # context must stay offscreen even when DISPLAY is set, otherwise an X11
+    # DISPLAY moves EGL to the windowing platform and every GL call round-trips
+    # through the X server.
+    target_compile_definitions(vita2native PRIVATE VITA2NATIVE_HEADLESS_BUILD=1)
 endif()
 
 target_compile_options(vita2native PRIVATE

@@ -10,7 +10,15 @@
 #define HOST_MAX_THREADS 1024
 #define HOST_MAX_TLS     128
 
-#define HOST_THREAD_STACK_MIN (64 * 1024)
+/*
+ * Guest threads are host threads, and their guest-requested stack sizes are
+ * often small (64 KiB). That is fine for guest code, but host-side code that
+ * runs on those threads (Mesa's llvmpipe JIT compiles shaders on the calling
+ * thread) needs a lot more stack; LLVM overflows a 64 KiB stack in
+ * TargetLoweringBase::initActions. The guest's stack size is not emulated, so
+ * a roomier host stack is harmless.
+ */
+#define HOST_THREAD_STACK_MIN (1024 * 1024)
 #define HOST_THREAD_STACK_MAX (8 * 1024 * 1024)
 
 #if defined(__linux__)
