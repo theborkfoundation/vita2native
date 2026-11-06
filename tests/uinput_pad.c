@@ -88,12 +88,13 @@ int main(int argc, char **argv)
 {
     struct uinput_user_dev device;
     long delay = argc > 1 ? strtol(argv[1], NULL, 0) : 10;
+    long hold_ms = argc > 3 ? strtol(argv[3], NULL, 0) : 1800;
     char *list;
     char *token;
     int result;
 
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <delay-seconds> <button>[,<button>...]\n", argv[0]);
+        fprintf(stderr, "usage: %s <delay-seconds> <button>[,<button>...] [hold-ms]\n", argv[0]);
         return 1;
     }
 
@@ -162,8 +163,10 @@ int main(int argc, char **argv)
         emit(EV_KEY, code, 1);
         sync_event();
         /* Guest frames can be much slower than a human tap (VitaShell runs at
-           ~1.3 fps on the R36S), so hold each button long enough to be seen. */
-        sleep_ms(1800);
+           ~1.3 fps on the R36S), so hold each button long enough to be seen.
+           The emulator also latches presses until the guest samples them, so a
+           short hold still works. */
+        sleep_ms(hold_ms);
         emit(EV_KEY, code, 0);
         sync_event();
         sleep_ms(800);

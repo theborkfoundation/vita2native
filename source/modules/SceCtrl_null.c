@@ -72,10 +72,16 @@ static bool g_have_pad;
 static bool g_swap_ab;
 
 static unsigned int g_pad_buttons;
+/* Presses that happened since the last peek. The guest may poll the pad as
+   rarely as once per rendered frame (VitaShell does, at ~1.3 fps on the R36S),
+   so a human tap would otherwise be released before it was ever sampled. */
+static unsigned int g_pending_presses;
 static uint8_t g_lx = 128;
 static uint8_t g_ly = 128;
 static uint8_t g_rx = 128;
 static uint8_t g_ry = 128;
+static unsigned long long g_peek_calls;
+static unsigned int g_peek_logged_buttons;
 
 static const struct {
     const char *name;
@@ -343,6 +349,15 @@ static void *input_thread(void *arg)
             struct input_event event;
             struct input_absinfo range;
 
+            if (g_fds[i] < 0)
+                continue;
+
+            /* A uinput pad can disappear while we are reading it. */
+            if (pollfds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+                close(g_fds[i]);
+                g_fds[i] = -1;
+                continue;
+            }
             if (!(pollfds[i].revents & POLLIN))
                 continue;
 
@@ -357,10 +372,14 @@ static void *input_thread(void *arg)
                                 event.code, event.value ? "down" : "up", mask);
 
                     pthread_mutex_lock(&g_lock);
-                    if (event.value)
+                    if (event.value) {
                         g_pad_buttons |= mask;
-                    else
+                        /* value 2 is autorepeat, not a new press. */
+                        if (event.value == 1)
+                            g_pending_presses |= mask;
+                    } else {
                         g_pad_buttons &= ~mask;
+                    }
                     pthread_mutex_unlock(&g_lock);
                 } else if (event.type == EV_ABS) {
                     memset(&range, 0, sizeof(range));
@@ -424,12 +443,25 @@ EXPORT(SceCtrl, 0xA9C3CED6, int, sceCtrlPeekBufferPositive, int port, SceCtrlDat
         script_update();
 
     pthread_mutex_lock(&g_lock);
-    pad_data->buttons = g_pad_buttons | g_script_buttons;
+    pad_data->buttons = g_pad_buttons | g_pending_presses | g_script_buttons;
+    g_pending_presses = 0;
     pad_data->lx = g_lx;
     pad_data->ly = g_ly;
     pad_data->rx = g_rx;
     pad_data->ry = g_ry;
     pthread_mutex_unlock(&g_lock);
+
+    if (g_debug) {
+        /* Rate-limited so a 60 Hz guest does not flood the log: always report a
+           state change, otherwise a heartbeat every ~600 polls. */
+        g_peek_calls++;
+        if (pad_data->buttons != g_peek_logged_buttons ||
+            (g_peek_calls % 600) == 0) {
+            fprintf(stderr, "vita2native: SceCtrl peek #%llu buttons=0x%x\n",
+                    g_peek_calls, pad_data->buttons);
+            g_peek_logged_buttons = pad_data->buttons;
+        }
+    }
 
     pad_data->timeStamp = host_monotonic_ns() / 1000;
 
