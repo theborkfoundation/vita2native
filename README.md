@@ -91,9 +91,11 @@ Guest code runs natively in the host process; there is no sandbox or isolation.
 ### Tested homebrew
 
 VitaShell, PixelChess, Pong, VitaSudoku, Minesweeper, ElevenMPV and the VitaSDK
-AvPlayer sample load with **zero unresolved imports**. VitaShell, PixelChess
-and Pong have been rendered end-to-end under QEMU with Mesa softpipe; the other
-titles reach their main loop and start GXM work.
+AvPlayer sample load with **zero unresolved imports**. VitaShell, PixelChess,
+Pong, Minesweeper and VitaSudoku have been rendered end-to-end under QEMU with
+Mesa softpipe; the other titles reach their main loop and start GXM work.
+VitaSudoku expects `ux0:/data/VitaSudoku` to exist (its Lua script does not
+handle a missing directory), so create that directory before testing it.
 
 ### Headless capture and scripted input
 
