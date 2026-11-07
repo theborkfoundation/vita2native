@@ -26,6 +26,13 @@ typedef struct {
     void *code_rx;
     void *code_rw;
     void *data_addr;
+    void *exidx_top;
+    void *exidx_btm;
+    void *extab_top;
+    void *extab_btm;
+    void *tls_init;
+    uint32_t tls_filesz;
+    uint32_t tls_memsz;
     LoadedSegment segments[LOAD_MAX_SEGMENTS];
     int num_segments;
 } LoadedModuleInfo;

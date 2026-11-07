@@ -594,6 +594,24 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
         info->module_segment = segment_base;
         strncpy(info->name, mod_info->name, sizeof(info->name) - 1);
         info->attributes = mod_info->attributes;
+        /* exidx/extab offsets are relative to the segment that hosts the
+           module info (the code segment); tls_start is relative to the same
+           segment's load address. */
+        info->exidx_top = mod_info->exidx_top
+                              ? (void *)(segments[mod_info_idx].rx_addr + mod_info->exidx_top)
+                              : NULL;
+        info->exidx_btm = mod_info->exidx_end
+                              ? (void *)(segments[mod_info_idx].rx_addr + mod_info->exidx_end)
+                              : NULL;
+        info->extab_top = mod_info->extab_top
+                              ? (void *)(segments[mod_info_idx].rx_addr + mod_info->extab_top)
+                              : NULL;
+        info->extab_btm = mod_info->extab_end
+                              ? (void *)(segments[mod_info_idx].rx_addr + mod_info->extab_end)
+                              : NULL;
+        info->tls_init = mod_info->tls_start ? (void *)(segment_base + mod_info->tls_start) : NULL;
+        info->tls_filesz = mod_info->tls_filesz;
+        info->tls_memsz = mod_info->tls_memsz;
         if (mod_info->module_stop != 0 && mod_info->module_stop != 0xFFFFFFFFu)
             info->module_stop = (void *)(segments[mod_info_idx].rx_addr + mod_info->module_stop);
         else

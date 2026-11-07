@@ -44,13 +44,25 @@ typedef struct {
     Jit jit;
     void *entry;
     void *stop_entry;
+    char host_path[512];
     LoadedModuleInfo loader;
 } VitaModuleInfo;
 
 static VitaModuleInfo g_modules[VITA_MODULE_SLOTS];
 static pthread_mutex_t g_modules_lock = PTHREAD_MUTEX_INITIALIZER;
 
+static bool trace_module_lookups(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_TRACE_MODULE_LOOKUPS") != NULL;
+
+    return enabled != 0;
+}
+
 static int module_start(VitaModuleInfo *module, SceSize args, void *argp, int *status);
+static void module_dump_code(const VitaModuleInfo *module);
 
 static VitaModuleInfo *module_find_locked(SceUID uid)
 {
@@ -113,6 +125,21 @@ static SceUID module_load(const char *path)
         return ret;
 
     pthread_mutex_lock(&g_modules_lock);
+    for (int i = 0; i < VITA_MODULE_SLOTS; i++) {
+        VitaModuleInfo *existing = &g_modules[i];
+
+        if (!existing->used || strcmp(existing->host_path, host_path) != 0)
+            continue;
+
+        /* The firmware keeps one image per file: loading it again only takes
+           another reference. Unity re-loads its Media/Modules copies even
+           though the application loader already started them. */
+        existing->refs++;
+        pthread_mutex_unlock(&g_modules_lock);
+        LOG("Module \"%s\" is already loaded as 0x%x", path, existing->uid);
+        return existing->uid;
+    }
+
     module = module_alloc_slot();
     pthread_mutex_unlock(&g_modules_lock);
 
@@ -126,6 +153,7 @@ static SceUID module_load(const char *path)
         return SCE_KERNEL_ERROR_MODULEMGR_NOENT;
     }
 
+    snprintf(module->host_path, sizeof(module->host_path), "%s", host_path);
     strncpy(module->loader.path, path, sizeof(module->loader.path) - 1);
     module->loader.path[sizeof(module->loader.path) - 1] = '\0';
     module->entry = entry;
@@ -135,7 +163,31 @@ static SceUID module_load(const char *path)
     LOG("Loaded module \"%s\" as 0x%x (entry %p)", module->loader.name, module->uid,
         module->entry);
 
+    module_dump_code(module);
+
     return module->uid;
+}
+
+static void module_dump_code(const VitaModuleInfo *module)
+{
+    const char *dir = getenv("VITA2NATIVE_DUMP_MODULE_CODE");
+    char path[PATH_MAX];
+    FILE *file;
+
+    if (!dir || !module->jit.rx || !module->jit.size)
+        return;
+
+    if (snprintf(path, sizeof(path), "%s/%03x-%s.bin", dir, module->uid,
+                 module->loader.name) >= (int)sizeof(path))
+        return;
+
+    file = fopen(path, "wb");
+    if (!file)
+        return;
+
+    fwrite(module->jit.rx, 1, module->jit.size, file);
+    fclose(file);
+    LOG("Dumped module code to %s", path);
 }
 
 /* Returns the UID of an already loaded module with the same name, or -1. */
@@ -478,6 +530,13 @@ static int module_get_info(VitaModuleInfo *module, SceKernelModuleInfo *info)
     strncpy(info->module_name, module->loader.name, sizeof(info->module_name) - 1);
     info->start_entry = module->entry;
     info->stop_entry = module->stop_entry;
+    info->exidx_top = module->loader.exidx_top;
+    info->exidx_btm = module->loader.exidx_btm;
+    info->extab_top = module->loader.extab_top;
+    info->extab_btm = module->loader.extab_btm;
+    info->tlsInit = module->loader.tls_init;
+    info->tlsInitSize = module->loader.tls_filesz;
+    info->tlsAreaSize = module->loader.tls_memsz;
     strncpy(info->path, module->loader.path, sizeof(info->path) - 1);
     info->state = (SceUInt)module->state;
 
@@ -497,6 +556,8 @@ EXPORT(SceLibKernel, 0xBBE82155, SceUID, sceKernelLoadModule, const char *path, 
 {
     (void)flags;
     (void)option;
+    if (trace_module_lookups())
+        LOG("LoadModule(\"%s\")", path ? path : "(null)");
     return module_load(path);
 }
 
@@ -516,6 +577,9 @@ EXPORT(SceLibKernel, 0x702425D5, int, sceKernelStartModule, SceUID modid, SceSiz
 
     (void)flags;
     (void)option;
+
+    if (trace_module_lookups())
+        LOG("StartModule(0x%x)", modid);
 
     pthread_mutex_lock(&g_modules_lock);
     module = module_find_locked(modid);
@@ -547,11 +611,30 @@ EXPORT(SceModulemgr, 0x72CD301F, int, _sceKernelStartModule, SceUID modid, SceSi
 EXPORT(SceLibKernel, 0x2DCC4AFA, SceUID, sceKernelLoadStartModule, const char *path, SceSize args,
        void *argp, int flags, SceKernelLMOption *option, int *status)
 {
-    SceUID modid = module_load(path);
+    SceUID modid;
     int ret;
+
+    if (trace_module_lookups())
+        LOG("LoadStartModule(\"%s\")", path ? path : "(null)");
+
+    modid = module_load(path);
 
     if (modid < 0)
         return modid;
+
+    pthread_mutex_lock(&g_modules_lock);
+    {
+        VitaModuleInfo *already = module_find_locked(modid);
+
+        if (already && already->state == SCE_KERNEL_MODULE_STATE_STARTED) {
+            pthread_mutex_unlock(&g_modules_lock);
+            LOG("LoadStartModule: 0x%x is already started", modid);
+            if (status)
+                *status = 0;
+            return modid;
+        }
+    }
+    pthread_mutex_unlock(&g_modules_lock);
 
     ret = sceKernelStartModule(modid, args, argp, flags, option, status);
     if (ret < 0) {
@@ -702,6 +785,13 @@ EXPORT(SceModulemgr, 0x36585DAF, int, sceKernelGetModuleInfo, SceUID modid,
     pthread_mutex_lock(&g_modules_lock);
     module = module_find_locked(modid);
     ret = module ? module_get_info(module, info) : SCE_KERNEL_ERROR_MODULEMGR_NO_MOD;
+    if (trace_module_lookups()) {
+        static int traced;
+
+        if (traced++ < 32)
+            LOG("GetModuleInfo(0x%x) -> 0x%x (%s)", modid, ret,
+                module ? module->loader.name : "unknown");
+    }
     pthread_mutex_unlock(&g_modules_lock);
 
     return ret;
@@ -710,6 +800,8 @@ EXPORT(SceModulemgr, 0x36585DAF, int, sceKernelGetModuleInfo, SceUID modid,
 EXPORT(SceLibKernel, 0xD11A5103, int, sceKernelGetModuleInfoByAddr, void *addr,
        SceKernelModuleInfo *info)
 {
+    int ret = SCE_KERNEL_ERROR_MODULEMGR_NO_MOD;
+
     for (int i = 0; i < VITA_MODULE_SLOTS; i++) {
         VitaModuleInfo *module = &g_modules[i];
 
@@ -718,11 +810,30 @@ EXPORT(SceLibKernel, 0xD11A5103, int, sceKernelGetModuleInfoByAddr, void *addr,
         if (addr >= module->loader.code_rx &&
             (uintptr_t)addr < (uintptr_t)module->loader.code_rx +
                                  (uintptr_t)module->jit.size) {
-            return module_get_info(module, info);
+            ret = module_get_info(module, info);
+
+            if (trace_module_lookups()) {
+                static int traced;
+
+                if (traced++ < 32)
+                    LOG("GetModuleInfoByAddr(%p) -> %s exidx %p-%p extab %p-%p", addr,
+                        module->loader.name, info ? info->exidx_top : NULL,
+                        info ? info->exidx_btm : NULL, info ? info->extab_top : NULL,
+                        info ? info->extab_btm : NULL);
+            }
+
+            return ret;
         }
     }
 
-    return SCE_KERNEL_ERROR_MODULEMGR_NO_MOD;
+    if (trace_module_lookups()) {
+        static int traced;
+
+        if (traced++ < 32)
+            LOG("GetModuleInfoByAddr(%p) -> no module", addr);
+    }
+
+    return ret;
 }
 
 EXPORT(SceModulemgr, 0xF5798C7C, SceUID, sceKernelGetModuleIdByAddr, void *addr)
@@ -735,8 +846,23 @@ EXPORT(SceModulemgr, 0xF5798C7C, SceUID, sceKernelGetModuleIdByAddr, void *addr)
         if (addr >= module->loader.code_rx &&
             (uintptr_t)addr < (uintptr_t)module->loader.code_rx +
                                  (uintptr_t)module->jit.size) {
+            if (trace_module_lookups()) {
+                static int traced;
+
+                if (traced++ < 32)
+                    LOG("GetModuleIdByAddr(%p) -> 0x%x (%s)", addr, module->uid,
+                        module->loader.name);
+            }
+
             return module->uid;
         }
+    }
+
+    if (trace_module_lookups()) {
+        static int traced;
+
+        if (traced++ < 32)
+            LOG("GetModuleIdByAddr(%p) -> no module", addr);
     }
 
     return SCE_KERNEL_ERROR_MODULEMGR_NO_MOD;
