@@ -146,6 +146,10 @@ EXPORT(SceLibKernel, 0x1BD67366, SceUID, sceKernelCreateSema, const char *name, 
 
     (void)option;
 
+    if (trace_sync())
+        LOG("SemaCreate \"%s\" init=%d max=%d thid=0x%x", name ? name : "(null)", init_count,
+            max_count, trace_thread_uid());
+
     if (init_count < 0 || max_count <= 0 || init_count > max_count)
         return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
 
@@ -223,6 +227,10 @@ EXPORT(SceThreadmgr, 0xE6B761D1, int, sceKernelSignalSema, SceUID uid, int signa
 {
     VitaSemaInfo *sema = sema_lookup(uid);
 
+    if (trace_sync())
+        LOG("SemaSignal uid=0x%x signal=%d thid=0x%x ra=%p", uid, signal,
+            trace_thread_uid(), __builtin_return_address(0));
+
     if (!sema)
         return SCE_KERNEL_ERROR_UNKNOWN_SEMA_ID;
     if (signal < 0)
@@ -281,6 +289,10 @@ EXPORT(SceThreadmgr, 0x866EF048, int, sceKernelPollSema, SceUID uid, int signal)
 {
     VitaSemaInfo *sema = sema_lookup(uid);
 
+    if (trace_sync())
+        LOG("SemaPoll uid=0x%x signal=%d thid=0x%x ra=%p", uid, signal, trace_thread_uid(),
+            __builtin_return_address(0));
+
     if (!sema)
         return SCE_KERNEL_ERROR_UNKNOWN_SEMA_ID;
     if (signal <= 0)
@@ -302,15 +314,22 @@ EXPORT(SceLibKernel, 0x66D6BF05, int, sceKernelCancelSema, SceUID uid, int set_c
 {
     VitaSemaInfo *sema = sema_lookup(uid);
 
+    if (trace_sync())
+        LOG("SemaCancel uid=0x%x set=%d thid=0x%x ra=%p", uid, set_count, trace_thread_uid(),
+            __builtin_return_address(0));
+
     if (!sema)
         return SCE_KERNEL_ERROR_UNKNOWN_SEMA_ID;
-    if (set_count < 0 || set_count > sema->max_count)
+    /* -1 means "leave the count unchanged", which is what pthread uses when
+       cancelling a semaphore. */
+    if (set_count < -1 || set_count > sema->max_count)
         return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
 
     pthread_mutex_lock(&sema->mutex);
     if (num_wait_threads)
         *num_wait_threads = sema->waiting;
-    sema->count = set_count;
+    if (set_count >= 0)
+        sema->count = set_count;
     pthread_cond_broadcast(&sema->cond);
     pthread_mutex_unlock(&sema->mutex);
 
@@ -851,6 +870,10 @@ EXPORT(SceLibKernel, 0xDA6EC8EF, int, sceKernelCreateLwMutex, SceKernelLwMutexWo
 
     (void)option;
 
+    if (trace_sync())
+        LOG("LwMutexCreate work=%p name=\"%s\" attr=0x%x init=%d thid=0x%x", work,
+            name ? name : "(null)", attr, init_count, sync_current_thread_uid());
+
     if (!work)
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     if (init_count < 0)
@@ -922,6 +945,11 @@ EXPORT(SceLibKernel, 0x46E7BE7B, int, sceKernelLockLwMutex, SceKernelLwMutexWork
 
     (void)timeout;
 
+    if (trace_sync())
+        LOG("LwMutexLock work=%p count=%d timeout=%p data0=%llx thid=0x%x", work, count,
+            (void *)timeout, work ? (unsigned long long)work->data[0] : 0ull,
+            sync_current_thread_uid());
+
     if (!work)
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
 
@@ -930,10 +958,6 @@ EXPORT(SceLibKernel, 0x46E7BE7B, int, sceKernelLockLwMutex, SceKernelLwMutexWork
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     if (count < 0)
         return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
-
-    if (trace_sync())
-        LOG("LwMutexLock work=%p data0=%llx count=%d thid=0x%x", work,
-            (unsigned long long)work->data[0], count, sync_current_thread_uid());
 
     lw->waiting++;
     for (int i = 0; i < count; i++)
@@ -981,6 +1005,10 @@ EXPORT(SceLibKernel, 0x91FA6614, int, sceKernelUnlockLwMutex, SceKernelLwMutexWo
        int count)
 {
     VitaLwMutex *lw;
+
+    if (trace_sync())
+        LOG("LwMutexUnlock work=%p count=%d thid=0x%x", work, count,
+            sync_current_thread_uid());
 
     if (!work)
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;

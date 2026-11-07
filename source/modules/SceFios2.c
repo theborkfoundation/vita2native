@@ -103,7 +103,8 @@ static int trace_fios(void)
 static int fios_result(const char *what, const char *path, int result)
 {
     if (trace_fios())
-        LOG("Fios%s(\"%s\") -> 0x%x", what, path ? path : "(null)", (unsigned)result);
+        LOG("Fios%s(\"%s\") -> 0x%x ra=%p", what, path ? path : "(null)", (unsigned)result,
+            __builtin_return_address(0));
     return result;
 }
 

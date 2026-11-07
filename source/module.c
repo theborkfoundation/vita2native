@@ -44,11 +44,27 @@ typedef struct {
     void *address;
 } host_var_export_t;
 
+/* Cells published for SceLibc's stdio/ctype variable imports. SceLibc fills
+   them at startup; the standalone module tests link without it. */
+void *g_vita_libc_stdin_cell;
+void *g_vita_libc_stdout_cell;
+void *g_vita_libc_stderr_cell;
+void *g_vita_libc_touptab_cell;
+void *g_vita_libc_tolotab_cell;
+void *g_vita_libc_ctype_cell;
+
 static const host_var_export_t g_host_var_exports[] = {
     /* SceLibstdcxx: std::nothrow */
     { 0xf7629240, 0xbfef56b5, &g_nothrow_tag },
     /* SceLibcParam: __sce_libcparam */
     { 0x5ad9c136, 0xdf084dfa, &g_sce_libc_param },
+    /* SceLibc: stdio and ctype globals */
+    { 0xbe43bb07, 0x66b7406c, &g_vita_libc_stdin_cell },
+    { 0xbe43bb07, 0x5d8c1282, &g_vita_libc_stdout_cell },
+    { 0xbe43bb07, 0xddf9bb09, &g_vita_libc_stderr_cell },
+    { 0xbe43bb07, 0x36878958, &g_vita_libc_touptab_cell },
+    { 0xbe43bb07, 0xd662e07c, &g_vita_libc_tolotab_cell },
+    { 0xbe43bb07, 0x3ce6109d, &g_vita_libc_ctype_cell },
 };
 
 static void add_dependent(guest_library_t *lib, void *importer)

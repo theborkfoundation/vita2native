@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <malloc.h>
 #include <math.h>
+#include <pthread.h>
 #include <psp2/types.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -507,62 +508,179 @@ EXPORT(SceLibc, 0x2ff5d5bb, size_t, sce_mspace_malloc_stats_fast, SceMSpace mspa
 /* stdio                                                                     */
 /* ------------------------------------------------------------------------- */
 
+static int trace_fileio(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_TRACE_FILEIO") != NULL;
+    return enabled;
+}
+
+/*
+ * Guest modules sometimes keep their own newlib `FILE` structures (the libc
+ * module reassigns `_Stderr` during startup, for instance). Those must never
+ * reach the host stdio functions, so track every stream this module opened and
+ * route anything else to the host standard streams.
+ */
+#define VITA_HOST_FILES 256
+
+static FILE *g_vita_host_files[VITA_HOST_FILES];
+static pthread_mutex_t g_vita_host_files_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static bool vita_is_host_file(FILE *fp)
+{
+    bool found = false;
+
+    if (!fp)
+        return false;
+    if (fp == stdin || fp == stdout || fp == stderr)
+        return true;
+
+    pthread_mutex_lock(&g_vita_host_files_lock);
+    for (int i = 0; i < VITA_HOST_FILES; i++) {
+        if (g_vita_host_files[i] == fp) {
+            found = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_vita_host_files_lock);
+
+    return found;
+}
+
+static void vita_track_host_file(FILE *fp)
+{
+    if (!fp)
+        return;
+
+    pthread_mutex_lock(&g_vita_host_files_lock);
+    for (int i = 0; i < VITA_HOST_FILES; i++) {
+        if (!g_vita_host_files[i]) {
+            g_vita_host_files[i] = fp;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_vita_host_files_lock);
+}
+
+static void vita_untrack_host_file(FILE *fp)
+{
+    pthread_mutex_lock(&g_vita_host_files_lock);
+    for (int i = 0; i < VITA_HOST_FILES; i++) {
+        if (g_vita_host_files[i] == fp) {
+            g_vita_host_files[i] = NULL;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_vita_host_files_lock);
+}
+
+static void vita_guest_stream_write(const void *data, size_t size)
+{
+    if (size)
+        fwrite(data, 1, size, stderr);
+}
+
 EXPORT(SceLibc, 0xfffbe239, FILE *, vita_fopen, const char *path, const char *mode)
 {
     char buffer[512];
+    FILE *fp = fopen(host_path(path, buffer, sizeof(buffer)), mode);
 
-    return fopen(host_path(path, buffer, sizeof(buffer)), mode);
+    vita_track_host_file(fp);
+
+    if (trace_fileio())
+        LOG("fopen(\"%s\", \"%s\") -> %p", path ? path : "(null)", mode ? mode : "(null)",
+            (void *)fp);
+    return fp;
 }
 
 EXPORT(SceLibc, 0xb2f318fe, FILE *, vita_fdopen, int fd, const char *mode)
 {
-    return fdopen(fd, mode);
+    FILE *fp = fdopen(fd, mode);
+
+    vita_track_host_file(fp);
+    return fp;
 }
 
 EXPORT(SceLibc, 0xec97321c, int, vita_fclose, FILE *stream)
 {
+    if (trace_fileio())
+        LOG("fclose(%p)", (void *)stream);
+    if (!vita_is_host_file(stream))
+        return 0;
+
+    vita_untrack_host_file(stream);
     return fclose(stream);
 }
 
 EXPORT(SceLibc, 0x5aad2996, int, vita_fflush, FILE *stream)
 {
+    if (!stream)
+        return fflush(NULL);
+    if (!vita_is_host_file(stream))
+        return 0;
     return fflush(stream);
 }
 
 EXPORT(SceLibc, 0xb31c73a9, size_t, vita_fread, void *buffer, size_t size, size_t count,
        FILE *stream)
 {
+    if (trace_fileio())
+        LOG("fread(%p, %u, %u, %p)", buffer, (unsigned)size, (unsigned)count, (void *)stream);
+    if (!vita_is_host_file(stream))
+        return 0;
     return fread(buffer, size, count, stream);
 }
 
 EXPORT(SceLibc, 0x8bcdcc4e, size_t, vita_fwrite, const void *buffer, size_t size, size_t count,
        FILE *stream)
 {
+    if (trace_fileio())
+        LOG("fwrite(%p, %u, %u, %p)", buffer, (unsigned)size, (unsigned)count, (void *)stream);
+    if (!vita_is_host_file(stream)) {
+        vita_guest_stream_write(buffer, size * count);
+        return count;
+    }
     return fwrite(buffer, size, count, stream);
 }
 
 EXPORT(SceLibc, 0xc3a7cde1, int, vita_fseek, FILE *stream, long offset, int whence)
 {
+    if (!vita_is_host_file(stream))
+        return -1;
     return fseek(stream, offset, whence);
 }
 
 EXPORT(SceLibc, 0x41c2af95, long, vita_ftell, FILE *stream)
 {
+    if (!vita_is_host_file(stream))
+        return -1;
     return ftell(stream);
 }
 
 EXPORT(SceLibc, 0xfec1502e, int, vita_fileno, FILE *stream)
 {
+    if (!vita_is_host_file(stream))
+        return 2;
     return fileno(stream);
 }
 
 EXPORT(SceLibc, 0x4bd5212e, int, vita_getc, FILE *stream)
 {
+    if (!vita_is_host_file(stream))
+        return -1;
     return getc(stream);
 }
 
 EXPORT(SceLibc, 0x7e6a6108, int, vita_fputc, int c, FILE *stream)
 {
+    if (!vita_is_host_file(stream)) {
+        unsigned char ch = (unsigned char)c;
+
+        vita_guest_stream_write(&ch, 1);
+        return c;
+    }
     return fputc(c, stream);
 }
 
@@ -573,16 +691,26 @@ EXPORT(SceLibc, 0x59c3e171, int, vita_puts, const char *s)
 
 EXPORT(SceLibc, 0xc8ff13e5, int, vita_fputs, const char *s, FILE *stream)
 {
+    if (trace_fileio())
+        LOG("fputs(\"%s\", %p)", s ? s : "(null)", (void *)stream);
+    if (!vita_is_host_file(stream)) {
+        if (s)
+            vita_guest_stream_write(s, strlen(s));
+        return 0;
+    }
     return fputs(s, stream);
 }
 
 EXPORT(SceLibc, 0x72ba4468, void, vita_clearerr, FILE *stream)
 {
-    clearerr(stream);
+    if (vita_is_host_file(stream))
+        clearerr(stream);
 }
 
 EXPORT(SceLibc, 0xb724bfc1, int, vita_ferror, FILE *stream)
 {
+    if (!vita_is_host_file(stream))
+        return 0;
     return ferror(stream);
 }
 
@@ -620,8 +748,20 @@ EXPORT(SceLibc, 0xe0c79764, int, vita_fprintf, FILE *stream, const char *format,
     va_list args;
     int result;
 
+    if (trace_fileio())
+        LOG("fprintf(%p, \"%s\")", (void *)stream, format ? format : "(null)");
+
     va_start(args, format);
-    result = vfprintf(stream, format, args);
+    if (vita_is_host_file(stream)) {
+        result = vfprintf(stream, format, args);
+    } else {
+        char buffer[1024];
+
+        result = vsnprintf(buffer, sizeof(buffer), format, args);
+        if (result > 0)
+            vita_guest_stream_write(buffer, (size_t)result < sizeof(buffer) ? (size_t)result
+                                                                           : sizeof(buffer) - 1);
+    }
     va_end(args);
 
     return result;
@@ -629,7 +769,18 @@ EXPORT(SceLibc, 0xe0c79764, int, vita_fprintf, FILE *stream, const char *format,
 
 EXPORT(SceLibc, 0xf7915685, int, vita_vfprintf, FILE *stream, const char *format, va_list args)
 {
-    return vfprintf(stream, format, args);
+    if (vita_is_host_file(stream))
+        return vfprintf(stream, format, args);
+
+    {
+        char buffer[1024];
+        int result = vsnprintf(buffer, sizeof(buffer), format, args);
+
+        if (result > 0)
+            vita_guest_stream_write(buffer, (size_t)result < sizeof(buffer) ? (size_t)result
+                                                                           : sizeof(buffer) - 1);
+        return result;
+    }
 }
 
 EXPORT(SceLibc, 0x7449b359, int, vita_sprintf, char *buffer, const char *format, ...)
@@ -689,16 +840,22 @@ EXPORT(SceLibc, 0xec585241, int, vita_sscanf, const char *s, const char *format,
 
 EXPORT(SceLibc, 0x5d8c1282, FILE *, vita_stdout, void)
 {
+    if (trace_fileio())
+        LOG("stdout() -> %p", (void *)stdout);
     return stdout;
 }
 
 EXPORT(SceLibc, 0xddf9bb09, FILE *, vita_stderr, void)
 {
+    if (trace_fileio())
+        LOG("stderr() -> %p", (void *)stderr);
     return stderr;
 }
 
 EXPORT(SceLibc, 0x66b7406c, FILE *, vita_stdin, void)
 {
+    if (trace_fileio())
+        LOG("stdin() -> %p", (void *)stdin);
     return stdin;
 }
 
@@ -706,6 +863,30 @@ EXPORT(SceLibc, 0x66b7406c, FILE *, vita_stdin, void)
 static unsigned char g_touptab[257];
 static unsigned char g_tolotab[257];
 static unsigned char g_ctype[257];
+
+/*
+ * newlib's stdio and ctype entry points are exported both as variables and as
+ * accessor functions depending on the toolchain. Guest modules import the
+ * variables, so publish cells holding the host objects. They must be ready
+ * before any guest code runs.
+ */
+extern void *g_vita_libc_stdin_cell;
+extern void *g_vita_libc_stdout_cell;
+extern void *g_vita_libc_stderr_cell;
+extern void *g_vita_libc_touptab_cell;
+extern void *g_vita_libc_tolotab_cell;
+extern void *g_vita_libc_ctype_cell;
+
+static void init_libc_var_cells(void) __attribute__((constructor));
+static void init_libc_var_cells(void)
+{
+    g_vita_libc_stdin_cell = stdin;
+    g_vita_libc_stdout_cell = stdout;
+    g_vita_libc_stderr_cell = stderr;
+    g_vita_libc_touptab_cell = g_touptab;
+    g_vita_libc_tolotab_cell = g_tolotab;
+    g_vita_libc_ctype_cell = &g_ctype[1];
+}
 
 EXPORT(SceLibc, 0x36878958, unsigned char *, _Touptab, void)
 {

@@ -1,14 +1,93 @@
 #include "fs.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
 static char g_root[PATH_MAX];
 static char g_app_dir[PATH_MAX];
+
+/*
+ * Vita filesystems are case-insensitive while the host's usually are not.
+ * Rewrite each component to the on-disk spelling when it differs only in
+ * case. Components that do not exist yet (new save files, cache entries) are
+ * left untouched so callers can create them.
+ */
+static int fix_path_case(char *path)
+{
+    char resolved[PATH_MAX];
+    char *p = path;
+    size_t used = 0;
+
+    if (!path || path[0] != '/')
+        return -1;
+
+    resolved[0] = '\0';
+    while (*p == '/')
+        p++;
+
+    while (*p) {
+        const char *end = strchr(p, '/');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        char name[256];
+        char candidate[PATH_MAX];
+        char matched[256];
+        struct stat st;
+        DIR *dir;
+        struct dirent *entry;
+
+        if (len >= sizeof(name))
+            return -1;
+        memcpy(name, p, len);
+        name[len] = '\0';
+
+        if (snprintf(candidate, sizeof(candidate), "%s/%s", resolved, name) >= (int)sizeof(candidate))
+            return -1;
+
+        if (stat(candidate, &st) != 0) {
+            strcpy(matched, name);
+            dir = opendir(resolved[0] ? resolved : "/");
+            if (dir) {
+                while ((entry = readdir(dir)) != NULL) {
+                    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+                        continue;
+                    if (strcasecmp(entry->d_name, name) == 0) {
+                        snprintf(matched, sizeof(matched), "%s", entry->d_name);
+                        break;
+                    }
+                }
+                closedir(dir);
+            }
+            if (snprintf(candidate, sizeof(candidate), "%s/%s", resolved, matched) >=
+                (int)sizeof(candidate))
+                return -1;
+        }
+
+        used = strlen(candidate);
+        if (used >= sizeof(resolved))
+            return -1;
+        memcpy(resolved, candidate, used + 1);
+
+        if (!end)
+            break;
+        p = end + 1;
+        while (*p == '/')
+            p++;
+    }
+
+    if (resolved[0] == '\0')
+        strcpy(resolved, "/");
+    if (strlen(resolved) >= PATH_MAX)
+        return -1;
+    strcpy(path, resolved);
+
+    return 0;
+}
 
 static int copy_string(char *dst, size_t dst_size, const char *src, size_t src_len)
 {
@@ -104,7 +183,6 @@ int host_fs_resolve_path(const char *vita_path, char *out, size_t out_size)
 
     if (!vita_path || !out || out_size == 0)
         return -1;
-
     /* Unity's Vita layer mounts the application root at this Fios mount
      * point and then addresses data through it. Alias it to app0:. */
     {
@@ -121,6 +199,7 @@ int host_fs_resolve_path(const char *vita_path, char *out, size_t out_size)
                               rel[0] == '/' ? "" : "/", rel);
             if (needed < 0 || (size_t)needed >= out_size)
                 return -1;
+            fix_path_case(out);
             return 0;
         }
     }
@@ -167,6 +246,7 @@ int host_fs_resolve_path(const char *vita_path, char *out, size_t out_size)
                               rest);
             if (needed < 0 || (size_t)needed >= out_size - base_len)
                 return -1;
+            fix_path_case(out);
             return 0;
         }
     } else {
@@ -181,5 +261,6 @@ int host_fs_resolve_path(const char *vita_path, char *out, size_t out_size)
     if (needed < 0 || (size_t)needed >= out_size)
         return -1;
 
+    fix_path_case(out);
     return 0;
 }
