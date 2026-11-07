@@ -117,6 +117,7 @@ add_executable(vita2native
     source/modules/SceLibKernel.c
     source/modules/SceLibKernelAeabi.c
     source/modules/SceFios2.c
+    source/modules/SceFiber.c
     source/modules/SceHttp.c
     source/modules/SceSsl.c
     source/modules/SceNpDrm.c
@@ -527,6 +528,18 @@ if(BUILD_TESTING)
     target_compile_definitions(fios2_smoke PRIVATE _GNU_SOURCE=1 _FILE_OFFSET_BITS=64)
     target_link_libraries(fios2_smoke PRIVATE pthread m)
     add_test(NAME fios2_smoke COMMAND fios2_smoke)
+
+    add_executable(fiber_smoke
+        tests/fiber_smoke.c
+        source/modules/SceFiber.c
+        source/log.c
+        source/netlog.c
+        source/host/host_thread.c
+    )
+    target_include_directories(fiber_smoke PRIVATE include external/vita-headers/include)
+    target_compile_definitions(fiber_smoke PRIVATE _GNU_SOURCE=1)
+    target_link_libraries(fiber_smoke PRIVATE pthread)
+    add_test(NAME fiber_smoke COMMAND fiber_smoke)
 
     add_executable(pgf_smoke
         tests/pgf_smoke.c
