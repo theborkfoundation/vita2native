@@ -965,8 +965,7 @@ int32_t sceNgsVoicePatchSetVolume(SceNgsHPatch patch_handle, int32_t output_chan
 }
 
 static int32_t ngs_voice_patch_set_volume_softfp(SceNgsHPatch patch_handle, int32_t output_channel,
-                                                 int32_t input_channel,
-                                                 float volume) GUEST_SOFTFP_ABI;
+                                                 int32_t input_channel, float volume);
 static int32_t ngs_voice_patch_set_volume_softfp(SceNgsHPatch patch_handle, int32_t output_channel,
                                                  int32_t input_channel, float volume)
 {

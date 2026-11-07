@@ -393,8 +393,7 @@ EXPORT(ScePgf, 0xEB589530, int, sceFontGetCharGlyphImage_Clip, SceFontHandle fon
     return sceFontGetCharGlyphImage(font_handle, char_code, glyph_image);
 }
 
-static int font_set_resolution_softfp(SceFontLibHandle lib_handle, float hres, float vres)
-    GUEST_SOFTFP_ABI;
+static int font_set_resolution_softfp(SceFontLibHandle lib_handle, float hres, float vres);
 static int font_set_resolution_softfp(SceFontLibHandle lib_handle, float hres, float vres)
 {
     VitaFontLib *lib = lib_from_handle(lib_handle);
@@ -428,10 +427,11 @@ EXPORT(ScePgf, 0x7D8CB13B, int, sceFontFlush, SceFontHandle font_handle)
     return 0;
 }
 
-/* Float-argument/return entry points use the guest softfp ABI. */
+/* Float-argument/return entry points follow the host ABI (hard-float on ARM),
+   matching VitaSDK-built titles. */
 
 static float font_pixel_to_point_h_softfp(SceFontLibHandle lib_handle, float pixels,
-                                          unsigned int *error) GUEST_SOFTFP_ABI;
+                                          unsigned int *error);
 static float font_pixel_to_point_h_softfp(SceFontLibHandle lib_handle, float pixels,
                                           unsigned int *error)
 {
@@ -447,7 +447,7 @@ static float font_pixel_to_point_h_softfp(SceFontLibHandle lib_handle, float pix
 EXPORT_FUNC(ScePgf, 0x9E38F4D6, font_pixel_to_point_h_softfp);
 
 static float font_pixel_to_point_v_softfp(SceFontLibHandle lib_handle, float pixels,
-                                          unsigned int *error) GUEST_SOFTFP_ABI;
+                                          unsigned int *error);
 static float font_pixel_to_point_v_softfp(SceFontLibHandle lib_handle, float pixels,
                                           unsigned int *error)
 {
@@ -463,7 +463,7 @@ static float font_pixel_to_point_v_softfp(SceFontLibHandle lib_handle, float pix
 EXPORT_FUNC(ScePgf, 0x7B45E2D1, font_pixel_to_point_v_softfp);
 
 static float font_point_to_pixel_h_softfp(SceFontLibHandle lib_handle, float points,
-                                          unsigned int *error) GUEST_SOFTFP_ABI;
+                                          unsigned int *error);
 static float font_point_to_pixel_h_softfp(SceFontLibHandle lib_handle, float points,
                                           unsigned int *error)
 {
@@ -479,7 +479,7 @@ static float font_point_to_pixel_h_softfp(SceFontLibHandle lib_handle, float poi
 EXPORT_FUNC(ScePgf, 0x39B9AEFF, font_point_to_pixel_h_softfp);
 
 static float font_point_to_pixel_v_softfp(SceFontLibHandle lib_handle, float points,
-                                          unsigned int *error) GUEST_SOFTFP_ABI;
+                                          unsigned int *error);
 static float font_point_to_pixel_v_softfp(SceFontLibHandle lib_handle, float points,
                                           unsigned int *error)
 {

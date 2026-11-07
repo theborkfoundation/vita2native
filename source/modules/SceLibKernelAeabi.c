@@ -223,28 +223,28 @@ EXPORT_FUNC(SceLibKernel, 0xCDF7708E, aeabi_uldivmod_naked);
 
 #endif
 
-static int64_t aeabi_f2lz_softfp(float value) GUEST_SOFTFP_ABI;
+static int64_t aeabi_f2lz_softfp(float value);
 static int64_t aeabi_f2lz_softfp(float value)
 {
     return (int64_t)value;
 }
 EXPORT_FUNC(SceLibKernel, 0xAA1F1B50, aeabi_f2lz_softfp);
 
-static uint64_t aeabi_f2ulz_softfp(float value) GUEST_SOFTFP_ABI;
+static uint64_t aeabi_f2ulz_softfp(float value);
 static uint64_t aeabi_f2ulz_softfp(float value)
 {
     return (uint64_t)value;
 }
 EXPORT_FUNC(SceLibKernel, 0x609CA961, aeabi_f2ulz_softfp);
 
-static int64_t aeabi_d2lz_softfp(double value) GUEST_SOFTFP_ABI;
+static int64_t aeabi_d2lz_softfp(double value);
 static int64_t aeabi_d2lz_softfp(double value)
 {
     return (int64_t)value;
 }
 EXPORT_FUNC(SceLibKernel, 0x5024AB91, aeabi_d2lz_softfp);
 
-static uint64_t aeabi_d2ulz_softfp(double value) GUEST_SOFTFP_ABI;
+static uint64_t aeabi_d2ulz_softfp(double value);
 static uint64_t aeabi_d2ulz_softfp(double value)
 {
     return (uint64_t)value;

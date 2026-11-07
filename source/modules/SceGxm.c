@@ -2484,16 +2484,14 @@ EXPORT(SceGxm, 0x082200E1, SceBool, sceGxmDepthStencilSurfaceIsEnabled,
     return surface && !gxm_ds_surface_is_disabled(surface);
 }
 
-static float gxm_ds_get_background_depth_softfp(const SceGxmDepthStencilSurface *surface)
-    GUEST_SOFTFP_ABI;
+static float gxm_ds_get_background_depth_softfp(const SceGxmDepthStencilSurface *surface);
 static float gxm_ds_get_background_depth_softfp(const SceGxmDepthStencilSurface *surface)
 {
     return surface->backgroundDepth;
 }
 EXPORT_FUNC(SceGxm, 0x269B56BE, gxm_ds_get_background_depth_softfp);
 
-static void gxm_ds_set_background_depth_softfp(SceGxmDepthStencilSurface *surface, float depth)
-    GUEST_SOFTFP_ABI;
+static void gxm_ds_set_background_depth_softfp(SceGxmDepthStencilSurface *surface, float depth);
 static void gxm_ds_set_background_depth_softfp(SceGxmDepthStencilSurface *surface, float depth)
 {
     surface->backgroundDepth = depth;
@@ -2629,7 +2627,7 @@ EXPORT(SceGxm, 0x1A68C8D2, void, sceGxmSetBackStencilFunc, SceGxmContext *contex
 
 static void gxm_set_viewport(SceGxmContext *context, float x_offset, float x_scale,
                              float y_offset, float y_scale, float z_offset,
-                             float z_scale) GUEST_SOFTFP_ABI;
+                             float z_scale);
 static void gxm_set_viewport(SceGxmContext *context, float x_offset, float x_scale,
                              float y_offset, float y_scale, float z_offset, float z_scale)
 {
@@ -2728,7 +2726,7 @@ EXPORT(SceGxm, 0x17B3BF86, void, sceGxmSetBackDepthBias, SceGxmContext *context,
     context->back_depth_bias_units = units;
 }
 
-static void gxm_set_w_clamp_value_softfp(SceGxmContext *context, float value) GUEST_SOFTFP_ABI;
+static void gxm_set_w_clamp_value_softfp(SceGxmContext *context, float value);
 static void gxm_set_w_clamp_value_softfp(SceGxmContext *context, float value)
 {
     context->w_clamp_value = value;
@@ -3982,6 +3980,24 @@ static void gxm_profile_frame(uint64_t resolve_ns, uint64_t finish_ns, uint64_t 
     last = now;
 }
 
+static int gxm_frame_trace(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_GXM_FRAME_TRACE") != NULL;
+    return enabled;
+}
+
+static int gxm_state_trace(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_GXM_STATE_TRACE") != NULL;
+    return enabled;
+}
+
 EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
        const SceGxmNotification *vertexNotification, const SceGxmNotification *fragmentNotification)
 {
@@ -4051,6 +4067,23 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
         g_gl->glPixelStorei(GL_PACK_ALIGNMENT, 4);
         g_gl->glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
         t2 = gxm_time_ns();
+
+        if (gxm_frame_trace() && (g_gxm_frame % 60) == 0) {
+            uint32_t sum = 0;
+            uint32_t nonzero = 0;
+
+            for (size_t i = 0; i < (size_t)width * height * 4; i += 4096) {
+                sum += rgba[i];
+                if (rgba[i])
+                    nonzero++;
+            }
+            LOG("SceGxm frame %llu: fbo=%u surf=%p %ux%u stride=%u fmt=0x%x "
+                "clip=%u,%u..%u,%u scale=%u sum=%08x nz=%u px0=%08x",
+                g_gxm_frame, context->render_target->fbo, (void *)surface->data, surface->width,
+                surface->height, surface->strideInPixels, surface->colorFormat, surface->clipXMin,
+                surface->clipYMin, surface->clipXMax, surface->clipYMax, scale, sum, nonzero,
+                *(const uint32_t *)rgba);
+        }
 
         /* GL's origin is bottom-left; Vita surfaces are top-left. */
         {
@@ -5289,6 +5322,31 @@ static void gxm_batch_flush(SceGxmContext *context)
         commit_started = gxm_time_ns();
 
         g_gl->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, context->index_arena.buffer);
+
+        if (gxm_state_trace()) {
+            static unsigned int traced;
+
+            if (traced < 8) {
+                const SceGxmTextureInner *t0 = &batch->fragment_textures[0];
+                const uint32_t *td = gxm_texture_get_data(t0);
+                const uint32_t *vu = (const uint32_t *)batch->vertex_uniforms;
+                const uint32_t *fu = (const uint32_t *)batch->fragment_uniforms;
+
+                LOG("state %u: vp=%.1f,%.1f,%.1f,%.1f clip=%u,%u..%u,%u depth=%d/%d "
+                    "tex=%p %ux%u fmt=0x%x t0=%08x vu=%08x,%08x,%08x,%08x fu=%08x,%08x",
+                    traced, batch->state.viewport_x_offset, batch->state.viewport_y_offset,
+                    batch->state.viewport_x_scale, batch->state.viewport_y_scale,
+                    batch->state.region_clip_xmin, batch->state.region_clip_ymin,
+                    batch->state.region_clip_xmax, batch->state.region_clip_ymax,
+                    (int)batch->state.depth_func, (int)batch->state.depth_write, (void *)td,
+                    (unsigned)gxm_texture_get_width(t0), (unsigned)gxm_texture_get_height(t0),
+                    (unsigned)gxm_texture_get_format(t0), td ? td[0] : 0,
+                    vu ? vu[0] : 0, vu ? vu[1] : 0, vu ? vu[2] : 0, vu ? vu[3] : 0,
+                    fu ? fu[0] : 0, fu ? fu[1] : 0);
+                traced++;
+            }
+        }
+
         if (batch->state.instances > 1 && batch->gl_primitive != GL_POINTS)
             g_gl->glDrawElementsInstanced(batch->gl_primitive, (GLsizei)batch->index_count,
                                           batch->gl_index_type,

@@ -5,10 +5,11 @@
 #include <stdint.h>
 
 /*
- * Float ABI for exports that pass or return float by value. PS Vita binaries
- * use the base AAPCS convention (softfp: floats travel in core registers),
- * while the host is built hard-float. Every ARM export that takes or returns a
- * float/double by value must use this attribute.
+ * Float ABI for exports that pass or return float by value. The host build is
+ * hard-float, and titles built with VitaSDK call exports with the hard-float
+ * ABI too, so ordinary exports use the host convention. Sony's own modules and
+ * IL2CPP-era titles use base AAPCS (softfp: floats travel in core registers);
+ * only the entry points they call are annotated with EXPORT_SOFTFP.
  */
 #if defined(__arm__)
 #define GUEST_SOFTFP_ABI __attribute__((pcs("aapcs")))
@@ -55,8 +56,8 @@ extern const library_t __stop_exported_libraries[];
     type name(__VA_ARGS__)
 
 /* Same as EXPORT, but for entry points whose float/double arguments and
-   results travel in core registers (the guest uses the softfp ABI while the
-   host is built hard-float). */
+   results travel in core registers (base AAPCS). Used for SceLibm/SceLibc math
+   entry points called by Sony's softfp modules and IL2CPP titles. */
 #define EXPORT_SOFTFP(library, nid, type, name, ...)                                                \
     static type name(__VA_ARGS__) GUEST_SOFTFP_ABI;                                                \
     EXPORT_FUNC(library, nid, name)                                                               \
