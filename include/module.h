@@ -5,11 +5,11 @@
 #include <stdint.h>
 
 /*
- * Float ABI for exports that pass or return float by value. The host build is
- * hard-float, and titles built with VitaSDK call exports with the hard-float
- * ABI too, so ordinary exports use the host convention. Sony's own modules and
- * IL2CPP-era titles use base AAPCS (softfp: floats travel in core registers);
- * only the entry points they call are annotated with EXPORT_SOFTFP.
+ * Float ABI for exports that pass or return float by value. vita2native is
+ * built hard-float, and every caller seen so far (VitaSDK titles, Unity's
+ * eboot and Sony's own modules) uses the hard-float convention, so ordinary
+ * exports use the host ABI. EXPORT_SOFTFP stays for entry points that a
+ * base-AAPCS caller needs (floats travel in core registers).
  */
 #if defined(__arm__)
 #define GUEST_SOFTFP_ABI __attribute__((pcs("aapcs")))

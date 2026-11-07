@@ -105,7 +105,11 @@ EXPORT(SceLibKernel, 0xB295EB61, void *, sceKernelGetTLSAddr, int key)
 
 EXPORT(SceLibKernel, 0x7595D9AA, int, sceKernelExitProcess, int res)
 {
-    LOG("sceKernelExitProcess called! Return value %d ra=%p", res, __builtin_return_address(0));
+    VitaThreadInfo *ti = SceKernelThreadMgr_get_thread_info();
+
+    LOG("sceKernelExitProcess called! Return value %d ra=%p thread=0x%x (%s) host=%p", res,
+        __builtin_return_address(0), ti->uid, ti->name[0] ? ti->name : "?",
+        (void *)pthread_self());
 
     atomic_store(&g_process_exit_res, res);
     ueventSignal(&g_process_exit_event);
@@ -590,7 +594,17 @@ EXPORT_FUNC(SceLibKernel, 0xFA26BC62, printf)
 
 EXPORT(SceLibKernel, 0x0FB972F9, int, sceKernelGetThreadId)
 {
-    return SceKernelThreadMgr_get_thread_info()->uid;
+    VitaThreadInfo *ti = SceKernelThreadMgr_get_thread_info();
+    static int trace = -1;
+
+    if (trace < 0)
+        trace = getenv("VITA2NATIVE_TRACE_THREADID") != NULL;
+    if (trace)
+        LOG("sceKernelGetThreadId -> 0x%x (%s) ti=%p host=%p ra=%p", ti->uid,
+            ti->name[0] ? ti->name : "?", (void *)ti, (void *)pthread_self(),
+            __builtin_return_address(0));
+
+    return ti->uid;
 }
 
 /* Unity's assert path. Log the message (the varargs are guest pointers, which
