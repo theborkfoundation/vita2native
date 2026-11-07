@@ -91,6 +91,22 @@ static int resolve(const char *path, char *out, size_t size)
     return host_fs_resolve_path(path, out, size);
 }
 
+static int trace_fios(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_TRACE_FIOS") != NULL;
+    return enabled;
+}
+
+static int fios_result(const char *what, const char *path, int result)
+{
+    if (trace_fios())
+        LOG("Fios%s(\"%s\") -> 0x%x", what, path ? path : "(null)", (unsigned)result);
+    return result;
+}
+
 static void stat_from_host(const struct stat *st, SceFiosStat *out)
 {
     memset(out, 0, sizeof(*out));
@@ -242,12 +258,12 @@ EXPORT(SceFios2, 0xACBAF3E0, int, sceFiosStatSync, const void *attr, const char 
     if (!path || !out_stat)
         return SCE_FIOS_ERROR_BAD_ARGUMENT;
     if (resolve(path, host, sizeof(host)) < 0)
-        return SCE_FIOS_ERROR_BAD_PATH;
+        return fios_result("StatSync", path, SCE_FIOS_ERROR_BAD_PATH);
     if (stat(host, &st) < 0)
-        return errno_to_fios(errno);
+        return fios_result("StatSync", path, errno_to_fios(errno));
 
     stat_from_host(&st, out_stat);
-    return 0;
+    return fios_result("StatSync", path, 0);
 }
 
 static int path_exists(const char *path, int want_dir)
@@ -258,14 +274,14 @@ static int path_exists(const char *path, int want_dir)
     if (!path)
         return SCE_FIOS_ERROR_BAD_ARGUMENT;
     if (resolve(path, host, sizeof(host)) < 0)
-        return SCE_FIOS_ERROR_BAD_PATH;
+        return fios_result("Exists", path, SCE_FIOS_ERROR_BAD_PATH);
     if (stat(host, &st) < 0)
-        return errno_to_fios(errno);
+        return fios_result("Exists", path, errno_to_fios(errno));
     if (want_dir == 1 && !S_ISDIR(st.st_mode))
-        return SCE_FIOS_ERROR_BAD_PATH;
+        return fios_result("Exists", path, SCE_FIOS_ERROR_BAD_PATH);
     if (want_dir == 0 && S_ISDIR(st.st_mode))
-        return SCE_FIOS_ERROR_BAD_PATH;
-    return 0;
+        return fios_result("Exists", path, SCE_FIOS_ERROR_BAD_PATH);
+    return fios_result("Exists", path, 0);
 }
 
 EXPORT(SceFios2, 0x125EFD34, int, sceFiosExistsSync, const void *attr, const char *path)
@@ -325,14 +341,14 @@ EXPORT(SceFios2, 0xC3E7C3DB, int, sceFiosFHOpenSync, const void *attr, SceFiosFH
         flags = *(const uint32_t *)params;
 
     if (resolve(path, host, sizeof(host)) < 0)
-        return SCE_FIOS_ERROR_BAD_PATH;
+        return fios_result("FHOpenSync", path, SCE_FIOS_ERROR_BAD_PATH);
 
     mode = open_mode_for_flags(flags, &create_only);
     fp = fopen(host, mode);
     if (!fp && create_only && errno == ENOENT)
         fp = fopen(host, "wb");
     if (!fp)
-        return errno_to_fios(errno);
+        return fios_result("FHOpenSync", path, errno_to_fios(errno));
 
     file = calloc(1, sizeof(*file));
     if (!file) {
@@ -873,6 +889,9 @@ EXPORT(SceFios2, 0xDF3352FC, SceFiosSize, sceFiosArchiveGetMountBufferSizeSync, 
     (void)attr;
     (void)params;
 
+    if (trace_fios())
+        LOG("FiosArchiveGetMountBufferSizeSync(path=\"%s\")", path ? path : "(null)");
+
     if (!path)
         return SCE_FIOS_ERROR_BAD_ARGUMENT;
     if (resolve(path, host, sizeof(host)) < 0)
@@ -889,6 +908,12 @@ EXPORT(SceFios2, 0xC4822276, int, sceFiosArchiveMountSync, const void *attr, Sce
        const char *path, const char *mount_point, SceFiosBuffer mount_buffer, void *params)
 {
     (void)attr;
+    (void)params;
+
+    if (trace_fios())
+        LOG("FiosArchiveMountSync(path=\"%s\", mount=\"%s\") fh=%p", path ? path : "(null)",
+            mount_point ? mount_point : "(null)", fh ? (void *)*fh : NULL);
+
     (void)mount_buffer;
     (void)params;
 

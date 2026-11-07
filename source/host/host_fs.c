@@ -105,6 +105,26 @@ int host_fs_resolve_path(const char *vita_path, char *out, size_t out_size)
     if (!vita_path || !out || out_size == 0)
         return -1;
 
+    /* Unity's Vita layer mounts the application root at this Fios mount
+     * point and then addresses data through it. Alias it to app0:. */
+    {
+        static const char mount_point[] = "/archive/mount/point";
+        size_t length = sizeof(mount_point) - 1;
+
+        if (strncmp(vita_path, mount_point, length) == 0 &&
+            (vita_path[length] == '/' || vita_path[length] == '\0')) {
+            const char *rel = vita_path + length;
+
+            if (path_has_parent_component(rel))
+                return -1;
+            needed = snprintf(out, out_size, "%s%s%s", g_app_dir,
+                              rel[0] == '/' ? "" : "/", rel);
+            if (needed < 0 || (size_t)needed >= out_size)
+                return -1;
+            return 0;
+        }
+    }
+
     colon = strchr(vita_path, ':');
     slash = strchr(vita_path, '/');
 

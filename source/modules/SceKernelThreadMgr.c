@@ -406,6 +406,8 @@ EXPORT(SceLibKernel, 0xDDB395A9, int, sceKernelWaitThreadEnd, SceUID thid, int *
     else
         ns = *timeout * 1000ull;
 
+    SceKernelThreadMgr_run_pending_callbacks();
+
     res = waitSingle(waiterForThread(&ti->thread), ns);
     if (R_FAILED(res)) {
         LOG("Error waiting for thread 0x%x exit: 0x%" PRIx32, thid, res);
@@ -639,9 +641,24 @@ EXPORT(SceThreadmgr, 0x86761234, int, _sceKernelGetCallbackInfo, SceUID callback
     return callback_get_info(callback_id, info);
 }
 
+int SceKernelThreadMgr_run_pending_callbacks(void)
+{
+    static __thread int running;
+    int processed;
+
+    if (running)
+        return 0;
+
+    running = 1;
+    processed = run_pending_callbacks(current_thread_uid());
+    running = 0;
+
+    return processed;
+}
+
 EXPORT(SceThreadmgr, 0xE53E41F6, int, sceKernelCheckCallback, void)
 {
-    return run_pending_callbacks(current_thread_uid());
+    return SceKernelThreadMgr_run_pending_callbacks();
 }
 
 EXPORT(SceThreadmgr, 0x2682E6ED, int, _sceKernelExitCallback, void)
@@ -2189,6 +2206,35 @@ EXPORT(SceThreadmgr, 0x7EB55DAC, int, sceKernelResumeThreadForVM, SceUID thid)
 
     ti->suspend_count--;
     return 0;
+}
+
+/*
+ * Mono bridge wrappers. Unity ships its own pthread.suprx, which imports these
+ * from SceKernelForMono; without them its mutex hand-off path silently fails
+ * and Unity deadlocks during startup.
+ */
+EXPORT(SceLibKernel, 0xAD210F16, int, sceKernelGetThreadContextForMono, SceUID thid,
+       VitaThreadCpuRegisterInfo *cpu, VitaThreadVfpRegisterInfo *vfp)
+{
+    return get_thread_context_for_vm(thid, cpu, vfp);
+}
+
+EXPORT(SceLibKernel, 0x92A0964D, int, sceKernelSetThreadContextForMono, SceUID thid,
+       const VitaThreadCpuRegisterInfo *cpu, const VitaThreadVfpRegisterInfo *vfp)
+{
+    (void)cpu;
+    (void)vfp;
+    return set_thread_context_for_vm(thid);
+}
+
+EXPORT(SceLibKernel, 0x38839DA2, int, sceKernelSuspendThreadForMono, SceUID thid)
+{
+    return sceKernelSuspendThreadForVM(thid);
+}
+
+EXPORT(SceLibKernel, 0x9A6D085B, int, sceKernelResumeThreadForMono, SceUID thid)
+{
+    return sceKernelResumeThreadForVM(thid);
 }
 
 /* ------------------------------------------------ performance counters */

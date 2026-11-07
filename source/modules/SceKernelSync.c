@@ -33,6 +33,13 @@
 
 #define SCE_KERNEL_ERROR_EVF_MULTI 0x800280E4
 
+/* Provided by SceKernelThreadMgr.c in the full build; the standalone sync test
+   links without it. */
+__attribute__((weak)) int SceKernelThreadMgr_run_pending_callbacks(void)
+{
+    return 0;
+}
+
 /* ------------------------------------------------------------- semaphores */
 
 typedef struct {
@@ -50,6 +57,22 @@ typedef struct {
 DICT_DEF2(vita_sema_dict, SceUID, M_DEFAULT_OPLIST, VitaSemaInfo *, M_POD_OPLIST)
 static vita_sema_dict_t g_semas;
 static RwLock g_semas_lock;
+
+static int trace_sync(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_TRACE_SYNC") != NULL;
+    return enabled;
+}
+
+static SceUID trace_thread_uid(void)
+{
+    VitaThreadInfo *ti = SceKernelThreadMgr_get_thread_info();
+
+    return ti ? ti->uid : 0;
+}
 
 static VitaSemaInfo *sema_lookup(SceUID uid)
 {
@@ -83,6 +106,10 @@ static int sema_wait(VitaSemaInfo *sema, int need, const SceUInt *timeout)
 
     if (need <= 0)
         return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
+
+    /* Thread callbacks run on entry to a blocking wait. pthread.suprx queues
+       the user-mutex unlock this way before waiting on a condition variable. */
+    SceKernelThreadMgr_run_pending_callbacks();
 
     pthread_mutex_lock(&sema->mutex);
     while (sema->count < need) {
@@ -145,6 +172,10 @@ EXPORT(SceLibKernel, 0x1BD67366, SceUID, sceKernelCreateSema, const char *name, 
     vita_sema_dict_set_at(g_semas, sema->uid, sema);
     rwlockWriteUnlock(&g_semas_lock);
 
+    if (trace_sync())
+        LOG("SemaCreate \"%s\" uid=0x%x init=%d max=%d thid=0x%x", sema->name, sema->uid,
+            init_count, max_count, trace_thread_uid());
+
     return sema->uid;
 }
 
@@ -206,6 +237,10 @@ EXPORT(SceThreadmgr, 0xE6B761D1, int, sceKernelSignalSema, SceUID uid, int signa
     pthread_cond_broadcast(&sema->cond);
     pthread_mutex_unlock(&sema->mutex);
 
+    if (trace_sync())
+        LOG("SemaSignal uid=0x%x signal=%d count=%d thid=0x%x ra=%p", uid, signal, sema->count,
+            trace_thread_uid(), __builtin_return_address(0));
+
     return 0;
 }
 
@@ -216,6 +251,10 @@ EXPORT(SceLibKernel, 0x0C7B834B, int, sceKernelWaitSema, SceUID uid, int signal,
 
     if (!sema)
         return SCE_KERNEL_ERROR_UNKNOWN_SEMA_ID;
+
+    if (trace_sync())
+        LOG("SemaWait uid=0x%x need=%d count=%d thid=0x%x ra=%p", uid, signal, sema->count,
+            trace_thread_uid(), __builtin_return_address(0));
 
     return sema_wait(sema, signal, timeout);
 }
@@ -393,6 +432,9 @@ static int event_flag_wait(VitaEventFlagInfo *evf, uint32_t bits, SceUInt wait,
                            uint32_t *out_bits, const SceUInt *timeout, bool blocking)
 {
     int result = 0;
+
+    if (blocking)
+        SceKernelThreadMgr_run_pending_callbacks();
 
     pthread_mutex_lock(&evf->mutex);
 
@@ -664,9 +706,7 @@ EXPORT(SceThreadmgr, 0x9A68F547, int, sceKernelCloseEventFlag, SceUID uid)
  * keyed by the UID the kernel would assign.
  */
 
-#define VITA_LW_MUTEX_SLOTS 64
-
-static VitaLwMutex *g_lw_mutexes[VITA_LW_MUTEX_SLOTS];
+static VitaLwMutex *g_lw_mutexes;
 static pthread_mutex_t g_lw_mutex_table_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static SceUID sync_current_thread_uid(void)
@@ -679,6 +719,7 @@ static SceUID sync_current_thread_uid(void)
 VitaLwMutex *SceKernelSync_lw_mutex_from_work(SceKernelLwMutexWork *work)
 {
     void *pointer;
+    VitaLwMutex *found = NULL;
 
     /* Page zero is never mapped on Vita; reject obviously invalid work areas
      * instead of dereferencing them on the host. */
@@ -686,7 +727,21 @@ VitaLwMutex *SceKernelSync_lw_mutex_from_work(SceKernelLwMutexWork *work)
         return NULL;
 
     memcpy(&pointer, &work->data[0], sizeof(pointer));
-    return pointer;
+    if (!pointer)
+        return NULL;
+
+    /* Only hand out objects this module allocated: an uninitialised work area
+     * can contain arbitrary game data. */
+    pthread_mutex_lock(&g_lw_mutex_table_lock);
+    for (VitaLwMutex *it = g_lw_mutexes; it; it = it->next) {
+        if (it == pointer) {
+            found = it;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_lw_mutex_table_lock);
+
+    return found;
 }
 
 VitaLwMutex *SceKernelSync_lw_mutex_lookup(SceUID uid)
@@ -694,9 +749,9 @@ VitaLwMutex *SceKernelSync_lw_mutex_lookup(SceUID uid)
     VitaLwMutex *result = NULL;
 
     pthread_mutex_lock(&g_lw_mutex_table_lock);
-    for (int i = 0; i < VITA_LW_MUTEX_SLOTS; i++) {
-        if (g_lw_mutexes[i] && g_lw_mutexes[i]->uid == uid) {
-            result = g_lw_mutexes[i];
+    for (VitaLwMutex *it = g_lw_mutexes; it; it = it->next) {
+        if (it->uid == uid) {
+            result = it;
             break;
         }
     }
@@ -707,27 +762,20 @@ VitaLwMutex *SceKernelSync_lw_mutex_lookup(SceUID uid)
 
 static int lw_mutex_register(VitaLwMutex *lw)
 {
-    int slot = -1;
-
     pthread_mutex_lock(&g_lw_mutex_table_lock);
-    for (int i = 0; i < VITA_LW_MUTEX_SLOTS; i++) {
-        if (!g_lw_mutexes[i]) {
-            g_lw_mutexes[i] = lw;
-            slot = i;
-            break;
-        }
-    }
+    lw->next = g_lw_mutexes;
+    g_lw_mutexes = lw;
     pthread_mutex_unlock(&g_lw_mutex_table_lock);
 
-    return slot;
+    return 0;
 }
 
 static void lw_mutex_unregister(VitaLwMutex *lw)
 {
     pthread_mutex_lock(&g_lw_mutex_table_lock);
-    for (int i = 0; i < VITA_LW_MUTEX_SLOTS; i++) {
-        if (g_lw_mutexes[i] == lw) {
-            g_lw_mutexes[i] = NULL;
+    for (VitaLwMutex **link = &g_lw_mutexes; *link; link = &(*link)->next) {
+        if (*link == lw) {
+            *link = lw->next;
             break;
         }
     }
@@ -841,6 +889,10 @@ EXPORT(SceLibKernel, 0xDA6EC8EF, int, sceKernelCreateLwMutex, SceKernelLwMutexWo
     memset(work, 0, sizeof(*work));
     memcpy(&work->data[0], &lw, sizeof(lw));
 
+    if (trace_sync())
+        LOG("LwMutexCreate work=%p -> %p name=\"%s\" init=%d attr=0x%x thid=0x%x", work, lw,
+            lw->name, init_count, attr, sync_current_thread_uid());
+
     return 0;
 }
 
@@ -878,6 +930,10 @@ EXPORT(SceLibKernel, 0x46E7BE7B, int, sceKernelLockLwMutex, SceKernelLwMutexWork
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     if (count < 0)
         return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
+
+    if (trace_sync())
+        LOG("LwMutexLock work=%p data0=%llx count=%d thid=0x%x", work,
+            (unsigned long long)work->data[0], count, sync_current_thread_uid());
 
     lw->waiting++;
     for (int i = 0; i < count; i++)

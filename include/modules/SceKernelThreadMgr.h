@@ -36,6 +36,10 @@ int SceKernelSync_finish(void);
 
 VitaThreadInfo *SceKernelThreadMgr_get_thread_info(void);
 VitaThreadInfo *SceKernelThreadMgr_get_fallback_thread_info(void);
+/* Runs callbacks queued for the calling thread. The Vita does this when the
+   thread enters a blocking wait; titles (Unity's pthread.suprx among them)
+   rely on it to make progress. */
+int SceKernelThreadMgr_run_pending_callbacks(void);
 int SceKernelThreadMgr_main_entry(SceKernelThreadEntry entry, int args, void *argp);
 void SceKernelThreadMgr_notify_event_callbacks(SceUID event_id, int notify_arg);
 

@@ -10,7 +10,7 @@
  * pointer to this host object in its first word; LwCond needs the same object
  * to drive pthread_cond_wait, so the type is shared between the two modules.
  */
-typedef struct {
+typedef struct VitaLwMutex {
     pthread_mutex_t mutex;
     SceUID uid;
     char name[32];
@@ -20,6 +20,7 @@ typedef struct {
     int current_count;
     SceUID owner;
     uint32_t waiting;
+    struct VitaLwMutex *next;
 } VitaLwMutex;
 
 /*

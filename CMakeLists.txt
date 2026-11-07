@@ -24,13 +24,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(VITA2NATIVE_HEADLESS
     "Build without SDL2 (null display/input; useful for local testing and QEMU)" OFF)
 
-option(VITA2NATIVE_SOFTFP
-    "Use the base AAPCS float ABI for guest exports (older VitaSDK builds)" OFF)
-
-if(VITA2NATIVE_SOFTFP)
-    add_compile_definitions(VITA2NATIVE_SOFTFP=1)
-endif()
-
 if(VITA2NATIVE_HEADLESS)
     set(VITA2NATIVE_DISPLAY_SOURCE source/modules/SceDisplay_null.c)
     set(VITA2NATIVE_CTRL_SOURCE source/modules/SceCtrl_null.c)
@@ -139,6 +132,7 @@ add_executable(vita2native
     source/modules/SceIoAsync.c
     source/modules/SceLibClib.c
     source/modules/SceLibc.c
+    source/mspace.c
     source/modules/SceNet.c
     source/modules/SceNetCtl.c
     source/minimp3_impl.c
@@ -289,6 +283,17 @@ if(BUILD_TESTING)
     )
     target_link_libraries(host_smoke PRIVATE pthread)
     add_test(NAME host_smoke COMMAND host_smoke)
+
+    # The vendored dlmalloc is third-party code; keep our warning flags out of it.
+    set_source_files_properties(source/mspace.c PROPERTIES COMPILE_OPTIONS "-w")
+
+    add_executable(mspace_smoke
+        tests/mspace_smoke.c
+        source/mspace.c
+    )
+    target_include_directories(mspace_smoke PRIVATE include)
+    target_compile_definitions(mspace_smoke PRIVATE _GNU_SOURCE=1)
+    add_test(NAME mspace_smoke COMMAND mspace_smoke)
 
     add_executable(ctrl_script_smoke
         tests/ctrl_script_smoke.c

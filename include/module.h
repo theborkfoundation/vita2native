@@ -5,14 +5,12 @@
 #include <stdint.h>
 
 /*
- * Float ABI for exports that pass or return float by value. The current
- * VitaSDK toolchain defaults to hard-float (-mfloat-abi=hard), so guest code
- * puts those arguments in VFP registers. Older SDK builds (and the optional
- * softfp VitaSDK profile) use base AAPCS; configure with
- * -DVITA2NATIVE_SOFTFP=ON to build that variant. Integer-only functions are
- * unaffected either way.
+ * Float ABI for exports that pass or return float by value. PS Vita binaries
+ * use the base AAPCS convention (softfp: floats travel in core registers),
+ * while the host is built hard-float. Every ARM export that takes or returns a
+ * float/double by value must use this attribute.
  */
-#if defined(__arm__) && defined(VITA2NATIVE_SOFTFP)
+#if defined(__arm__)
 #define GUEST_SOFTFP_ABI __attribute__((pcs("aapcs")))
 #else
 #define GUEST_SOFTFP_ABI
@@ -53,8 +51,16 @@ extern const library_t __stop_exported_libraries[];
 
 #define EXPORT(library, nid, type, name, ...)                                                      \
     type name(__VA_ARGS__);                                                                        \
-    EXPORT_FUNC(library, nid, name)                                                                \
+    EXPORT_FUNC(library, nid, name)                                                               \
     type name(__VA_ARGS__)
+
+/* Same as EXPORT, but for entry points whose float/double arguments and
+   results travel in core registers (the guest uses the softfp ABI while the
+   host is built hard-float). */
+#define EXPORT_SOFTFP(library, nid, type, name, ...)                                                \
+    static type name(__VA_ARGS__) GUEST_SOFTFP_ABI;                                                \
+    EXPORT_FUNC(library, nid, name)                                                               \
+    static type name(__VA_ARGS__)
 
 #define NUM_EXPORTED_LIBS                                                                          \
     (((uintptr_t)&__stop_exported_libraries - (uintptr_t)&__start_exported_libraries) /            \

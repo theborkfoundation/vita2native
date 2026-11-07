@@ -28,6 +28,7 @@
 #include "fs.h"
 #include "log.h"
 #include "module.h"
+#include "mspace.h"
 
 #define SCE_LIBC_NID 0xbe43bb07
 #define SCE_LIBM_NID 0xcdae3c7d
@@ -409,145 +410,97 @@ EXPORT(SceLibc, 0xa9363e6b, void *, vita_memalign, size_t alignment, size_t size
 }
 
 /*
- * newlib's mspace allocator. The guest passes the base and size of a region it
- * reserved, and expects the handle to hold newlib's `malloc_state`. Unity both
- * imports these entry points and links its own copy of dlmalloc, so the handle
- * must be large enough (and zeroed) for either implementation to use.
+ * newlib's mspace allocator, backed by the vendored dlmalloc implementation.
+ * The handle owns exactly the region the guest reserved, and the chunk layout
+ * matches what titles that link their own dlmalloc (Unity's IL2CPP runtime)
+ * expect, so imported and inline calls operate on the same metadata.
+ *
+ * The wrapper functions are prefixed because dlmalloc defines the plain
+ * `mspace_*` names itself.
  */
-typedef struct {
-    int magic;
-    uint8_t state[0xffc];
-} SceMSpace;
+typedef void *SceMSpace;
 
-#define MSPACE_MAGIC 0x4d535043
-
-EXPORT(SceLibc, 0xcef7c575, SceMSpace *, mspace_create, void *base, size_t size)
+EXPORT(SceLibc, 0xcef7c575, SceMSpace, sce_mspace_create, void *base, size_t size)
 {
-    SceMSpace *mspace;
-
-    mspace = calloc(1, sizeof(*mspace));
-    if (mspace)
-        mspace->magic = MSPACE_MAGIC;
+    SceMSpace mspace = vita_mspace_create(base, size);
 
     if (trace_alloc())
-        LOG("mspace_create(base=%p, size=0x%x) -> %p", base, (unsigned)size, (void *)mspace);
+        LOG("mspace_create(base=%p, size=0x%x) -> %p", base, (unsigned)size, mspace);
 
     return mspace;
 }
 
-EXPORT(SceLibc, 0x30cbbc66, void, mspace_destroy, SceMSpace *mspace)
+EXPORT(SceLibc, 0x30cbbc66, void, sce_mspace_destroy, SceMSpace mspace)
 {
-    free(mspace);
+    vita_mspace_destroy(mspace);
 }
 
-EXPORT(SceLibc, 0xe080b96e, void *, mspace_malloc, SceMSpace *mspace, size_t size)
+EXPORT(SceLibc, 0xe080b96e, void *, sce_mspace_malloc, SceMSpace mspace, size_t size)
 {
-    void *block;
+    void *block = vita_mspace_malloc(mspace, size);
 
-    (void)mspace;
-    block = malloc(size);
-    if (trace_alloc()) {
-        static int dumped;
-
-        if (!dumped) {
-            const uint32_t *w = (const uint32_t *)mspace;
-
-            dumped = 1;
-            LOG("mspace %p state: %08" PRIx32 " %08" PRIx32 " %08" PRIx32 " %08" PRIx32
-                " %08" PRIx32 " %08" PRIx32 " %08" PRIx32 " %08" PRIx32,
-                (void *)mspace, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
-        }
-        LOG("mspace_malloc(%p, %u) -> %p", (void *)mspace, (unsigned)size, block);
-    }
+    if (trace_alloc())
+        LOG("mspace_malloc(%p, %u) -> %p", mspace, (unsigned)size, block);
     return block;
 }
 
-EXPORT(SceLibc, 0x3cdfd2a3, void, mspace_free, SceMSpace *mspace, void *block)
+EXPORT(SceLibc, 0x3cdfd2a3, void, sce_mspace_free, SceMSpace mspace, void *block)
 {
-    (void)mspace;
     if (trace_alloc())
-        LOG("mspace_free(%p, %p)", (void *)mspace, block);
-    free(block);
+        LOG("mspace_free(%p, %p)", mspace, block);
+    vita_mspace_free(mspace, block);
 }
 
-EXPORT(SceLibc, 0x4633134a, void *, mspace_realloc, SceMSpace *mspace, void *block, size_t size)
+EXPORT(SceLibc, 0x4633134a, void *, sce_mspace_realloc, SceMSpace mspace, void *block,
+       size_t size)
 {
-    void *result;
+    void *result = vita_mspace_realloc(mspace, block, size);
 
-    (void)mspace;
-    result = realloc(block, size);
     if (trace_alloc())
-        LOG("mspace_realloc(%p, %p, %u) -> %p", (void *)mspace, block, (unsigned)size, result);
+        LOG("mspace_realloc(%p, %p, %u) -> %p", mspace, block, (unsigned)size, result);
     return result;
 }
 
-EXPORT(SceLibc, 0x52f780dd, void *, mspace_memalign, SceMSpace *mspace, size_t alignment,
+EXPORT(SceLibc, 0x52f780dd, void *, sce_mspace_memalign, SceMSpace mspace, size_t alignment,
        size_t size)
 {
-    void *block;
+    void *block = vita_mspace_memalign(mspace, alignment, size);
 
-    (void)mspace;
-    block = vita_memalign(alignment, size);
     if (trace_alloc())
-        LOG("mspace_memalign(%p, %u, %u) -> %p", (void *)mspace, (unsigned)alignment,
-            (unsigned)size, block);
+        LOG("mspace_memalign(%p, %u, %u) -> %p", mspace, (unsigned)alignment, (unsigned)size,
+            block);
     return block;
 }
 
-EXPORT(SceLibc, 0x915da59e, void *, mspace_reallocalign, SceMSpace *mspace, void *block,
-       size_t alignment, size_t size)
+EXPORT(SceLibc, 0x915da59e, void *, sce_mspace_reallocalign, SceMSpace mspace, void *block,
+       size_t size, size_t alignment)
 {
-    void *fresh;
+    void *fresh = vita_mspace_reallocalign(mspace, block, size, alignment);
 
-    (void)mspace;
-
-    if (alignment == 0) {
-        void *result = realloc(block, size);
-
-        if (trace_alloc())
-            LOG("mspace_reallocalign(%p, %p, 0, %u) -> %p", (void *)mspace, block, (unsigned)size,
-                result);
-        return result;
-    }
-
-    fresh = vita_memalign(alignment, size);
     if (trace_alloc())
-        LOG("mspace_reallocalign(%p, %p, %u, %u) -> %p", (void *)mspace, block,
-            (unsigned)alignment, (unsigned)size, fresh);
-    if (!fresh)
-        return NULL;
-
-    if (block) {
-        size_t old = malloc_usable_size(block);
-
-        memcpy(fresh, block, old < size ? old : size);
-        free(block);
-    }
-
+        LOG("mspace_reallocalign(%p, %p, %u, %u) -> %p", mspace, block, (unsigned)size,
+            (unsigned)alignment, fresh);
     return fresh;
 }
 
-EXPORT(SceLibc, 0x7ad7a737, size_t, mspace_malloc_usable_size, SceMSpace *mspace, void *block)
+EXPORT(SceLibc, 0x7ad7a737, size_t, sce_mspace_malloc_usable_size, SceMSpace mspace, void *block)
 {
-    (void)mspace;
-    return block ? malloc_usable_size(block) : 0;
+    return vita_mspace_usable_size(mspace, block);
 }
 
-EXPORT(SceLibc, 0xf355f381, int, mspace_is_heap_empty, SceMSpace *mspace)
+EXPORT(SceLibc, 0xf355f381, int, sce_mspace_is_heap_empty, SceMSpace mspace)
 {
-    (void)mspace;
-    return 1;
+    return vita_mspace_is_empty(mspace);
 }
 
-EXPORT(SceLibc, 0x8d2a14c4, void, mspace_malloc_stats, SceMSpace *mspace)
+EXPORT(SceLibc, 0x8d2a14c4, void, sce_mspace_malloc_stats, SceMSpace mspace)
 {
     (void)mspace;
 }
 
-EXPORT(SceLibc, 0x2ff5d5bb, size_t, mspace_malloc_stats_fast, SceMSpace *mspace)
+EXPORT(SceLibc, 0x2ff5d5bb, size_t, sce_mspace_malloc_stats_fast, SceMSpace mspace)
 {
-    (void)mspace;
-    return 0;
+    return vita_mspace_footprint(mspace);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -873,53 +826,53 @@ __attribute__((naked)) static void vita_longjmp_body(void)
 #endif
 }
 
-EXPORT_FUNC(SCE_LIBC, 0x50b326ce, vita_setjmp_body)
-EXPORT_FUNC(SCE_LIBC, 0x2d81c8c8, vita_longjmp_body)
+EXPORT_FUNC(SceLibc, 0x50b326ce, vita_setjmp_body)
+EXPORT_FUNC(SceLibc, 0x2d81c8c8, vita_longjmp_body)
 
 /* ------------------------------------------------------------------------- */
 /* SceLibm                                                                   */
 /* ------------------------------------------------------------------------- */
 
-EXPORT(SceLibm, 0x22bb8237, double, vita_floor, double x) { return floor(x); }
-EXPORT(SceLibm, 0xcd7c05bd, float, vita_floorf, float x) { return floorf(x); }
-EXPORT(SceLibm, 0x63f05bd6, double, vita_ceil, double x) { return ceil(x); }
-EXPORT(SceLibm, 0x6bbfec89, float, vita_ceilf, float x) { return ceilf(x); }
-EXPORT(SceLibm, 0x943f218f, double, vita_rint, double x) { return rint(x); }
-EXPORT(SceLibm, 0xaaf31896, float, vita_roundf, float x) { return roundf(x); }
-EXPORT(SceLibm, 0x090b899f, float, vita_truncf, float x) { return truncf(x); }
-EXPORT(SceLibm, 0x75348906, float, vita_fabsf, float x) { return fabsf(x); }
-EXPORT(SceLibm, 0xda227fcc, double, vita_sqrt, double x) { return sqrt(x); }
-EXPORT(SceLibm, 0xba3f6937, float, vita_sqrtf, float x) { return sqrtf(x); }
-EXPORT(SceLibm, 0x640db443, double, vita_pow, double x, double y) { return pow(x, y); }
-EXPORT(SceLibm, 0x6dea815a, float, vita_powf, float x, float y) { return powf(x, y); }
-EXPORT(SceLibm, 0xeb027358, double, vita_exp, double x) { return exp(x); }
-EXPORT(SceLibm, 0x56473bc7, float, vita_expf, float x) { return expf(x); }
-EXPORT(SceLibm, 0x79415bd3, float, vita_exp2f, float x) { return exp2f(x); }
-EXPORT(SceLibm, 0x0056061b, double, vita_ldexp, double x, int exponent) { return ldexp(x, exponent); }
-EXPORT(SceLibm, 0x0e61e016, float, vita_ldexpf, float x, int exponent) { return ldexpf(x, exponent); }
-EXPORT(SceLibm, 0x59197427, double, vita_frexp, double x, int *exponent) { return frexp(x, exponent); }
-EXPORT(SceLibm, 0x1167b5d2, double, vita_modf, double x, double *integral) { return modf(x, integral); }
-EXPORT(SceLibm, 0x5d7a7eb2, float, vita_modff, float x, float *integral) { return modff(x, integral); }
-EXPORT(SceLibm, 0x798587e4, double, vita_fmod, double x, double y) { return fmod(x, y); }
-EXPORT(SceLibm, 0x1cd8f88e, float, vita_fmodf, float x, float y) { return fmodf(x, y); }
-EXPORT(SceLibm, 0x5bae40b0, double, vita_tan, double x) { return tan(x); }
-EXPORT(SceLibm, 0xa98e941b, float, vita_tanf, float x) { return tanf(x); }
-EXPORT(SceLibm, 0x516d9970, double, vita_atan, double x) { return atan(x); }
-EXPORT(SceLibm, 0xd78fc94e, float, vita_atanf, float x) { return atanf(x); }
-EXPORT(SceLibm, 0xc9be3f05, double, vita_atan2, double y, double x) { return atan2(y, x); }
-EXPORT(SceLibm, 0x4e09dd53, float, vita_atan2f, float y, float x) { return atan2f(y, x); }
-EXPORT(SceLibm, 0xd72b5acb, double, vita_acos, double x) { return acos(x); }
-EXPORT(SceLibm, 0x27eab8c1, float, vita_acosf, float x) { return acosf(x); }
-EXPORT(SceLibm, 0x4016b2e6, double, vita_asin, double x) { return asin(x); }
-EXPORT(SceLibm, 0x3a3e5424, float, vita_asinf, float x) { return asinf(x); }
-EXPORT(SceLibm, 0x7004fa75, float, vita_fmaxf, float x, float y) { return fmaxf(x, y); }
-EXPORT(SceLibm, 0x7673cc1e, float, vita_fminf, float x, float y) { return fminf(x, y); }
+EXPORT_SOFTFP(SceLibm, 0x22bb8237, double, vita_floor, double x) { return floor(x); }
+EXPORT_SOFTFP(SceLibm, 0xcd7c05bd, float, vita_floorf, float x) { return floorf(x); }
+EXPORT_SOFTFP(SceLibm, 0x63f05bd6, double, vita_ceil, double x) { return ceil(x); }
+EXPORT_SOFTFP(SceLibm, 0x6bbfec89, float, vita_ceilf, float x) { return ceilf(x); }
+EXPORT_SOFTFP(SceLibm, 0x943f218f, double, vita_rint, double x) { return rint(x); }
+EXPORT_SOFTFP(SceLibm, 0xaaf31896, float, vita_roundf, float x) { return roundf(x); }
+EXPORT_SOFTFP(SceLibm, 0x090b899f, float, vita_truncf, float x) { return truncf(x); }
+EXPORT_SOFTFP(SceLibm, 0x75348906, float, vita_fabsf, float x) { return fabsf(x); }
+EXPORT_SOFTFP(SceLibm, 0xda227fcc, double, vita_sqrt, double x) { return sqrt(x); }
+EXPORT_SOFTFP(SceLibm, 0xba3f6937, float, vita_sqrtf, float x) { return sqrtf(x); }
+EXPORT_SOFTFP(SceLibm, 0x640db443, double, vita_pow, double x, double y) { return pow(x, y); }
+EXPORT_SOFTFP(SceLibm, 0x6dea815a, float, vita_powf, float x, float y) { return powf(x, y); }
+EXPORT_SOFTFP(SceLibm, 0xeb027358, double, vita_exp, double x) { return exp(x); }
+EXPORT_SOFTFP(SceLibm, 0x56473bc7, float, vita_expf, float x) { return expf(x); }
+EXPORT_SOFTFP(SceLibm, 0x79415bd3, float, vita_exp2f, float x) { return exp2f(x); }
+EXPORT_SOFTFP(SceLibm, 0x0056061b, double, vita_ldexp, double x, int exponent) { return ldexp(x, exponent); }
+EXPORT_SOFTFP(SceLibm, 0x0e61e016, float, vita_ldexpf, float x, int exponent) { return ldexpf(x, exponent); }
+EXPORT_SOFTFP(SceLibm, 0x59197427, double, vita_frexp, double x, int *exponent) { return frexp(x, exponent); }
+EXPORT_SOFTFP(SceLibm, 0x1167b5d2, double, vita_modf, double x, double *integral) { return modf(x, integral); }
+EXPORT_SOFTFP(SceLibm, 0x5d7a7eb2, float, vita_modff, float x, float *integral) { return modff(x, integral); }
+EXPORT_SOFTFP(SceLibm, 0x798587e4, double, vita_fmod, double x, double y) { return fmod(x, y); }
+EXPORT_SOFTFP(SceLibm, 0x1cd8f88e, float, vita_fmodf, float x, float y) { return fmodf(x, y); }
+EXPORT_SOFTFP(SceLibm, 0x5bae40b0, double, vita_tan, double x) { return tan(x); }
+EXPORT_SOFTFP(SceLibm, 0xa98e941b, float, vita_tanf, float x) { return tanf(x); }
+EXPORT_SOFTFP(SceLibm, 0x516d9970, double, vita_atan, double x) { return atan(x); }
+EXPORT_SOFTFP(SceLibm, 0xd78fc94e, float, vita_atanf, float x) { return atanf(x); }
+EXPORT_SOFTFP(SceLibm, 0xc9be3f05, double, vita_atan2, double y, double x) { return atan2(y, x); }
+EXPORT_SOFTFP(SceLibm, 0x4e09dd53, float, vita_atan2f, float y, float x) { return atan2f(y, x); }
+EXPORT_SOFTFP(SceLibm, 0xd72b5acb, double, vita_acos, double x) { return acos(x); }
+EXPORT_SOFTFP(SceLibm, 0x27eab8c1, float, vita_acosf, float x) { return acosf(x); }
+EXPORT_SOFTFP(SceLibm, 0x4016b2e6, double, vita_asin, double x) { return asin(x); }
+EXPORT_SOFTFP(SceLibm, 0x3a3e5424, float, vita_asinf, float x) { return asinf(x); }
+EXPORT_SOFTFP(SceLibm, 0x7004fa75, float, vita_fmaxf, float x, float y) { return fmaxf(x, y); }
+EXPORT_SOFTFP(SceLibm, 0x7673cc1e, float, vita_fminf, float x, float y) { return fminf(x, y); }
 
 /* newlib's internal entry points. */
-EXPORT(SceLibm, 0x67e99979, double, vita_log, double x) { return log(x); }
-EXPORT(SceLibm, 0xd5bd8d5c, float, vita_logf, float x) { return logf(x); }
+EXPORT_SOFTFP(SceLibm, 0x67e99979, double, vita_log, double x) { return log(x); }
+EXPORT_SOFTFP(SceLibm, 0xd5bd8d5c, float, vita_logf, float x) { return logf(x); }
 
-EXPORT(SceLibm, 0x603caa93, double, vita_sinx, double x, int *sign)
+EXPORT_SOFTFP(SceLibm, 0x603caa93, double, vita_sinx, double x, int *sign)
 {
     if (sign)
         *sign = 1;
@@ -927,7 +880,7 @@ EXPORT(SceLibm, 0x603caa93, double, vita_sinx, double x, int *sign)
     return sin(x);
 }
 
-EXPORT(SceLibm, 0x93fc85ed, float, vita_fsinx, float x, int *sign)
+EXPORT_SOFTFP(SceLibm, 0x93fc85ed, float, vita_fsinx, float x, int *sign)
 {
     if (sign)
         *sign = 1;
