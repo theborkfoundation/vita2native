@@ -9,6 +9,7 @@
 #include "host.h"
 #include "log.h"
 #include "module.h"
+#include "modules/SceCtrl_script.h"
 #include "util.h"
 
 static SDL_GameController *g_controller;
@@ -138,6 +139,7 @@ EXPORT(SceCtrl, 0xA9C3CED6, int, sceCtrlPeekBufferPositive, int port, SceCtrlDat
 
     keys = SDL_GetKeyboardState(NULL);
     buttons |= keyboard_buttons(keys);
+    buttons |= SceCtrl_script_buttons();
 
     if (g_controller) {
         buttons |= controller_buttons(g_controller);

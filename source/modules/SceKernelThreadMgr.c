@@ -1,3 +1,7 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* pthread_setname_np */
+#endif
+
 #include <errno.h>
 #include <m-dict.h>
 #include <psp2/io/fcntl.h>
@@ -11,6 +15,8 @@
 #include <psp2/kernel/threadmgr/mutex.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
@@ -231,6 +237,17 @@ static void NORETURN thread_entry_wrapper(void *arg)
     int ret;
 
     threadTlsSet(g_vita_thread_info_tls_slot_id, ti);
+
+    /* Make guest threads easy to spot in gdb and /proc: the name carries the
+       guest thid, and host_tid lets the two views be correlated. */
+    ti->host_tid = (int)syscall(SYS_gettid);
+    {
+        char host_name[16];
+
+        snprintf(host_name, sizeof(host_name), "g%x:%.9s", ti->uid, ti->name);
+        pthread_setname_np(pthread_self(), host_name);
+    }
+    LOG("Thread 0x%x \"%s\" runs as host tid %d", ti->uid, ti->name, ti->host_tid);
 
     thread_event_notify(SCE_KERNEL_THREAD_EVENT_TYPE_START, ti->uid);
 

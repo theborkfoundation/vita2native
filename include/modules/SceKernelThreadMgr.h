@@ -9,6 +9,7 @@ typedef struct {
     uint32_t index;
     Thread thread;
     SceUID uid;
+    int host_tid;
     char name[32];
     SceKernelThreadEntry entry;
     SceSize arglen;
