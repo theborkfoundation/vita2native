@@ -1180,8 +1180,9 @@ static int decode_bc_level(uint8_t *dest, const uint8_t *input, SceGxmTextureTyp
         return -1;
 
     if (type == SCE_GXM_TEXTURE_SWIZZLED || type == SCE_GXM_TEXTURE_CUBE || is_arbitrary(type)) {
-        uint32_t layout_x = info->layout_width / 4;
-        uint32_t layout_y = info->layout_height / 4;
+        /* A level smaller than one block still occupies a whole 4x4 block. */
+        uint32_t layout_x = (info->layout_width + 3) / 4;
+        uint32_t layout_y = (info->layout_height + 3) / 4;
         uint32_t minimum = layout_x < layout_y ? layout_x : layout_y;
         uint32_t k = highest_bit(minimum);
         uint32_t count = layout_x * layout_y;

@@ -1177,7 +1177,10 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
                             break;
                         }
                     }
-                    LOG("SceGxm: unsupported texture format 0x%08x, sampling black", format);
+                    LOG("SceGxm: texture decode failed: fmt=0x%08x type=%d %ux%u layout %ux%u face %u level %u",
+                        format, (int)gxm_texture_get_type(texture), (unsigned)info.width,
+                        (unsigned)info.height, (unsigned)info.layout_width,
+                        (unsigned)info.layout_height, face, level);
                 }
                 free(rgba);
                 gxm_forget_texture(cache->tex);
@@ -1530,6 +1533,7 @@ typedef struct {
 } GxmDsLayout;
 
 static GxmDsLayout gxm_ds_layout(SceGxmDepthStencilFormat format);
+static int gxm_state_trace(void);
 
 static void gxm_flush_state(SceGxmContext *context, const GxmLinkedProgram *linked,
                            const uint32_t *stream_starts)
@@ -3729,6 +3733,19 @@ EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsign
                              SCE_GXM_DEPTH_STENCIL_BG_CTRL_STENCIL_MASK;
             }
 
+            if (gxm_state_trace()) {
+                static unsigned int traced_scenes;
+
+                if (traced_scenes < 8) {
+                    LOG("SceGxm: scene ds=%p zls=0x%x depthData=%p clear=%.3f stencil=%u",
+                        (const void *)context->ds_surface,
+                        context->ds_surface ? context->ds_surface->zlsControl : 0,
+                        context->ds_surface ? context->ds_surface->depthData : NULL, bg_depth,
+                        bg_stencil);
+                    traced_scenes++;
+                }
+            }
+
             /* glClear honours the write masks. */
             g_gl->glDepthMask(GL_TRUE);
             g_gl->glStencilMaskSeparate(GL_FRONT_AND_BACK, 0xFF);
@@ -5391,10 +5408,38 @@ static void gxm_batch_flush(SceGxmContext *context)
                 if (vu) {
                     const float *vf = (const float *)vu;
 
-                    LOG("state %u vu16: %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | "
-                        "%.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f",
-                        traced, vf[0], vf[1], vf[2], vf[3], vf[4], vf[5], vf[6], vf[7],
-                        vf[8], vf[9], vf[10], vf[11], vf[12], vf[13], vf[14], vf[15]);
+                    for (unsigned int row = 0; row < 9; row++)
+                        LOG("state %u u%d: %.4f %.4f %.4f %.4f", traced, row,
+                            vf[row * 4 + 0], vf[row * 4 + 1], vf[row * 4 + 2], vf[row * 4 + 3]);
+                }
+                if (vp) {
+                    const SceGxmProgram *prog = vp->programId->programHeader;
+                    const SceGxmProgramParameter *pos =
+                        sceGxmProgramFindParameterBySemantic(prog, SCE_GXM_PARAMETER_SEMANTIC_POSITION, 0);
+
+                    for (unsigned int a = 0; pos && a < vp->attributeCount; a++) {
+                        const SceGxmVertexAttribute *attr = &vp->attributes[a];
+                        const GxmBufferArena *arena;
+                        uint32_t stride;
+                        const uint8_t *base;
+
+                        if (attr->regIndex != (uint16_t)pos->resource_index)
+                            continue;
+                        if (attr->streamIndex >= SCE_GXM_MAX_VERTEX_STREAMS)
+                            break;
+                        arena = &context->stream_arena[attr->streamIndex];
+                        stride = vp->streams[attr->streamIndex].stride;
+                        if (!arena->stage || !stride || attr->format != SCE_GXM_ATTRIBUTE_FORMAT_F32)
+                            break;
+                        base = arena->stage + batch->stream_start[attr->streamIndex] + attr->offset;
+                        for (unsigned int v = 0; v < 3 && v < batch->vertex_count; v++) {
+                            const float *p = (const float *)(base + (size_t)v * stride);
+
+                            LOG("state %u vert %u: %.2f %.2f %.2f %.2f", traced, v, p[0], p[1],
+                                p[2], attr->componentCount > 3 ? p[3] : 1.0f);
+                        }
+                        break;
+                    }
                 }
                 traced++;
             }
