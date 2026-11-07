@@ -808,6 +808,16 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
     return shader;
 }
 
+static int gxm_program_trace(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_GXM_PROGRAM_TRACE") != NULL;
+
+    return enabled;
+}
+
 static GLuint gxm_get_linked_program(const SceGxmVertexProgram *vs, const SceGxmFragmentProgram *fs,
                                      GxmLinkedProgram **linked_out)
 {
@@ -835,7 +845,11 @@ static GLuint gxm_get_linked_program(const SceGxmVertexProgram *vs, const SceGxm
     g_gl->glGetProgramiv(program, GL_LINK_STATUS, &ok);
     if (!ok) {
         g_gl->glGetProgramInfoLog(program, sizeof(log), NULL, log);
-        LOG("SceGxm: program link failed:\n%s", log);
+        if (log[0] == '\0')
+            snprintf(log, sizeof(log), "(no info log)");
+        LOG("SceGxm: program link failed (vs=%p shader %u, fs=%p shader %u):\n%s",
+            (const void *)vs, vs ? vs->shader : 0, (const void *)fs, fs ? fs->shader : 0,
+            log);
         g_gl->glDeleteProgram(program);
         return 0;
     }
@@ -2061,6 +2075,11 @@ EXPORT(SceGxm, 0xB7BBA6D5, int, sceGxmShaderPatcherCreateVertexProgram,
     }
 
     *vertexProgram = vp;
+
+    if (gxm_program_trace())
+        LOG("SceGxm: create vp %p shader %u program %p", (void *)vp, vp->shader,
+            (const void *)programId->programHeader);
+
     return 0;
 }
 
@@ -2119,6 +2138,11 @@ EXPORT(SceGxm, 0x4ED2E49D, int, sceGxmShaderPatcherCreateFragmentProgram,
     }
 
     *fragmentProgram = fp;
+
+    if (gxm_program_trace())
+        LOG("SceGxm: create fp %p shader %u program %p", (void *)fp, fp->shader,
+            (const void *)programId->programHeader);
+
     return 0;
 }
 
@@ -2130,6 +2154,10 @@ EXPORT(SceGxm, 0xBE2743D1, int, sceGxmShaderPatcherReleaseFragmentProgram,
         return SCE_GXM_ERROR_INVALID_POINTER;
     if (--fragmentProgram->refcount > 0)
         return 0;
+
+    if (gxm_program_trace())
+        LOG("SceGxm: release fp %p shader %u", (void *)fragmentProgram, fragmentProgram->shader);
+
     if (g_gl && fragmentProgram->shader)
         g_gl->glDeleteShader(fragmentProgram->shader);
     free(fragmentProgram);
@@ -2879,12 +2907,20 @@ EXPORT(SceGxm, 0x2B5C0444, int, sceGxmMidSceneFlush, SceGxmContext *context, uns
 {
     (void)flags;
     (void)vertexSyncObject;
-    (void)vertexNotification;
     if (!context->in_scene)
         return SCE_GXM_ERROR_NOT_WITHIN_SCENE;
     gxm_batch_flush(context);
     if (g_gl)
         g_gl->glFinish();
+
+    /* Unity waits on this fence from its GfxDevice worker after streaming
+       draws, so it has to be published once the batch has really executed. */
+    if (vertexNotification && vertexNotification->address) {
+        __sync_synchronize();
+        *vertexNotification->address = vertexNotification->value;
+        __sync_synchronize();
+    }
+
     return 0;
 }
 
@@ -4206,6 +4242,15 @@ EXPORT(SceGxm, 0x31FF8ABD, void, sceGxmSetVertexProgram, SceGxmContext *context,
 EXPORT(SceGxm, 0xAD2F48D9, void, sceGxmSetFragmentProgram, SceGxmContext *context,
        const SceGxmFragmentProgram *fragmentProgram)
 {
+    if (gxm_program_trace() && fragmentProgram && !fragmentProgram->shader)
+        LOG("SceGxm: bind fragment program %p without a GL shader (programId %p header %p type %d)",
+            (const void *)fragmentProgram, (const void *)fragmentProgram->programId,
+            fragmentProgram->programId ? (const void *)fragmentProgram->programId->programHeader
+                                       : NULL,
+            fragmentProgram->programId && fragmentProgram->programId->programHeader
+                ? (int)(fragmentProgram->programId->programHeader->program_flags & 1)
+                : -1);
+
     context->fragment_program = fragmentProgram;
 }
 
@@ -5343,6 +5388,14 @@ static void gxm_batch_flush(SceGxmContext *context)
                     (unsigned)gxm_texture_get_format(t0), td ? td[0] : 0,
                     vu ? vu[0] : 0, vu ? vu[1] : 0, vu ? vu[2] : 0, vu ? vu[3] : 0,
                     fu ? fu[0] : 0, fu ? fu[1] : 0);
+                if (vu) {
+                    const float *vf = (const float *)vu;
+
+                    LOG("state %u vu16: %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | "
+                        "%.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f",
+                        traced, vf[0], vf[1], vf[2], vf[3], vf[4], vf[5], vf[6], vf[7],
+                        vf[8], vf[9], vf[10], vf[11], vf[12], vf[13], vf[14], vf[15]);
+                }
                 traced++;
             }
         }
@@ -6085,6 +6138,11 @@ EXPORT(SceGxm, 0x2C5550F0, int, sceGxmShaderPatcherGetFragmentProgramRefCount,
 EXPORT(SceGxm, 0xA4433427, int, sceGxmShaderPatcherCreateMaskUpdateFragmentProgram,
        SceGxmShaderPatcher *shaderPatcher, SceGxmFragmentProgram **fragmentProgram)
 {
+    /* GXM's built-in mask-update fragment program has no GXP of its own: it
+       exists to drive the stencil write with the colour mask off. GL still
+       needs some fragment shader attached to link and draw. */
+    static const char mask_update_fragment[] = "#version 310 es\n"
+                                               "void main() {}\n";
     SceGxmFragmentProgram *fp = calloc(1, sizeof(*fp));
 
     (void)shaderPatcher;
@@ -6098,6 +6156,19 @@ EXPORT(SceGxm, 0xA4433427, int, sceGxmShaderPatcherCreateMaskUpdateFragmentProgr
         SCE_GXM_BLEND_FACTOR_ONE, SCE_GXM_BLEND_FACTOR_ZERO,
         SCE_GXM_BLEND_FACTOR_ONE, SCE_GXM_BLEND_FACTOR_ZERO,
     };
+
+    if (g_gl) {
+        bool compiled = false;
+
+        fp->shader = gxm_create_compiled_shader(GL_FRAGMENT_SHADER, "mask-update",
+                                                mask_update_fragment, &compiled);
+        if (!compiled) {
+            g_gl->glDeleteShader(fp->shader);
+            free(fp);
+            return SCE_GXM_ERROR_INVALID_VALUE;
+        }
+    }
+
     *fragmentProgram = fp;
     return 0;
 }
