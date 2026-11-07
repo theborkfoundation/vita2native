@@ -209,6 +209,9 @@ EXPORT(SceIofilemgr, 0xC70B8886, int, sceIoClose, SceUID fd)
     free(vfile->file);
     free(vfile);
 
+    if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+        LOG("sceIoClose(0x%x)", fd);
+
     if (ret)
         return SCE_ERROR_ERRNO_EBADF;
 
@@ -444,6 +447,9 @@ EXPORT(SceLibKernel, 0xBCA5B623, int, sceIoGetstat, const char *file, SceIoStat 
     if (stat(host_path, &sb) != 0)
         return sce_error_from_errno(errno);
 
+    if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+        LOG("sceIoGetstat(\"%s\") -> size=%lld", file, (long long)sb.st_size);
+
     stat_to_sce_iostat(&sb, st);
     return 0;
 }
@@ -570,6 +576,10 @@ EXPORT(SceLibKernel, 0x99BA173E, SceOff, sceIoLseek, SceUID fd, SceOff offset, i
     if (fseeko(vfile->fp, (off_t)offset, whence) != 0)
         return -1;
 
+    if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+        LOG("sceIoLseek(0x%x, %lld, %d) -> %lld", fd, (long long)offset, whence,
+            (long long)ftello(vfile->fp));
+
     return (SceOff)ftello(vfile->fp);
 }
 
@@ -625,6 +635,10 @@ EXPORT(SceLibKernel, 0x52315AD7, SceSSize, sceIoPread, SceUID fd, void *buf, Sce
     read = fread(buf, 1, nbyte, vfile->fp);
     if (saved >= 0)
         fseek(vfile->fp, saved, SEEK_SET);
+
+    if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+        LOG("sceIoPread(0x%x, %u, %lld) -> %d", fd, (unsigned)nbyte, (long long)offset,
+            (int)read);
 
     return (SceSSize)read;
 }

@@ -12,6 +12,7 @@
 #define USE_LOCKS 0
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,12 +21,23 @@
 
 #include "mspace.h"
 
-typedef struct {
-    mspace inner;
+/*
+ * A dlmalloc mspace handle is the `malloc_state` living at the start of the
+ * guest-supplied region, not an opaque host pointer. Titles that link their
+ * own dlmalloc (Unity) cast the handle back to `mstate` and use it inline, so
+ * returning anything else corrupts their heap bookkeeping. Keep our own
+ * metadata (region bounds, live count) in a side registry keyed by the handle.
+ */
+typedef struct VitaMspaceImpl {
+    mspace handle;
     size_t live;
     void *base;
     size_t size;
+    struct VitaMspaceImpl *next;
 } VitaMspaceImpl;
+
+static pthread_mutex_t g_mspaces_lock = PTHREAD_MUTEX_INITIALIZER;
+static VitaMspaceImpl *g_mspaces;
 
 static int mspace_debug(void)
 {
@@ -36,9 +48,45 @@ static int mspace_debug(void)
     return enabled;
 }
 
+static VitaMspaceImpl *mspace_lookup(mspace handle)
+{
+    VitaMspaceImpl *found = NULL;
+
+    pthread_mutex_lock(&g_mspaces_lock);
+    for (VitaMspaceImpl *it = g_mspaces; it; it = it->next) {
+        if (it->handle == handle) {
+            found = it;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_mspaces_lock);
+
+    return found;
+}
+
+static void mspace_register(VitaMspaceImpl *impl)
+{
+    pthread_mutex_lock(&g_mspaces_lock);
+    impl->next = g_mspaces;
+    g_mspaces = impl;
+    pthread_mutex_unlock(&g_mspaces_lock);
+}
+
+static void mspace_unregister(VitaMspaceImpl *impl)
+{
+    pthread_mutex_lock(&g_mspaces_lock);
+    for (VitaMspaceImpl **link = &g_mspaces; *link; link = &(*link)->next) {
+        if (*link == impl) {
+            *link = impl->next;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_mspaces_lock);
+}
+
 static void debug_chunk(const char *what, VitaMspaceImpl *impl, void *ptr)
 {
-    mstate ms = (mstate)impl->inner;
+    mstate ms = (mstate)impl->handle;
     mchunkptr p;
 
     if (!mspace_debug())
@@ -55,6 +103,14 @@ static void debug_chunk(const char *what, VitaMspaceImpl *impl, void *ptr)
     fflush(stderr);
 }
 
+static void mspace_note_alloc(mspace handle, int delta)
+{
+    VitaMspaceImpl *impl = mspace_lookup(handle);
+
+    if (impl)
+        __atomic_add_fetch(&impl->live, delta, __ATOMIC_RELAXED);
+}
+
 VitaMspace vita_mspace_create(void *base, size_t size)
 {
     VitaMspaceImpl *impl;
@@ -66,91 +122,95 @@ VitaMspace vita_mspace_create(void *base, size_t size)
     if (!impl)
         return NULL;
 
-    impl->inner = create_mspace_with_base(base, size, 0);
-    if (!impl->inner) {
+    impl->handle = create_mspace_with_base(base, size, 0);
+    if (!impl->handle) {
         free(impl);
         return NULL;
     }
 
     impl->base = base;
     impl->size = size;
+    mspace_register(impl);
 
-    return impl;
+    return impl->handle;
 }
 
 void vita_mspace_destroy(VitaMspace mspace)
 {
-    VitaMspaceImpl *impl = mspace;
+    VitaMspaceImpl *impl;
 
-    if (!impl)
+    if (!mspace)
         return;
 
-    destroy_mspace(impl->inner);
-    free(impl);
+    impl = mspace_lookup(mspace);
+    if (impl) {
+        mspace_unregister(impl);
+        destroy_mspace(impl->handle);
+        free(impl);
+        return;
+    }
+
+    destroy_mspace(mspace);
 }
 
 void *vita_mspace_malloc(VitaMspace mspace, size_t size)
 {
-    VitaMspaceImpl *impl = mspace;
     void *block;
 
-    if (!impl)
+    if (!mspace)
         return NULL;
 
-    block = mspace_malloc(impl->inner, size);
+    block = mspace_malloc(mspace, size);
     if (block)
-        __atomic_add_fetch(&impl->live, 1, __ATOMIC_RELAXED);
+        mspace_note_alloc(mspace, 1);
 
     return block;
 }
 
 void vita_mspace_free(VitaMspace mspace, void *ptr)
 {
-    VitaMspaceImpl *impl = mspace;
+    VitaMspaceImpl *impl;
 
-    if (!impl || !ptr)
+    if (!mspace || !ptr)
         return;
 
-    debug_chunk("free", impl, ptr);
-    mspace_free(impl->inner, ptr);
-    __atomic_sub_fetch(&impl->live, 1, __ATOMIC_RELAXED);
+    impl = mspace_lookup(mspace);
+    if (impl)
+        debug_chunk("free", impl, ptr);
+
+    mspace_free(mspace, ptr);
+    mspace_note_alloc(mspace, -1);
 }
 
 void *vita_mspace_realloc(VitaMspace mspace, void *ptr, size_t size)
 {
-    VitaMspaceImpl *impl = mspace;
-    void *block;
-
-    if (!impl)
+    if (!mspace)
         return NULL;
     if (!ptr)
         return vita_mspace_malloc(mspace, size);
 
-    block = mspace_realloc(impl->inner, ptr, size);
-    return block;
+    return mspace_realloc(mspace, ptr, size);
 }
 
 void *vita_mspace_memalign(VitaMspace mspace, size_t alignment, size_t size)
 {
-    VitaMspaceImpl *impl = mspace;
     void *block;
 
-    if (!impl)
+    if (!mspace)
         return NULL;
 
-    block = mspace_memalign(impl->inner, alignment, size);
+    block = mspace_memalign(mspace, alignment, size);
     if (block)
-        __atomic_add_fetch(&impl->live, 1, __ATOMIC_RELAXED);
+        mspace_note_alloc(mspace, 1);
 
     return block;
 }
 
 void *vita_mspace_reallocalign(VitaMspace mspace, void *ptr, size_t size, size_t alignment)
 {
-    VitaMspaceImpl *impl = mspace;
     void *fresh;
 
-    if (!impl)
+    if (!mspace)
         return NULL;
     if (alignment == 0)
         return vita_mspace_realloc(mspace, ptr, size);
@@ -183,14 +243,12 @@ size_t vita_mspace_usable_size(VitaMspace mspace, const void *ptr)
 
 int vita_mspace_is_empty(VitaMspace mspace)
 {
-    VitaMspaceImpl *impl = mspace;
+    VitaMspaceImpl *impl = mspace_lookup(mspace);
 
     return impl ? impl->live == 0 : 1;
 }
 
 size_t vita_mspace_footprint(VitaMspace mspace)
 {
-    VitaMspaceImpl *impl = mspace;
-
-    return impl ? mspace_footprint(impl->inner) : 0;
+    return mspace ? mspace_footprint(mspace) : 0;
 }

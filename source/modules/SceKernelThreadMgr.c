@@ -2237,6 +2237,13 @@ EXPORT(SceLibKernel, 0x9A6D085B, int, sceKernelResumeThreadForMono, SceUID thid)
     return sceKernelResumeThreadForVM(thid);
 }
 
+/* Unity's PTHREAD_PRX imports the same entry points from the SceKernelForMono
+   library (NID 0x5feea076) rather than from SceLibKernel. */
+EXPORT_FUNC(SceKernelForMono, 0xAD210F16, sceKernelGetThreadContextForMono);
+EXPORT_FUNC(SceKernelForMono, 0x92A0964D, sceKernelSetThreadContextForMono);
+EXPORT_FUNC(SceKernelForMono, 0x38839DA2, sceKernelSuspendThreadForMono);
+EXPORT_FUNC(SceKernelForMono, 0x9A6D085B, sceKernelResumeThreadForMono);
+
 /* ------------------------------------------------ performance counters */
 
 EXPORT(SceThreadmgr, 0x6B9711AC, int, _sceKernelPMonThreadGetCounter, SceUID thid, int counter,
@@ -2482,6 +2489,7 @@ EXPORT(SceThreadmgr, 0xF3489EF4, int, sceKernelWaitThreadEnd_089, SceUID thid, i
 DECLARE_LIBRARY(SceThreadmgr, 0x859a24b1);
 DECLARE_LIBRARY(SceThreadmgrCoredumpTime, 0x5E8D0E22);
 DECLARE_LIBRARY(SceProcessmgr, 0x2dd91812);
+DECLARE_LIBRARY(SceKernelForMono, 0x5FEEA076);
 
 int SceKernelThreadMgr_init(void)
 {
