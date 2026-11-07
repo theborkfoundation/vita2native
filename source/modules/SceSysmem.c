@@ -4,6 +4,8 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include "modules/SceSysmem.h"
 #include "gfx.h"
@@ -13,6 +15,48 @@
 #include "util.h"
 
 static _Atomic SceUID g_last_uid = 1;
+
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0x100000
+#endif
+
+/*
+ * Vita user memory lives in 0x81000000-0xBFFFFFFF. Titles assume their memory
+ * blocks are in that range (some pack the block id into the address bits or
+ * validate pointers against it), so map blocks there instead of wherever the
+ * host allocator happens to put them.
+ */
+#define VITA_MEMBLOCK_BASE 0x8a000000u
+#define VITA_MEMBLOCK_LIMIT 0xb0000000u
+
+static _Atomic uintptr_t g_memblock_hint = VITA_MEMBLOCK_BASE;
+
+static void *alloc_vita_range(size_t size, size_t alignment)
+{
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    size_t length = (size + page - 1) & ~(page - 1);
+
+    if (page == 0)
+        page = 4096;
+
+    for (int attempt = 0; attempt < 64; attempt++) {
+        uintptr_t hint = (atomic_fetch_add(&g_memblock_hint, length + alignment) + alignment - 1) &
+                         ~(uintptr_t)(alignment - 1);
+        void *mapped;
+
+        if (hint < VITA_MEMBLOCK_BASE || hint + length > VITA_MEMBLOCK_LIMIT)
+            return NULL;
+
+        mapped = mmap((void *)hint, length, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+        if (mapped == (void *)hint)
+            return mapped;
+        if (mapped != MAP_FAILED)
+            munmap(mapped, length);
+    }
+
+    return NULL;
+}
 
 DICT_DEF2(vita_memblock_info_dict, SceUID, M_DEFAULT_OPLIST, VitaMemBlockInfo *, M_POD_OPLIST)
 static vita_memblock_info_dict_t g_vita_memblock_infos;
@@ -39,25 +83,52 @@ EXPORT(SceSysmem, 0xB9D5EBDE, SceUID, sceKernelAllocMemBlock, const char *name,
     uint32_t alignment;
     void *base;
 
-    LOG("sceKernelAllocMemBlock: name: %s, size: 0x%x", name, size);
+    LOG("sceKernelAllocMemBlock: name: %s, size: 0x%x, type: 0x%x, align: 0x%x", name, size, type,
+        opt ? opt->alignment : 0);
 
     block = malloc(sizeof(*block));
     if (!block)
         return SCE_KERNEL_ERROR_NO_MEMORY;
+    memset(block, 0, sizeof(*block));
 
     if (type == SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW)
         alignment = 256 * 1024;
+    else if (type == SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW ||
+             type == SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW)
+        alignment = 1024 * 1024;
     else
         alignment = 4 * 1024;
 
-    if (posix_memalign(&base, alignment, ALIGN(size, alignment)) != 0)
+    if (opt && (opt->attr & SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_ALIGNMENT) &&
+        opt->alignment > alignment)
+        alignment = opt->alignment;
+
+    /* The firmware aligns a block to the largest power of two dividing its
+       size; engines rely on this when carving pools out of a block. */
+    if ((size & (~size + 1)) > alignment)
+        alignment = size & (~size + 1);
+
+    if (alignment & (alignment - 1)) {
+        uint32_t rounded = 4096;
+
+        while (rounded < alignment)
+            rounded <<= 1;
+        alignment = rounded;
+    }
+
+    base = alloc_vita_range(size, alignment);
+    if (base) {
+        block->mapped_size = (uint32_t)(((size + 4095) & ~4095u));
+    } else if (posix_memalign(&base, alignment, ALIGN(size, alignment)) == 0) {
+        block->mapped_size = 0;
+    } else {
         base = NULL;
+    }
     if (!base) {
         free(block);
         return SCE_KERNEL_ERROR_NO_MEMORY;
     }
 
-    memset(block, 0, sizeof(*block));
     block->uid = SceSysmem_get_next_uid();
     if (name)
         strncpy(block->name, name, sizeof(block->name) - 1);
@@ -66,7 +137,10 @@ EXPORT(SceSysmem, 0xB9D5EBDE, SceUID, sceKernelAllocMemBlock, const char *name,
     block->type = type;
     block->gpu_memblock = host_gpu_memblock_create(block->base, block->size);
     if (!block->gpu_memblock) {
-        free(block->base);
+        if (block->mapped_size)
+            munmap(block->base, block->mapped_size);
+        else
+            free(block->base);
         free(block);
         return SCE_KERNEL_ERROR_NO_MEMORY;
     }
@@ -74,6 +148,9 @@ EXPORT(SceSysmem, 0xB9D5EBDE, SceUID, sceKernelAllocMemBlock, const char *name,
     rwlockWriteLock(&g_vita_memblock_infos_lock);
     vita_memblock_info_dict_set_at(g_vita_memblock_infos, block->uid, block);
     rwlockWriteUnlock(&g_vita_memblock_infos_lock);
+
+    LOG("sceKernelAllocMemBlock: \"%s\" -> 0x%x base=%p size=0x%x align=0x%x", name,
+        block->uid, block->base, size, alignment);
 
     return block->uid;
 }
@@ -86,7 +163,10 @@ EXPORT(SceSysmem, 0xA91E15EE, int, sceKernelFreeMemBlock, SceUID uid)
         return SCE_KERNEL_ERROR_INVALID_UID;
 
     host_gpu_memblock_destroy(block->gpu_memblock);
-    free(block->base);
+    if (block->mapped_size)
+        munmap(block->base, block->mapped_size);
+    else
+        free(block->base);
     rwlockWriteLock(&g_vita_memblock_infos_lock);
     vita_memblock_info_dict_erase(g_vita_memblock_infos, uid);
     rwlockWriteUnlock(&g_vita_memblock_infos_lock);

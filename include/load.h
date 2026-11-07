@@ -33,6 +33,13 @@ int load_file(Jit *jit, const char *filename, void **entry);
 int load_file_info(Jit *jit, const char *filename, void **entry, LoadedModuleInfo *info);
 
 /*
+ * Returns the address exported for `nid` as a variable, or NULL. The main
+ * executable publishes its SceProcessParam this way (NID_PROCESS_PARAM), and
+ * the firmware hands that block to the process.
+ */
+void *load_find_export_var(LoadedModuleInfo *info, uint32_t nid);
+
+/*
  * Re-run import resolution for an already loaded module. Useful when modules are
  * loaded in an order that does not match their dependency graph: imports that
  * were patched to error stubs resolve to the real entry point once the exporting

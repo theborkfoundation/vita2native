@@ -80,8 +80,8 @@ static void dump_maps_around(unsigned long address)
 
 static void dump_guest_words(unsigned long address, int count)
 {
-    uint32_t words[16];
-    char message[512];
+    uint32_t words[64];
+    char message[1024];
     struct iovec local;
     struct iovec remote;
     int length;
@@ -140,7 +140,7 @@ static void guest_signal_handler(int signal, siginfo_t *info, void *context)
 
     /* The first argument often points at the structure being processed. */
     dump_guest_words((unsigned long)uc->uc_mcontext.arm_r0, 12);
-    dump_guest_words((unsigned long)uc->uc_mcontext.arm_sp, 16);
+    dump_guest_words((unsigned long)uc->uc_mcontext.arm_sp, 64);
 
     {
         void *frames[24];
@@ -340,6 +340,7 @@ int main(int argc, char *argv[])
     char timestr[32];
     Jit jit;
     void *entry;
+    LoadedModuleInfo main_info;
     int ret;
 
     if (argc > 1) {
@@ -390,17 +391,75 @@ int main(int argc, char *argv[])
         fatal_error("Could not initialize the host services.", "Check the log for details.");
 
     /*
-     * User modules shipped with the application (libc, libfios2, pthread,
-     * IL2CPP, ...) export libraries the main executable imports. Load and start
-     * them before patching its imports so it binds against them in one pass.
+     * The firmware loads the main executable first (which publishes the process
+     * parameters) and then its user modules. Follow that order: libc.suprx and
+     * Unity read the process parameter block while they initialise.
      */
-    if (SceModulemgr_load_app_modules() > 0) {
-        SceModulemgr_repatch_modules();
-        SceModulemgr_start_modules();
-    }
-
-    ret = load_file(&jit, exe_path, &entry);
+    ret = load_file_info(&jit, exe_path, &entry, &main_info);
     if (ret == 0) {
+        void *process_param = load_find_export_var(&main_info, 0x70FBA1E7 /* NID_PROCESS_PARAM */);
+
+        if (process_param) {
+            LOG("Main executable process param at %p", process_param);
+            SceProcessmgr_set_process_param(process_param);
+        }
+
+        /* Load and start the user modules the executable depends on. */
+        if (SceModulemgr_load_app_modules() > 0) {
+            SceModulemgr_repatch_modules();
+            load_repatch_imports(&main_info);
+            SceModulemgr_start_modules();
+        }
+        /*
+         * Debug helpers:
+         *   VITA2NATIVE_PATCH_BKPT=<offset>   plant `udf #0` in the image
+         *   VITA2NATIVE_PATCH=<off>=<hex16>,...  patch 16-bit instructions
+         * Both help inspect guest state without a writable JIT mapping.
+         */
+        const char *breakpoint = getenv("VITA2NATIVE_PATCH_BKPT");
+        const char *patch_list = getenv("VITA2NATIVE_PATCH");
+
+        if (breakpoint && jit.rw) {
+            unsigned long offset = strtoul(breakpoint, NULL, 0);
+
+            if (offset + 2 <= jit.size) {
+                const uint16_t udf = 0xde00;
+
+                memcpy((uint8_t *)jit.rw + offset, &udf, sizeof(udf));
+                __builtin___clear_cache((char *)jit.rw, (char *)jit.rw + jit.size);
+                LOG("Patched guest code at 0x%lx with udf #0", offset);
+            }
+        }
+
+        if (patch_list && jit.rw) {
+            const char *cursor = patch_list;
+
+            while (*cursor) {
+                char *end = NULL;
+                unsigned long offset = strtoul(cursor, &end, 0);
+
+                if (!end || *end != '=') {
+                    LOG("VITA2NATIVE_PATCH: expected <offset>=<value> in \"%s\"", cursor);
+                    break;
+                }
+
+                unsigned long value = strtoul(end + 1, &end, 16);
+
+                if (offset + 2 <= jit.size) {
+                    const uint16_t halfword = (uint16_t)value;
+
+                    memcpy((uint8_t *)jit.rw + offset, &halfword, sizeof(halfword));
+                    LOG("Patched guest code at 0x%lx with 0x%04lx", offset, value);
+                }
+
+                cursor = (*end == ',') ? end + 1 : end;
+                if (!*cursor)
+                    break;
+            }
+
+            __builtin___clear_cache((char *)jit.rw, (char *)jit.rw + jit.size);
+        }
+
         LOG("Launching PlayStation Vita executable!");
 
         /* Jump to Vita's executable entrypoint */

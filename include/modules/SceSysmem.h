@@ -12,6 +12,7 @@ typedef struct VitaMemBlockInfo {
     char name[32];
     void *base;
     uint32_t size;
+    uint32_t mapped_size;
     SceKernelMemBlockType type;
     HostGpuMemBlock gpu_memblock;
 } VitaMemBlockInfo;

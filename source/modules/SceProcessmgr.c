@@ -52,6 +52,8 @@ typedef struct {
  */
 static VitaLibcParam g_libc_param = { .size = 0x0c };
 
+static const void *g_user_process_param;
+
 static VitaProcessParam g_process_param = {
     .size = sizeof(VitaProcessParam),
     .magic = 0x5052504D, /* "PRPM" */
@@ -89,6 +91,17 @@ void SceProcessmgr_run_termination_callbacks(void)
         if (callbacks[i].used && callbacks[i].callback)
             callbacks[i].callback(callbacks[i].arg);
     }
+}
+
+/*
+ * The main executable exports its own SceProcessParam (NID_PROCESS_PARAM); the
+ * firmware returns that block from sceKernelGetProcessParam, and titles size
+ * their heaps from it.
+ */
+void SceProcessmgr_set_process_param(void *param)
+{
+    if (param)
+        g_user_process_param = param;
 }
 
 int SceProcessmgr_init(void)
@@ -161,6 +174,9 @@ EXPORT(SceProcessmgr, 0x10C52C95, int, sceKernelGetProcessName, char *process_na
 
 EXPORT(SceProcessmgr, 0x2BE3E066, const void *, sceKernelGetProcessParam, void)
 {
+    if (g_user_process_param)
+        return g_user_process_param;
+
     return &g_process_param;
 }
 

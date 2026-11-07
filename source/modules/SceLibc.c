@@ -344,23 +344,51 @@ EXPORT(SceLibc, 0x4ed1056f, void, vita_cxa_guard_release, int *guard)
 /* Heap                                                                      */
 /* ------------------------------------------------------------------------- */
 
+static bool trace_alloc(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_TRACE_ALLOC") != NULL;
+
+    return enabled != 0;
+}
+
 EXPORT(SceLibc, 0x775a0cb2, void *, vita_malloc, size_t size)
 {
-    return malloc(size);
+    void *block = malloc(size);
+
+    if (trace_alloc())
+        LOG("malloc(%u) -> %p", (unsigned)size, block);
+
+    return block;
 }
 
 EXPORT(SceLibc, 0xe7ec3d0b, void *, vita_calloc, size_t count, size_t size)
 {
-    return calloc(count, size);
+    void *block = calloc(count, size);
+
+    if (trace_alloc())
+        LOG("calloc(%u, %u) -> %p", (unsigned)count, (unsigned)size, block);
+
+    return block;
 }
 
 EXPORT(SceLibc, 0x006b54ba, void *, vita_realloc, void *block, size_t size)
 {
-    return realloc(block, size);
+    void *result = realloc(block, size);
+
+    if (trace_alloc())
+        LOG("realloc(%p, %u) -> %p", block, (unsigned)size, result);
+
+    return result;
 }
 
 EXPORT(SceLibc, 0x5b9bb802, void, vita_free, void *block)
 {
+    if (trace_alloc())
+        LOG("free(%p)", block);
+
     free(block);
 }
 
@@ -372,7 +400,10 @@ EXPORT(SceLibc, 0xa9363e6b, void *, vita_memalign, size_t alignment, size_t size
         alignment = sizeof(void *);
 
     if (posix_memalign(&block, alignment, size) != 0)
-        return NULL;
+        block = NULL;
+
+    if (trace_alloc())
+        LOG("memalign(%u, %u) -> %p", (unsigned)alignment, (unsigned)size, block);
 
     return block;
 }

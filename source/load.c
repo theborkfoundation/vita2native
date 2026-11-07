@@ -674,6 +674,39 @@ err_jit_close:
     return -1;
 }
 
+void *load_find_export_var(LoadedModuleInfo *info, uint32_t nid)
+{
+    sce_module_info_raw *mod_info;
+    sce_module_exports_raw *export;
+    void *export_end;
+
+    if (!info || !info->module_info || !info->module_segment)
+        return NULL;
+
+    mod_info = info->module_info;
+    if (!mod_info->export_top || mod_info->export_top == mod_info->export_end)
+        return NULL;
+
+    export = (void *)((uint8_t *)info->module_segment + mod_info->export_top);
+    export_end = (uint8_t *)info->module_segment + mod_info->export_end;
+
+    while ((void *)export < export_end && export->size) {
+        uint32_t count = export->num_syms_funcs + export->num_syms_vars;
+
+        for (uint32_t i = 0; i < count; i++) {
+            const uint32_t *nids = (const uint32_t *)(uintptr_t)export->nid_table;
+            const void *const *entries = (const void *const *)(uintptr_t)export->entry_table;
+
+            if (nids[i] == nid)
+                return (void *)(uintptr_t)entries[i];
+        }
+
+        export = (void *)((uint8_t *)export + export->size);
+    }
+
+    return NULL;
+}
+
 int load_repatch_imports(LoadedModuleInfo *info)
 {
     sce_module_info_raw *mod_info;

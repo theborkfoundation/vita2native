@@ -4,6 +4,9 @@
 /* Value of the SceLibcParam:__sce_libcparam variable. */
 extern void *g_sce_libc_param;
 
+/* Uses the SceProcessParam that the main executable exports, if it has one. */
+void SceProcessmgr_set_process_param(void *param);
+
 int SceProcessmgr_init(void);
 int SceProcessmgr_finish(void);
 
