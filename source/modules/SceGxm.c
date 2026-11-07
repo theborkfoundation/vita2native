@@ -4481,8 +4481,16 @@ EXPORT(SceGxm, 0xC697CAE5, int, sceGxmSetVertexDefaultUniformBuffer, SceGxmConte
 
         if (traced < 40) {
             const float *f = (const float *)uniformBuffer;
+            uint32_t words = context->vertex_program
+                                 ? context->vertex_program->programId->programHeader
+                                       ->default_uniform_buffer_count
+                                 : 36;
 
-            LOG("GXM set vdefault -> %p: %g %g %g %g", uniformBuffer, f[0], f[1], f[2], f[3]);
+            LOG("GXM set vdefault -> %p (%u words)", uniformBuffer, words);
+            for (uint32_t row = 0; row < words; row += 4)
+                LOG("  u%u: %08x %08x %08x %08x", row, ((const uint32_t *)f)[row],
+                    ((const uint32_t *)f)[row + 1], ((const uint32_t *)f)[row + 2],
+                    ((const uint32_t *)f)[row + 3]);
             traced++;
         }
     }
@@ -4515,6 +4523,9 @@ EXPORT(SceGxm, 0x97118913, int, sceGxmReserveVertexDefaultUniformBuffer, SceGxmC
 
     context->vertex_uniforms = context->vertex_uniform_arena + context->vertex_uniform_head;
     context->vertex_uniform_size = size;
+    /* Diagnose which default-uniform words a title actually writes. */
+    if (getenv("VITA2NATIVE_POISON_UNIFORMS"))
+        memset(context->vertex_uniforms, 0xCD, size);
     context->vertex_uniform_head += size;
     *uniformBuffer = context->vertex_uniforms;
     return 0;
