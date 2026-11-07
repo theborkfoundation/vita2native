@@ -764,6 +764,29 @@ static void gxm_shader_cache_remove(uint32_t hash)
         remove(path);
 }
 
+/* Optional dumps of the USSE disassembly (and SPIR-V) that the translator
+   produces for a shader, keyed by the same hash as the GLSL cache. */
+static uint32_t g_shader_dump_hash;
+static const char *g_shader_dump_dir;
+
+static bool gxm_shader_dump(const char *ext, const char *dump)
+{
+    char path[PATH_MAX];
+    FILE *file;
+
+    if (!g_shader_dump_dir)
+        return false;
+
+    snprintf(path, sizeof(path), "%s/%08x.%s", g_shader_dump_dir, g_shader_dump_hash, ext);
+    file = fopen(path, "wb");
+    if (!file)
+        return false;
+
+    fwrite(dump, 1, strlen(dump), file);
+    fclose(file);
+    return true;
+}
+
 static GLuint gxm_create_compiled_shader(GLenum stage, const char *name, const char *glsl,
                                         bool *compiled)
 {
@@ -814,12 +837,20 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
     {
         uint32_t *spirv = NULL;
         uint32_t num_instr = 0;
+        const char *dump_dir = getenv("VITA2NATIVE_GXM_SHADER_DUMP");
+
+        g_shader_dump_hash = cache_hash;
+        g_shader_dump_dir = dump_dir ? dump_dir : NULL;
 
         if (!convert_gxp_to_spirv_c(&spirv, &num_instr, program, name, false, false, false, false,
-                                    attributes, count, false, false, NULL)) {
+                                    attributes, count, false, false,
+                                    g_shader_dump_dir ? gxm_shader_dump : NULL)) {
+            g_shader_dump_dir = NULL;
             LOG("SceGxm: GXP -> SPIR-V failed for %s", name);
             return 0;
         }
+
+        g_shader_dump_dir = NULL;
 
         if (spirv_to_glsl_es(spirv, num_instr, &glsl) != 0) {
             free(spirv);
@@ -4498,10 +4529,24 @@ EXPORT(SceGxm, 0xC697CAE5, int, sceGxmSetVertexDefaultUniformBuffer, SceGxmConte
     return 0;
 }
 
+static uint32_t gxm_uniform_padding(void)
+{
+    static int padding = -1;
+
+    if (padding < 0) {
+        const char *value = getenv("VITA2NATIVE_UNIFORM_PADDING");
+
+        padding = value ? atoi(value) : 0;
+    }
+
+    return padding > 0 ? (uint32_t)padding : 0;
+}
+
 EXPORT(SceGxm, 0x97118913, int, sceGxmReserveVertexDefaultUniformBuffer, SceGxmContext *context,
        void **uniformBuffer)
 {
     uint32_t size;
+    uint32_t padding;
 
     if (context->deferred) {
         if (!context->command_list_active)
@@ -4518,15 +4563,19 @@ EXPORT(SceGxm, 0x97118913, int, sceGxmReserveVertexDefaultUniformBuffer, SceGxmC
         *uniformBuffer = NULL;
         return 0;
     }
-    if (context->vertex_uniform_head + size > GXM_UNIFORM_ARENA_SIZE)
+    /* Debug aid: reserve extra arena space behind each default uniform buffer so
+       a title writing past the declared size does not get clobbered by the next
+       reservation before the draw. */
+    padding = gxm_uniform_padding();
+    if (context->vertex_uniform_head + size + padding > GXM_UNIFORM_ARENA_SIZE)
         context->vertex_uniform_head = 0;
 
     context->vertex_uniforms = context->vertex_uniform_arena + context->vertex_uniform_head;
     context->vertex_uniform_size = size;
     /* Diagnose which default-uniform words a title actually writes. */
     if (getenv("VITA2NATIVE_POISON_UNIFORMS"))
-        memset(context->vertex_uniforms, 0xCD, size);
-    context->vertex_uniform_head += size;
+        memset(context->vertex_uniforms, 0xCD, size + padding);
+    context->vertex_uniform_head += size + padding;
     *uniformBuffer = context->vertex_uniforms;
     return 0;
 }
@@ -4547,6 +4596,7 @@ EXPORT(SceGxm, 0x7B1FABB6, int, sceGxmReserveFragmentDefaultUniformBuffer, SceGx
        void **uniformBuffer)
 {
     uint32_t size;
+    uint32_t padding;
 
     if (context->deferred) {
         if (!context->command_list_active)
@@ -4563,14 +4613,70 @@ EXPORT(SceGxm, 0x7B1FABB6, int, sceGxmReserveFragmentDefaultUniformBuffer, SceGx
         *uniformBuffer = NULL;
         return 0;
     }
-    if (context->fragment_uniform_head + size > GXM_UNIFORM_ARENA_SIZE)
+    padding = gxm_uniform_padding();
+    if (context->fragment_uniform_head + size + padding > GXM_UNIFORM_ARENA_SIZE)
         context->fragment_uniform_head = 0;
 
     context->fragment_uniforms = context->fragment_uniform_arena + context->fragment_uniform_head;
     context->fragment_uniform_size = size;
-    context->fragment_uniform_head += size;
+    if (getenv("VITA2NATIVE_POISON_UNIFORMS"))
+        memset(context->fragment_uniforms, 0xCD, size + padding);
+    context->fragment_uniform_head += size + padding;
     *uniformBuffer = context->fragment_uniforms;
     return 0;
+}
+
+static uint16_t gxm_float_to_half(float value)
+{
+    uint32_t bits;
+    uint32_t sign;
+    uint32_t raw_exponent;
+    uint32_t mantissa;
+    int exponent;
+
+    memcpy(&bits, &value, sizeof(bits));
+    sign = (bits >> 16) & 0x8000u;
+    raw_exponent = (bits >> 23) & 0xffu;
+    mantissa = bits & 0x7fffffu;
+
+    if (raw_exponent == 0xffu)
+        return (uint16_t)(sign | (mantissa ? 0x7e00u : 0x7c00u));
+
+    /* Rebias the exponent from 127 to 15. */
+    exponent = (int)raw_exponent - 127 + 15;
+
+    if (exponent >= 0x1f)
+        return (uint16_t)(sign | 0x7c00u);
+
+    if (exponent <= 0) {
+        uint32_t half;
+        uint32_t shift;
+        uint32_t remainder;
+
+        if (exponent < -10)
+            return (uint16_t)sign;
+
+        mantissa |= 0x800000u;
+        shift = (uint32_t)(14 - exponent);
+        half = mantissa >> shift;
+        remainder = mantissa & ((1u << shift) - 1u);
+        if (remainder > (1u << (shift - 1)) ||
+            (remainder == (1u << (shift - 1)) && (half & 1u)))
+            half++;
+
+        return (uint16_t)(sign | half);
+    }
+
+    {
+        uint32_t half = mantissa >> 13;
+        uint32_t remainder = mantissa & 0x1fffu;
+        uint16_t result = (uint16_t)(sign | ((uint32_t)exponent << 10) | half);
+
+        if (remainder > 0x1000u || (remainder == 0x1000u && (half & 1u)))
+            result++;
+
+        return result;
+    }
 }
 
 EXPORT(SceGxm, 0x65DD0C84, int, sceGxmSetUniformDataF, void *uniformBuffer,
@@ -4599,7 +4705,19 @@ EXPORT(SceGxm, 0x65DD0C84, int, sceGxmSetUniformDataF, void *uniformBuffer,
 
     scalars_to_copy = MIN2(parameter->component_count - scalar_index, componentCount);
     while (componentCount > 0) {
-        memcpy((char *)uniformBuffer + offset, sourceData, scalars_to_copy * scalar_size);
+        char *dest = (char *)uniformBuffer + offset;
+
+        if (parameter->type == SCE_GXM_PARAMETER_TYPE_F16) {
+            /* The API takes floats regardless of the parameter type; F16
+               parameters are packed two to a 32-bit word in the buffer. */
+            uint16_t *half = (uint16_t *)dest;
+
+            for (uint32_t i = 0; i < scalars_to_copy; i++)
+                half[i] = gxm_float_to_half(sourceData[i]);
+        } else {
+            memcpy(dest, sourceData, scalars_to_copy * scalar_size);
+        }
+
         offset += scalars_to_copy * scalar_size + vector_padding_bytes;
         sourceData += scalars_to_copy;
         componentCount -= scalars_to_copy;
@@ -6061,6 +6179,60 @@ static int gxm_replay_commands(SceGxmContext *context, GxmCommand *command)
     return 0;
 }
 
+static void gxm_uniform_trace(SceGxmContext *context, unsigned int indexCount)
+{
+    static unsigned int traces;
+    static uint32_t last_signature[4];
+    static unsigned int last_count;
+    const char *value = getenv("VITA2NATIVE_GXM_UNIFORM_TRACE");
+    const uint32_t *vu, *fu;
+    uint32_t vwords, fwords;
+    uint32_t hash;
+    uint32_t sig[4] = {0, 0, 0, 0};
+    const SceGxmTextureInner *t0;
+    const uint32_t *td;
+
+    if (!value || traces >= 64 || !context->vertex_program || !context->fragment_program)
+        return;
+
+    hash = (uint32_t)strtoul(value, NULL, 16);
+    if (context->fragment_program->shader_hash != hash)
+        return;
+
+    vu = context->vertex_uniforms;
+    fu = context->fragment_uniforms;
+    vwords = context->vertex_program->programId->programHeader->default_uniform_buffer_count;
+    fwords = context->fragment_program->programId->programHeader->default_uniform_buffer_count;
+    t0 = &context->fragment_textures[0];
+    td = gxm_texture_get_data(t0);
+
+    if (fwords > 0 && fu)
+        sig[0] = fu[0];
+    if (fwords > 1 && fu)
+        sig[1] = fu[1];
+    sig[2] = gxm_texture_get_format(t0);
+    sig[3] = (uint32_t)gxm_texture_get_width(t0) << 16 | gxm_texture_get_height(t0);
+
+    if (traces && sig[0] == last_signature[0] && sig[1] == last_signature[1] &&
+        sig[2] == last_signature[2] && sig[3] == last_signature[3] &&
+        indexCount == last_count)
+        return;
+
+    memcpy(last_signature, sig, sizeof(sig));
+    last_count = indexCount;
+    traces++;
+
+    LOG("uniform draw %u frame %llu count %u: f u0=%08x u1=%08x u2=%08x u3=%08x | t0 %ux%u fmt=0x%x "
+        "data=%p texel0=%08x | v u32=%08x u33=%08x u34=%08x u35=%08x",
+        traces, (unsigned long long)g_gxm_frame, indexCount, sig[0], sig[1],
+        fu && fwords > 2 ? fu[2] : 0, fu && fwords > 3 ? fu[3] : 0,
+        (unsigned)gxm_texture_get_width(t0), (unsigned)gxm_texture_get_height(t0),
+        (unsigned)gxm_texture_get_format(t0), (const void *)td,
+        td ? td[0] : 0,
+        vwords > 32 && vu ? vu[32] : 0, vwords > 33 && vu ? vu[33] : 0,
+        vwords > 34 && vu ? vu[34] : 0, vwords > 35 && vu ? vu[35] : 0);
+}
+
 static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
                            SceGxmIndexFormat indexType, const void *indexData,
                            unsigned int indexCount, unsigned int instances)
@@ -6228,6 +6400,8 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
 
     vertex_uniform_size = gxm_build_uniforms(context, context->vertex_program->programId, true);
     fragment_uniform_size = gxm_build_uniforms(context, context->fragment_program->programId, false);
+
+    gxm_uniform_trace(context, indexCount);
 
     gxm_fill_draw_state(context, program, primType, indexType, instances, &state);
 
