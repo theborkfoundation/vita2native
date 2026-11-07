@@ -11,6 +11,7 @@
  */
 
 #include <pthread.h>
+#include <ctype.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -22,6 +23,10 @@
 #include "host.h"
 #include "module.h"
 #include "util.h"
+
+/* Weak so the touch smoke test can link without a display backend; without a
+   display the counter stays at zero, which only affects scripted runs. */
+extern unsigned int SceDisplay_get_frame_count(void) __attribute__((weak));
 
 #define TOUCH_MAX_BUFFERS 8
 #define TOUCH_READ_POLLS  16
@@ -35,6 +40,100 @@ static SceTouchSamplingState g_sampling[SCE_TOUCH_PORT_MAX_NUM] = {
 static bool g_debug;
 static bool g_logged_down;
 
+/*
+ * VITA2NATIVE_TOUCH_SCRIPT drives the front panel from a timetable keyed to
+ * the display frame counter, mirroring VITA2NATIVE_CTRL_SCRIPT:
+ *
+ *   VITA2NATIVE_TOUCH_SCRIPT="40:960/544,60:"
+ *
+ * Each entry is `<frame>:<x>/<y>` to press or `<frame>:` to release, with x/y
+ * in front-panel coordinates (0..1919, 0..1087). Comma separates entries, so the
+ * coordinates use a slash. Titles that only react to the mouse/touchscreen
+ * cannot be driven with the pad script.
+ */
+typedef struct {
+    unsigned int frame;
+    bool down;
+    uint16_t x, y;
+} TouchScriptEntry;
+
+static TouchScriptEntry *g_script;
+static unsigned int g_script_count;
+static unsigned int g_script_index;
+static bool g_script_loaded;
+static bool g_script_down;
+static uint16_t g_script_x, g_script_y;
+
+static void touch_script_load(void)
+{
+    const char *env = getenv("VITA2NATIVE_TOUCH_SCRIPT");
+    char *copy;
+    char *token;
+
+    g_script_loaded = true;
+    if (!env || !*env)
+        return;
+
+    copy = malloc(strlen(env) + 1);
+    if (!copy)
+        return;
+    strcpy(copy, env);
+
+    for (token = strtok(copy, ","); token; token = strtok(NULL, ",")) {
+        char *colon = strchr(token, ':');
+        TouchScriptEntry entry;
+        char *coords;
+
+        if (!colon)
+            continue;
+        *colon = '\0';
+        memset(&entry, 0, sizeof(entry));
+        entry.frame = (unsigned int)strtoul(token, NULL, 0);
+        coords = colon + 1;
+
+        while (*coords && isspace((unsigned char)*coords))
+            coords++;
+        if (*coords)
+            entry.down = sscanf(coords, "%hu/%hu", &entry.x, &entry.y) == 2;
+
+        {
+            TouchScriptEntry *grown =
+                realloc(g_script, (g_script_count + 1) * sizeof(*g_script));
+
+            if (!grown)
+                break;
+            g_script = grown;
+            g_script[g_script_count++] = entry;
+        }
+    }
+
+    free(copy);
+}
+
+static void touch_script_poll(void)
+{
+    unsigned int frame;
+    unsigned int before = g_script_index;
+
+    if (!g_script_loaded)
+        touch_script_load();
+    if (!g_script_count)
+        return;
+
+    frame = SceDisplay_get_frame_count ? SceDisplay_get_frame_count() : 0;
+    while (g_script_index < g_script_count && g_script[g_script_index].frame <= frame) {
+        g_script_down = g_script[g_script_index].down;
+        g_script_x = g_script[g_script_index].x;
+        g_script_y = g_script[g_script_index].y;
+        g_script_index++;
+    }
+
+    if (getenv("VITA2NATIVE_TOUCH_SCRIPT_DEBUG") && g_script_index != before) {
+        fprintf(stderr, "vita2native: SceTouch script frame %u -> %s %u,%u\n", frame,
+                g_script_down ? "down" : "up", (unsigned)g_script_x, (unsigned)g_script_y);
+    }
+}
+
 static void build_touch_data(SceUInt32 port, SceTouchData *data)
 {
     HostTouchState touch;
@@ -46,8 +145,17 @@ static void build_touch_data(SceUInt32 port, SceTouchData *data)
     if (port != SCE_TOUCH_PORT_FRONT)
         return;
 
-    if (!host_video_touch_state(&touch) || !touch.active)
+    touch_script_poll();
+    if (g_script_count) {
+        if (!g_script_down)
+            return;
+        touch.active = true;
+        touch.down = true;
+        touch.x = g_script_x;
+        touch.y = g_script_y;
+    } else if (!host_video_touch_state(&touch) || !touch.active) {
         return;
+    }
 
     down = touch.down;
     if (g_debug && down != g_logged_down) {
