@@ -181,6 +181,8 @@ static uint64_t g_profile_flush_ns;
 static uint64_t g_profile_commit_ns;
 static uint64_t g_profile_gldraw_ns;
 static uint64_t g_profile_ds_ns;
+static uint64_t g_profile_ds_load_ns;
+static unsigned int g_profile_ds_load_calls;
 static uint64_t g_profile_uniform_ns;
 static uint64_t g_profile_state_ns;
 static uint64_t g_profile_texture_ns;
@@ -769,7 +771,8 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
     if (glsl) {
         shader = gxm_create_compiled_shader(stage, name, glsl, &compiled);
         if (compiled) {
-            LOG("SceGxm: shader cache hit %08x (%s)", cache_hash, name);
+            LOG("SceGxm: shader cache hit %08x (%s) program %p", cache_hash, name,
+                (const void *)program);
             free(glsl);
             return shader;
         }
@@ -799,7 +802,7 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
         free(spirv);
     }
 
-    LOG("SceGxm: shader cache miss %08x (%s)", cache_hash, name);
+    LOG("SceGxm: shader cache miss %08x (%s) program %p", cache_hash, name, (const void *)program);
     shader = gxm_create_compiled_shader(stage, name, glsl, &compiled);
     if (compiled)
         gxm_shader_cache_write(cache_hash, glsl);
@@ -1392,6 +1395,28 @@ static uint32_t gxm_build_uniforms(SceGxmContext *context, const SceGxmRegistere
             source = default_buffer;
         else if (layout->guest_index < SCE_GXM_MAX_UNIFORM_BUFFERS)
             source = buffers[layout->guest_index];
+
+        if (gxm_program_trace()) {
+            static unsigned int traced_layouts;
+
+            if (traced_layouts < 6) {
+                LOG("GXM uniforms %s program %p: total %u, buf %u guest %u offset %u size %u"
+                    " member %u default %p guest %p",
+                    vertex ? "vertex" : "fragment", (const void *)program->programHeader, total,
+                    i, layout->guest_index, layout->offset, layout->guest_size,
+                    layout->member_size, default_buffer, source);
+                if (i + 1 == program->uniform_buffer_count) {
+                    if (default_buffer && program->uniform_buffers[0].guest_size >= 36 * 4) {
+                        const float *gf = (const float *)default_buffer;
+
+                        for (unsigned int row = 0; row < 9; row++)
+                            LOG("  guest u%d: %.4f %.4f %.4f %.4f", row, gf[row * 4 + 0],
+                                gf[row * 4 + 1], gf[row * 4 + 2], gf[row * 4 + 3]);
+                    }
+                    traced_layouts++;
+                }
+            }
+        }
 
         if (!source)
             continue;
@@ -2945,6 +2970,19 @@ EXPORT(SceGxm, 0xC68015E4, int, sceGxmSetVertexUniformBuffer, SceGxmContext *con
     if (bufferIndex >= SCE_GXM_MAX_UNIFORM_BUFFERS)
         return SCE_GXM_ERROR_INVALID_VALUE;
     context->vertex_uniform_buffers[bufferIndex] = bufferData;
+
+    if (gxm_program_trace()) {
+        static unsigned int traced;
+
+        if (traced < 40) {
+            const float *f = (const float *)bufferData;
+
+            LOG("GXM set vubuf %u -> %p: %g %g %g %g", bufferIndex, bufferData, f[0], f[1],
+                f[2], f[3]);
+            traced++;
+        }
+    }
+
     return 0;
 }
 
@@ -3060,10 +3098,13 @@ static bool gxm_ds_load_surface(SceGxmRenderTarget *rt,
     GxmDsLayout layout;
     SceGxmDepthStencilFormat format;
     uint32_t stride, width, height, bg_stencil;
+    uint32_t ds_type;
+    bool tiled;
     const uint8_t *depth_data;
     const uint8_t *stencil_data;
     uint32_t *packed;
     bool loaded = false;
+    uint64_t ds_started;
 
     if (!surface || gxm_ds_surface_is_disabled(surface))
         return false;
@@ -3081,47 +3122,79 @@ static bool gxm_ds_load_surface(SceGxmRenderTarget *rt,
     if (!layout.depth_bits && !layout.has_stencil)
         return false;
 
+    ds_started = gxm_time_ns();
+
     width = (uint32_t)rt->params.width;
     height = (uint32_t)rt->params.height;
     stride = gxm_ds_surface_get_stride_in_samples(surface);
     if (stride < width)
         stride = width;
+    ds_type = (surface->zlsControl >> SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_TYPE_FORMAT_OFFSET) &
+              SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_TYPE_MASK;
+    tiled = ds_type == ((uint32_t)SCE_GXM_DEPTH_STENCIL_SURFACE_TILED >> 12);
     bg_stencil = surface->backgroundControl & SCE_GXM_DEPTH_STENCIL_BG_CTRL_STENCIL_MASK;
     depth_data = layout.packed ? (const uint8_t *)(surface->depthData ? surface->depthData
                                                                      : surface->stencilData)
                                : (const uint8_t *)surface->depthData;
     stencil_data = (const uint8_t *)surface->stencilData;
 
-    packed = malloc((size_t)width * height * sizeof(uint32_t));
-    if (!packed)
-        return false;
+    /* Reused across scenes: the buffer is a couple of MB and BeginScene can
+       run many times per frame. */
+    {
+        static uint32_t *packed_buffer;
+        static size_t packed_capacity;
+        size_t needed = (size_t)width * height * sizeof(uint32_t);
 
-    for (uint32_t y = 0; y < height; y++) {
-        for (uint32_t x = 0; x < width; x++) {
-            uint32_t d24 = 0xFFFFFFu;
-            uint32_t s8 = bg_stencil;
+        if (packed_capacity < needed) {
+            uint32_t *grown = realloc(packed_buffer, needed);
 
-            if (layout.packed) {
-                uint32_t value = *(const uint32_t *)(depth_data +
-                                                     gxm_ds_element_offset(surface, x, y, stride, 4));
-                d24 = value >> 8;
-                s8 = value & 0xFFu;
-            } else {
-                if (layout.depth_bits == 32 && depth_data) {
-                    float value = *(const float *)(depth_data +
-                                                   gxm_ds_element_offset(surface, x, y, stride, 4));
-                    d24 = gxm_depth_to_u24(value);
-                } else if (layout.depth_bits == 16 && depth_data) {
-                    uint32_t value = *(const uint16_t *)(depth_data +
+            if (!grown)
+                return false;
+            packed_buffer = grown;
+            packed_capacity = needed;
+        }
+        packed = packed_buffer;
+    }
+
+    /* A linear, packed S8D24 surface converts to the GL depth-stencil layout
+       word for word, so it is a strided copy. Unity keeps depth surfaces in
+       this layout and force-loads them whenever a pass samples depth. */
+    if (layout.packed && !tiled) {
+        size_t row_bytes = (size_t)width * sizeof(uint32_t);
+
+        for (uint32_t y = 0; y < height; y++)
+            memcpy(packed + (size_t)y * width,
+                   depth_data + (size_t)y * stride * sizeof(uint32_t), row_bytes);
+    } else {
+        for (uint32_t y = 0; y < height; y++) {
+            for (uint32_t x = 0; x < width; x++) {
+                uint32_t d24 = 0xFFFFFFu;
+                uint32_t s8 = bg_stencil;
+
+                if (layout.packed) {
+                    uint32_t value = *(const uint32_t *)(depth_data +
                                                          gxm_ds_element_offset(surface, x, y,
-                                                                               stride, 2));
-                    d24 = (uint32_t)(((uint64_t)value * 0xFFFFFFu + 0x7FFFu) / 0xFFFFu);
+                                                                               stride, 4));
+                    d24 = value >> 8;
+                    s8 = value & 0xFFu;
+                } else {
+                    if (layout.depth_bits == 32 && depth_data) {
+                        float value = *(const float *)(depth_data +
+                                                       gxm_ds_element_offset(surface, x, y,
+                                                                             stride, 4));
+                        d24 = gxm_depth_to_u24(value);
+                    } else if (layout.depth_bits == 16 && depth_data) {
+                        uint32_t value = *(const uint16_t *)(depth_data +
+                                                             gxm_ds_element_offset(surface, x, y,
+                                                                                   stride, 2));
+                        d24 = (uint32_t)(((uint64_t)value * 0xFFFFFFu + 0x7FFFu) / 0xFFFFu);
+                    }
+                    if (layout.has_stencil && stencil_data)
+                        s8 = stencil_data[gxm_ds_element_offset(surface, x, y, stride, 1)];
                 }
-                if (layout.has_stencil && stencil_data)
-                    s8 = stencil_data[gxm_ds_element_offset(surface, x, y, stride, 1)];
-            }
 
-            packed[(size_t)y * width + x] = (d24 << 8) | s8;
+                packed[(size_t)y * width + x] = (d24 << 8) | s8;
+            }
         }
     }
 
@@ -3135,7 +3208,10 @@ static bool gxm_ds_load_surface(SceGxmRenderTarget *rt,
         LOG("SceGxm: depth/stencil upload failed");
     g_gl->glBindTexture(GL_TEXTURE_2D, 0);
 
-    free(packed);
+    g_profile_ds_load_ns += gxm_time_ns() - ds_started;
+    g_profile_ds_load_calls++;
+
+    return loaded;
     return loaded;
 }
 
@@ -3985,6 +4061,7 @@ static void gxm_profile_frame(uint64_t resolve_ns, uint64_t finish_ns, uint64_t 
     LOG("SceGxm: %u frames in %.1f s: draw %.1f (flush %.1f [commit %.1f gldraw %.1f], uniform "
         "%.1f state %.1f tex %.1f attrib %.1f) resolve %.1f finish %.1f read %.1f convert "
         "%.1f ds %.1f ms/frame (%u gl draws, %u vertices, %u uploads/%llu KiB per frame, "
+        "dsload %.1f ms (%u calls), "
         "breaks %u/%u/%u/%u [prog%u prim%u dfunc%u dwrite%u dbias%u stencil%u])",
         frames, (double)(now - last) / 1e9, (double)g_profile_draw_ns / frames / 1e6,
         (double)g_profile_flush_ns / frames / 1e6, (double)g_profile_commit_ns / frames / 1e6,
@@ -3994,7 +4071,9 @@ static void gxm_profile_frame(uint64_t resolve_ns, uint64_t finish_ns, uint64_t 
         (double)finish_total / frames / 1e6, (double)read_total / frames / 1e6,
         (double)convert_total / frames / 1e6, (double)g_profile_ds_ns / frames / 1e6,
         g_profile_draws / frames, g_profile_vertices / frames, g_profile_uploads / frames,
-        (unsigned long long)(g_profile_upload_bytes / frames / 1024), g_batch_break_state / frames,
+        (unsigned long long)(g_profile_upload_bytes / frames / 1024),
+        (double)g_profile_ds_load_ns / frames / 1e6, g_profile_ds_load_calls / frames,
+        g_batch_break_state / frames,
         g_batch_break_size / frames, g_batch_break_uniform / frames,
         g_batch_break_texture / frames, g_batch_break_program / frames,
         g_batch_break_prim / frames, g_batch_break_depth_func / frames,
@@ -4004,6 +4083,8 @@ static void gxm_profile_frame(uint64_t resolve_ns, uint64_t finish_ns, uint64_t 
     resolve_total = finish_total = read_total = convert_total = 0;
     g_profile_draws = g_profile_vertices = g_profile_uploads = 0;
     g_profile_ds_ns = 0;
+    g_profile_ds_load_ns = 0;
+    g_profile_ds_load_calls = 0;
     g_profile_flush_ns = 0;
     g_profile_commit_ns = 0;
     g_profile_gldraw_ns = 0;
@@ -4305,6 +4386,18 @@ EXPORT(SceGxm, 0xC697CAE5, int, sceGxmSetVertexDefaultUniformBuffer, SceGxmConte
             ? context->vertex_program->programId->programHeader->default_uniform_buffer_count *
                   sizeof(float)
             : 0;
+
+    if (gxm_program_trace() && uniformBuffer) {
+        static unsigned int traced;
+
+        if (traced < 40) {
+            const float *f = (const float *)uniformBuffer;
+
+            LOG("GXM set vdefault -> %p: %g %g %g %g", uniformBuffer, f[0], f[1], f[2], f[3]);
+            traced++;
+        }
+    }
+
     return 0;
 }
 
@@ -5394,17 +5487,24 @@ static void gxm_batch_flush(SceGxmContext *context)
                 const uint32_t *vu = (const uint32_t *)batch->vertex_uniforms;
                 const uint32_t *fu = (const uint32_t *)batch->fragment_uniforms;
 
-                LOG("state %u: vp=%.1f,%.1f,%.1f,%.1f clip=%u,%u..%u,%u depth=%d/%d "
-                    "tex=%p %ux%u fmt=0x%x t0=%08x vu=%08x,%08x,%08x,%08x fu=%08x,%08x",
-                    traced, batch->state.viewport_x_offset, batch->state.viewport_y_offset,
+                LOG("state %u (gxp %p): vp=%.1f,%.1f,%.1f,%.1f en=%d clip=%u,%u..%u,%u depth=%d/%d "
+                    "tex=%p %ux%u fmt=0x%x t0=%08x vu=%08x,%08x,%08x,%08x fu=%08x,%08x blend=%x/%d/%d/%d/%d",
+                    traced, vp ? (const void *)vp->programId->programHeader : NULL,
+                    batch->state.viewport_x_offset, batch->state.viewport_y_offset,
                     batch->state.viewport_x_scale, batch->state.viewport_y_scale,
+                    (int)batch->state.viewport_enable,
                     batch->state.region_clip_xmin, batch->state.region_clip_ymin,
                     batch->state.region_clip_xmax, batch->state.region_clip_ymax,
                     (int)batch->state.depth_func, (int)batch->state.depth_write, (void *)td,
                     (unsigned)gxm_texture_get_width(t0), (unsigned)gxm_texture_get_height(t0),
                     (unsigned)gxm_texture_get_format(t0), td ? td[0] : 0,
                     vu ? vu[0] : 0, vu ? vu[1] : 0, vu ? vu[2] : 0, vu ? vu[3] : 0,
-                    fu ? fu[0] : 0, fu ? fu[1] : 0);
+                    fu ? fu[0] : 0, fu ? fu[1] : 0,
+                    context->fragment_program ? (unsigned)context->fragment_program->blendInfo.colorMask : 0,
+                    context->fragment_program ? (int)context->fragment_program->blendInfo.colorFunc : -1,
+                    context->fragment_program ? (int)context->fragment_program->blendInfo.alphaFunc : -1,
+                    context->fragment_program ? (int)context->fragment_program->blendInfo.colorSrc : -1,
+                    context->fragment_program ? (int)context->fragment_program->blendInfo.colorDst : -1);
                 if (vu) {
                     const float *vf = (const float *)vu;
 
