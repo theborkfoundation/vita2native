@@ -56,6 +56,10 @@ static void check_host_cpu(void)
 /* Prints the mappings around the faulting address; the guest runs inside a
    host process, so this is the only reliable way to tell which module or
    allocation the fault belongs to. */
+/* Base of the main executable's image, for crash-time diagnostics. */
+static uintptr_t g_main_image_rw;
+static size_t g_main_image_size;
+
 static void dump_maps_around(unsigned long address)
 {
     static const char header[] = "vita2native: mappings around the fault:\n";
@@ -135,6 +139,27 @@ static void guest_signal_handler(int signal, siginfo_t *info, void *context)
                       (unsigned long)uc->uc_mcontext.arm_ip);
     if (length > 0)
         write(STDERR_FILENO, message, (size_t)length);
+
+    /* Optional guest-memory dump at crash: offsets are relative to the image. */
+    {
+        const char *dump = getenv("VITA2NATIVE_CRASH_DUMP");
+
+        if (dump && g_main_image_rw) {
+            const char *cursor = dump;
+
+            while (*cursor) {
+                char *end = NULL;
+                unsigned long offset = strtoul(cursor, &end, 0);
+
+                if (offset + 64 <= g_main_image_size)
+                    dump_guest_words(g_main_image_rw + offset, 16);
+
+                cursor = (*end == ',') ? end + 1 : end;
+                if (!*cursor)
+                    break;
+            }
+        }
+    }
 
     dump_maps_around(info ? (unsigned long)info->si_addr : 0UL);
 
@@ -418,6 +443,9 @@ int main(int argc, char *argv[])
          */
         const char *breakpoint = getenv("VITA2NATIVE_PATCH_BKPT");
         const char *patch_list = getenv("VITA2NATIVE_PATCH");
+
+        g_main_image_rw = (uintptr_t)main_info.code_rw;
+        g_main_image_size = jit.size;
 
         if (breakpoint && jit.rw) {
             unsigned long offset = strtoul(breakpoint, NULL, 0);

@@ -906,8 +906,12 @@ EXPORT(SceLibKernel, 0xA6A2C915, int, sceKernelTryLockLwMutex, SceKernelLwMutexW
         return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
 
     for (int i = 0; i < count; i++) {
-        if (pthread_mutex_trylock(&lw->mutex) != 0)
+        if (pthread_mutex_trylock(&lw->mutex) != 0) {
+            if (getenv("VITA2NATIVE_TRACE_SYNC"))
+                LOG("sceKernelTryLockLwMutex(\"%s\") failed on entry %d/%d (owner %d)",
+                    lw->name, i, count, lw->owner);
             return SCE_KERNEL_ERROR_LW_MUTEX_FAILED_TO_OWN;
+        }
     }
 
     lw->current_count += count;
