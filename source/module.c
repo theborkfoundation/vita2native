@@ -97,19 +97,56 @@ void module_unregister_guest_libraries(void *owner)
     pthread_mutex_unlock(&g_guest_libraries_lock);
 }
 
+/*
+ * The host mspace shim backs every session with the host heap and ignores the
+ * region the guest reserved. Titles that mix the imported mspace calls with
+ * their own statically linked dlmalloc (Unity does) then hand host pointers to
+ * a foreign allocator, so allow handing the whole family to the guest module.
+ */
+static bool skip_host_mspace(uint32_t func_nid)
+{
+    static int enabled = -1;
+
+    static const uint32_t nids[] = {
+        0xcef7c575, /* mspace_create */
+        0x30cbbc66, /* mspace_destroy */
+        0xe080b96e, /* mspace_malloc */
+        0x3cdfd2a3, /* mspace_free */
+        0x4633134a, /* mspace_realloc */
+        0x52f780dd, /* mspace_memalign */
+        0x915da59e, /* mspace_reallocalign */
+        0x7ad7a737, /* mspace_malloc_usable_size */
+        0xf355f381, /* mspace_is_heap_empty */
+    };
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_NO_HOST_MSPACE") != NULL;
+    if (!enabled)
+        return false;
+
+    for (size_t i = 0; i < ARRAY_SIZE(nids); i++) {
+        if (nids[i] == func_nid)
+            return true;
+    }
+
+    return false;
+}
+
 const void *module_get_func_export(uint32_t lib_nid, uint32_t func_nid, void *importer)
 {
     size_t num_libs = NUM_EXPORTED_LIBS;
     const void *result = NULL;
 
-    for (size_t i = 0; i < num_libs; i++) {
-        if (__start_exported_libraries[i].nid == lib_nid) {
-            const library_t *const lib = &__start_exported_libraries[i];
-            size_t num_funcs = NUM_FUNCS(lib);
+    if (!skip_host_mspace(func_nid)) {
+        for (size_t i = 0; i < num_libs; i++) {
+            if (__start_exported_libraries[i].nid == lib_nid) {
+                const library_t *const lib = &__start_exported_libraries[i];
+                size_t num_funcs = NUM_FUNCS(lib);
 
-            for (size_t j = 0; j < num_funcs; j++) {
-                if (lib->func_nidtable_start[j] == func_nid)
-                    return lib->func_table_start[j];
+                for (size_t j = 0; j < num_funcs; j++) {
+                    if (lib->func_nidtable_start[j] == func_nid)
+                        return lib->func_table_start[j];
+                }
             }
         }
     }

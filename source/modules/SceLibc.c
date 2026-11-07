@@ -484,8 +484,14 @@ EXPORT(SceLibc, 0x4633134a, void *, mspace_realloc, SceMSpace *mspace, void *blo
 EXPORT(SceLibc, 0x52f780dd, void *, mspace_memalign, SceMSpace *mspace, size_t alignment,
        size_t size)
 {
+    void *block;
+
     (void)mspace;
-    return vita_memalign(alignment, size);
+    block = vita_memalign(alignment, size);
+    if (trace_alloc())
+        LOG("mspace_memalign(%p, %u, %u) -> %p", (void *)mspace, (unsigned)alignment,
+            (unsigned)size, block);
+    return block;
 }
 
 EXPORT(SceLibc, 0x915da59e, void *, mspace_reallocalign, SceMSpace *mspace, void *block,
@@ -495,10 +501,19 @@ EXPORT(SceLibc, 0x915da59e, void *, mspace_reallocalign, SceMSpace *mspace, void
 
     (void)mspace;
 
-    if (alignment == 0)
-        return realloc(block, size);
+    if (alignment == 0) {
+        void *result = realloc(block, size);
+
+        if (trace_alloc())
+            LOG("mspace_reallocalign(%p, %p, 0, %u) -> %p", (void *)mspace, block, (unsigned)size,
+                result);
+        return result;
+    }
 
     fresh = vita_memalign(alignment, size);
+    if (trace_alloc())
+        LOG("mspace_reallocalign(%p, %p, %u, %u) -> %p", (void *)mspace, block,
+            (unsigned)alignment, (unsigned)size, fresh);
     if (!fresh)
         return NULL;
 
