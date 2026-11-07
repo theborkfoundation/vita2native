@@ -1466,6 +1466,17 @@ static uint32_t gxm_build_uniforms(SceGxmContext *context, const SceGxmRegistere
         const void *source = NULL;
         size_t size;
 
+        if (gxm_program_trace() && i == 0) {
+            LOG("GXM program %p: default_uniforms %u uniforms %u literals %u literal_bufs %u "
+                "containers %u",
+                (const void *)program->programHeader,
+                program->programHeader->default_uniform_buffer_count,
+                program->programHeader->uniform_buffer_count,
+                program->programHeader->literals_count,
+                program->programHeader->literal_buffer_count,
+                program->programHeader->container_count);
+        }
+
         if (layout->guest_index == 14)
             source = default_buffer;
         else if (layout->guest_index < SCE_GXM_MAX_UNIFORM_BUFFERS)
@@ -5045,7 +5056,24 @@ GXM_PARAM_GETTER(0x1997DC17, GetCategory, SceGxmParameterCategory, parameter->ca
 GXM_PARAM_GETTER(0xBD2998D1, GetComponentCount, uint32_t, parameter->component_count)
 GXM_PARAM_GETTER(0xBB58267D, GetContainerIndex, uint32_t, parameter->container_index)
 GXM_PARAM_GETTER(0x5C79D59A, GetResourceIndex, uint32_t, parameter->resource_index)
-GXM_PARAM_GETTER(0x7B9023C3, GetType, SceGxmParameterType, parameter->type)
+
+EXPORT(SceGxm, 0x7B9023C3, SceGxmParameterType, sceGxmProgramParameterGetType,
+       const SceGxmProgramParameter *parameter)
+{
+    if (getenv("VITA2NATIVE_TRACE_PARAMS") && parameter) {
+        static unsigned int logged;
+
+        if (logged < 32) {
+            const char *name = (const char *)((uintptr_t)parameter + parameter->name_offset);
+
+            LOG("sceGxmProgramParameterGetType(%s) -> %u comps=%u res=%u", name,
+                (unsigned)parameter->type, (unsigned)parameter->component_count,
+                parameter->resource_index);
+            logged++;
+        }
+    }
+    return parameter->type;
+}
 GXM_PARAM_GETTER(0xE6D9C4CE, GetSemantic, SceGxmParameterSemantic,
                  parameter->category == SCE_GXM_PARAMETER_CATEGORY_ATTRIBUTE
                      ? parameter->semantic
@@ -5622,7 +5650,7 @@ static void gxm_trace_batch(SceGxmContext *context, const GxmDrawBatch *batch)
                     continue;
                 LOG("  stream %u: stride=%u first=%p", s, stride,
                     (const void *)(arena->stage + batch->stream_start[s]));
-                for (unsigned int v = 0; v < 4 && v < batch->vertex_count; v++) {
+                for (unsigned int v = 0; v < 12 && v < batch->vertex_count; v++) {
                     const uint32_t *w =
                         (const uint32_t *)(arena->stage + batch->stream_start[s] + (size_t)v * stride);
 
@@ -6203,17 +6231,48 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
             context->fragment_program) {
             const SceGxmBlendInfo *b = &context->fragment_program->blendInfo;
 
-            LOG("  draw count=%u mask=%x func=%d/%d src=%d/%d dst=%d/%d mask_update=%d frag=%08x",
+            LOG("  draw count=%u mask=%x func=%d/%d src=%d/%d dst=%d/%d mask_update=%d frag=%08x vsh=%08x",
                 indexCount, b->colorMask, (int)b->colorFunc, (int)b->alphaFunc, (int)b->colorSrc,
                 (int)b->colorDst, (int)b->alphaSrc, (int)b->alphaDst,
                 (int)context->fragment_program->mask_update,
-                context->fragment_program->shader_hash);
+                context->fragment_program->shader_hash,
+                context->vertex_program ? context->vertex_program->shader_hash : 0);
             {
                 const float *fu = (const float *)context->fragment_block_data;
 
                 if (fu)
                     LOG("    frag uniforms: %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f",
                         fu[0], fu[1], fu[2], fu[3], fu[4], fu[5], fu[6], fu[7]);
+            }
+            {
+                const float *vu = (const float *)context->vertex_block_data;
+
+                if (vu) {
+                    for (unsigned int row = 0; row < 9; row++)
+                        LOG("    vert uniform %u: %.4f %.4f %.4f %.4f", row, vu[row * 4 + 0],
+                            vu[row * 4 + 1], vu[row * 4 + 2], vu[row * 4 + 3]);
+                    LOG("    vert raw: %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x "
+                        "%08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x "
+                        "%08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x",
+                        ((const unsigned *)vu)[0], ((const unsigned *)vu)[1],
+                        ((const unsigned *)vu)[2], ((const unsigned *)vu)[3],
+                        ((const unsigned *)vu)[4], ((const unsigned *)vu)[5],
+                        ((const unsigned *)vu)[6], ((const unsigned *)vu)[7],
+                        ((const unsigned *)vu)[8], ((const unsigned *)vu)[9],
+                        ((const unsigned *)vu)[10], ((const unsigned *)vu)[11],
+                        ((const unsigned *)vu)[12], ((const unsigned *)vu)[13],
+                        ((const unsigned *)vu)[14], ((const unsigned *)vu)[15],
+                        ((const unsigned *)vu)[16], ((const unsigned *)vu)[17],
+                        ((const unsigned *)vu)[18], ((const unsigned *)vu)[19],
+                        ((const unsigned *)vu)[20], ((const unsigned *)vu)[21],
+                        ((const unsigned *)vu)[22], ((const unsigned *)vu)[23],
+                        ((const unsigned *)vu)[24], ((const unsigned *)vu)[25],
+                        ((const unsigned *)vu)[26], ((const unsigned *)vu)[27],
+                        ((const unsigned *)vu)[28], ((const unsigned *)vu)[29],
+                        ((const unsigned *)vu)[30], ((const unsigned *)vu)[31],
+                        ((const unsigned *)vu)[32], ((const unsigned *)vu)[33],
+                        ((const unsigned *)vu)[34], ((const unsigned *)vu)[35]);
+                }
             }
         }
     }

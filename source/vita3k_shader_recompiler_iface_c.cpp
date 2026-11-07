@@ -1,4 +1,6 @@
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <shader/gxp_parser.h>
 #include <shader/spirv_recompiler.h>
@@ -24,6 +26,30 @@ uint32_t vita3k_gxm_get_uniform_buffer_layout(const SceGxmProgram *program,
     std::map<uint32_t, uint32_t> member_sizes;
     uint32_t offset = 0;
     uint32_t count = 0;
+
+    if (getenv("VITA3K_TRACE_UNIFORMS")) {
+        const SceGxmProgramParameter *params = program->program_parameters();
+
+        for (uint32_t i = 0; i < program->container_count; i++) {
+            const SceGxmProgramParameterContainer &c = program->container()[i];
+
+            std::fprintf(stderr,
+                         "GXP program %p container %u: index=%u base_sa=%u size_in_f32=%u\n",
+                         (const void *)program, i, (unsigned)c.container_index,
+                         (unsigned)c.base_sa_offset, (unsigned)c.size_in_f32);
+        }
+
+        for (uint32_t i = 0; i < program->parameter_count; i++) {
+            const SceGxmProgramParameter &p = params[i];
+
+            std::fprintf(stderr,
+                         "GXP program %p param %u: cat=%u type=%u comps=%u container=%u res=%u "
+                         "array=%u name=%s\n",
+                         (const void *)program, i, (unsigned)p.category, (unsigned)p.type,
+                         (unsigned)p.component_count, (unsigned)p.container_index,
+                         p.resource_index, p.array_size, p.name());
+        }
+    }
 
     for (const auto &buffer : input.uniform_buffers) {
         if (buffer.index >= SCE_GXM_REAL_MAX_UNIFORM_BUFFER)
