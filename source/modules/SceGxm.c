@@ -655,7 +655,7 @@ static void gxm_compile_shader(GLuint shader, const char *source, const char *na
  * it is cached under <vfs root>/cache/shaders. Driver-level shader objects are
  * not portable and are never cached.
  */
-#define GXM_SHADER_CACHE_VERSION 2u
+#define GXM_SHADER_CACHE_VERSION 3u
 
 static uint32_t gxm_hash_bytes(uint32_t hash, const void *data, size_t size);
 

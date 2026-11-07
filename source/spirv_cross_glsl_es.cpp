@@ -111,6 +111,105 @@ void rewrite_readonly_storage_buffers(std::vector<uint32_t> &words)
 
 } // namespace
 
+namespace {
+
+void replace_all(std::string &text, const std::string &needle, const std::string &replacement)
+{
+    size_t pos = 0;
+
+    while ((pos = text.find(needle, pos)) != std::string::npos) {
+        text.replace(pos, needle.size(), replacement);
+        pos += replacement.size();
+    }
+}
+
+/*
+ * SPIRV-Cross lowers OpImageQueryLod to textureQueryLOD() and requires
+ * GL_EXT_texture_query_lod for ES targets. Panfrost (Mali-G31) does not expose
+ * that extension, so any shader using SMP.info or SMP gather4.uv fails to
+ * compile. Compute the implicit LOD from screen-space derivatives instead,
+ * which is what the extension does under the hood.
+ */
+void lower_texture_query_lod(std::string &glsl)
+{
+    static const char extension_require[] = "#extension GL_EXT_texture_query_lod : require\n";
+    static const char extension_enable[] = "#extension GL_EXT_texture_query_lod : enable\n";
+
+    if (glsl.find("textureQueryLOD(") == std::string::npos)
+        return;
+
+    replace_all(glsl, extension_require, "");
+    replace_all(glsl, extension_enable, "");
+    replace_all(glsl, "textureQueryLOD(", "v2n_textureQueryLOD(");
+
+    static const char helpers[] =
+        "highp vec2 v2n_textureQueryLOD(highp sampler2D s, highp vec2 p)\n"
+        "{\n"
+        "    highp vec2 size = vec2(textureSize(s, 0));\n"
+        "    highp vec2 dx = dFdx(p * size);\n"
+        "    highp vec2 dy = dFdy(p * size);\n"
+        "    highp float lod = 0.5 * log2(max(dot(dx, dx), dot(dy, dy)));\n"
+        "    highp float max_lod = log2(max(size.x, size.y));\n"
+        "    return vec2(clamp(lod, 0.0, max_lod), p);\n"
+        "}\n"
+        "highp vec2 v2n_textureQueryLOD(highp sampler3D s, highp vec3 p)\n"
+        "{\n"
+        "    highp vec3 size = vec3(textureSize(s, 0));\n"
+        "    highp vec3 dx = dFdx(p * size);\n"
+        "    highp vec3 dy = dFdy(p * size);\n"
+        "    highp float lod = 0.5 * log2(max(dot(dx, dx), dot(dy, dy)));\n"
+        "    highp float max_lod = log2(max(max(size.x, size.y), size.z));\n"
+        "    return vec2(clamp(lod, 0.0, max_lod), p.x);\n"
+        "}\n"
+        "highp vec2 v2n_textureQueryLOD(highp samplerCube s, highp vec3 p)\n"
+        "{\n"
+        "    highp vec2 size = vec2(textureSize(s, 0));\n"
+        "    highp vec3 dx = dFdx(p * vec3(size, size.x));\n"
+        "    highp vec3 dy = dFdy(p * vec3(size, size.x));\n"
+        "    highp float lod = 0.5 * log2(max(dot(dx, dx), dot(dy, dy)));\n"
+        "    highp float max_lod = log2(max(size.x, size.y));\n"
+        "    return vec2(clamp(lod, 0.0, max_lod), p.x);\n"
+        "}\n"
+        "highp vec2 v2n_textureQueryLOD(highp sampler2DArray s, highp vec3 p)\n"
+        "{\n"
+        "    highp vec2 size = vec2(textureSize(s, 0).xy);\n"
+        "    highp vec2 dx = dFdx(p.xy * size);\n"
+        "    highp vec2 dy = dFdy(p.xy * size);\n"
+        "    highp float lod = 0.5 * log2(max(dot(dx, dx), dot(dy, dy)));\n"
+        "    highp float max_lod = log2(max(size.x, size.y));\n"
+        "    return vec2(clamp(lod, 0.0, max_lod), p.x);\n"
+        "}\n";
+
+    /* Extension directives must precede every other statement, so the helpers
+       go right after the last #extension line (or the #version line). */
+    size_t insert_at = std::string::npos;
+    size_t line_start = 0;
+
+    while (line_start < glsl.size()) {
+        size_t line_end = glsl.find('\n', line_start);
+
+        if (line_end == std::string::npos)
+            line_end = glsl.size();
+        else
+            line_end++;
+
+        const std::string line = glsl.substr(line_start, line_end - line_start);
+
+        if (line.compare(0, 11, "#extension ") == 0 ||
+            line.compare(0, 8, "#version") == 0)
+            insert_at = line_end;
+
+        line_start = line_end;
+    }
+
+    if (insert_at == std::string::npos)
+        insert_at = 0;
+
+    glsl.insert(insert_at, helpers);
+}
+
+} // namespace
+
 extern "C" int spirv_to_glsl_es(const uint32_t *spirv, size_t num_words, char **glsl_out)
 {
     if (!spirv || num_words == 0 || !glsl_out)
@@ -130,7 +229,8 @@ extern "C" int spirv_to_glsl_es(const uint32_t *spirv, size_t num_words, char **
         options.enable_420pack_extension = false;
         compiler.set_common_options(options);
 
-        const std::string glsl = compiler.compile();
+        std::string glsl = compiler.compile();
+        lower_texture_query_lod(glsl);
 
         char *copy = static_cast<char *>(malloc(glsl.size() + 1));
         if (!copy)
