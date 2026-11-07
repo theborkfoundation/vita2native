@@ -1,5 +1,6 @@
 #include "vpk.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <limits.h>
 #include <miniz/miniz.h>
@@ -8,6 +9,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
+#include <unistd.h>
 
 #define VPK_STAMP_NAME ".vpk-stamp"
 
@@ -85,7 +87,7 @@ static int write_stamp(const char *dest_dir, const struct stat *st)
     if (!fp)
         return -1;
 
-    fprintf(fp, "%lld %lld\n", (long long)st->st_size, (long long)st->st_mtime);
+    fprintf(fp, "v2 %lld %lld\n", (long long)st->st_size, (long long)st->st_mtime);
     fclose(fp);
 
     return 0;
@@ -108,13 +110,44 @@ static bool stamp_matches(const char *dest_dir, const struct stat *st)
 
     if (fgets(line, sizeof(line), fp)) {
         line[strcspn(line, "\r\n")] = '\0';
-        snprintf(expected, sizeof(expected), "%lld %lld",
+        snprintf(expected, sizeof(expected), "v2 %lld %lld",
                  (long long)st->st_size, (long long)st->st_mtime);
         match = strcmp(line, expected) == 0;
     }
 
     fclose(fp);
     return match;
+}
+
+static void remove_tree(const char *path)
+{
+    struct stat st;
+    DIR *dir;
+    struct dirent *entry;
+
+    if (lstat(path, &st) != 0)
+        return;
+
+    if (!S_ISDIR(st.st_mode)) {
+        unlink(path);
+        return;
+    }
+
+    dir = opendir(path);
+    if (dir) {
+        while ((entry = readdir(dir)) != NULL) {
+            char child[PATH_MAX];
+
+            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+                continue;
+            if (snprintf(child, sizeof(child), "%s/%s", path, entry->d_name) >= (int)sizeof(child))
+                continue;
+            remove_tree(child);
+        }
+        closedir(dir);
+    }
+
+    rmdir(path);
 }
 
 bool vpk_is_archive(const char *path)
@@ -148,6 +181,12 @@ int vpk_extract(const char *vpk_path, const char *dest_dir)
 
     if (stamp_matches(dest_dir, &st))
         return 0;
+
+    /* The destination is shared by every VPK run from this working directory.
+       Remove the previous title's files, otherwise its sce_module/ and
+       Media/Modules/ libraries get autoloaded into the next title. */
+    if (dest_dir && dest_dir[0] && strcmp(dest_dir, ".") != 0 && strcmp(dest_dir, "/") != 0)
+        remove_tree(dest_dir);
 
     fprintf(stderr, "vita2native: extracting VPK assets to '%s'\n", dest_dir);
 

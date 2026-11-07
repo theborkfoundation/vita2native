@@ -23,13 +23,20 @@ static int fix_path_case(char *path)
     char resolved[PATH_MAX];
     char *p = path;
     size_t used = 0;
+    int absolute;
 
-    if (!path || path[0] != '/')
+    if (!path || !path[0])
         return -1;
 
+    absolute = path[0] == '/';
     resolved[0] = '\0';
     while (*p == '/')
         p++;
+
+    if (!*p) {
+        strcpy(path, absolute ? "/" : ".");
+        return 0;
+    }
 
     while (*p) {
         const char *end = strchr(p, '/');
@@ -46,12 +53,18 @@ static int fix_path_case(char *path)
         memcpy(name, p, len);
         name[len] = '\0';
 
-        if (snprintf(candidate, sizeof(candidate), "%s/%s", resolved, name) >= (int)sizeof(candidate))
-            return -1;
+        if (resolved[0])
+            snprintf(candidate, sizeof(candidate), "%s/%s", resolved, name);
+        else if (absolute)
+            snprintf(candidate, sizeof(candidate), "/%s", name);
+        else
+            snprintf(candidate, sizeof(candidate), "%s", name);
 
         if (stat(candidate, &st) != 0) {
+            const char *dir_path = resolved[0] ? resolved : (absolute ? "/" : ".");
+
             strcpy(matched, name);
-            dir = opendir(resolved[0] ? resolved : "/");
+            dir = opendir(dir_path);
             if (dir) {
                 while ((entry = readdir(dir)) != NULL) {
                     if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
@@ -63,9 +76,13 @@ static int fix_path_case(char *path)
                 }
                 closedir(dir);
             }
-            if (snprintf(candidate, sizeof(candidate), "%s/%s", resolved, matched) >=
-                (int)sizeof(candidate))
-                return -1;
+
+            if (resolved[0])
+                snprintf(candidate, sizeof(candidate), "%s/%s", resolved, matched);
+            else if (absolute)
+                snprintf(candidate, sizeof(candidate), "/%s", matched);
+            else
+                snprintf(candidate, sizeof(candidate), "%s", matched);
         }
 
         used = strlen(candidate);
@@ -81,7 +98,7 @@ static int fix_path_case(char *path)
     }
 
     if (resolved[0] == '\0')
-        strcpy(resolved, "/");
+        strcpy(resolved, absolute ? "/" : ".");
     if (strlen(resolved) >= PATH_MAX)
         return -1;
     strcpy(path, resolved);
