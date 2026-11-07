@@ -9,6 +9,7 @@
 
 typedef struct {
     uint32_t perms;
+    uint32_t vita_vaddr;
     void *vaddr;
     uint32_t memsz;
     uint32_t filesz;

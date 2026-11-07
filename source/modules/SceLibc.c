@@ -409,12 +409,14 @@ EXPORT(SceLibc, 0xa9363e6b, void *, vita_memalign, size_t alignment, size_t size
 }
 
 /*
- * newlib's mspace allocator. The guest passes a region it reserved for a
- * session, but every returned pointer must be one we understand, so sessions
- * are backed by the host heap and the region is ignored.
+ * newlib's mspace allocator. The guest passes the base and size of a region it
+ * reserved, and expects the handle to hold newlib's `malloc_state`. Unity both
+ * imports these entry points and links its own copy of dlmalloc, so the handle
+ * must be large enough (and zeroed) for either implementation to use.
  */
 typedef struct {
     int magic;
+    uint8_t state[0xffc];
 } SceMSpace;
 
 #define MSPACE_MAGIC 0x4d535043
@@ -423,12 +425,12 @@ EXPORT(SceLibc, 0xcef7c575, SceMSpace *, mspace_create, void *base, size_t size)
 {
     SceMSpace *mspace;
 
-    (void)base;
-    (void)size;
-
-    mspace = malloc(sizeof(*mspace));
+    mspace = calloc(1, sizeof(*mspace));
     if (mspace)
         mspace->magic = MSPACE_MAGIC;
+
+    if (trace_alloc())
+        LOG("mspace_create(base=%p, size=0x%x) -> %p", base, (unsigned)size, (void *)mspace);
 
     return mspace;
 }
@@ -440,20 +442,43 @@ EXPORT(SceLibc, 0x30cbbc66, void, mspace_destroy, SceMSpace *mspace)
 
 EXPORT(SceLibc, 0xe080b96e, void *, mspace_malloc, SceMSpace *mspace, size_t size)
 {
+    void *block;
+
     (void)mspace;
-    return malloc(size);
+    block = malloc(size);
+    if (trace_alloc()) {
+        static int dumped;
+
+        if (!dumped) {
+            const uint32_t *w = (const uint32_t *)mspace;
+
+            dumped = 1;
+            LOG("mspace %p state: %08" PRIx32 " %08" PRIx32 " %08" PRIx32 " %08" PRIx32
+                " %08" PRIx32 " %08" PRIx32 " %08" PRIx32 " %08" PRIx32,
+                (void *)mspace, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+        }
+        LOG("mspace_malloc(%p, %u) -> %p", (void *)mspace, (unsigned)size, block);
+    }
+    return block;
 }
 
 EXPORT(SceLibc, 0x3cdfd2a3, void, mspace_free, SceMSpace *mspace, void *block)
 {
     (void)mspace;
+    if (trace_alloc())
+        LOG("mspace_free(%p, %p)", (void *)mspace, block);
     free(block);
 }
 
 EXPORT(SceLibc, 0x4633134a, void *, mspace_realloc, SceMSpace *mspace, void *block, size_t size)
 {
+    void *result;
+
     (void)mspace;
-    return realloc(block, size);
+    result = realloc(block, size);
+    if (trace_alloc())
+        LOG("mspace_realloc(%p, %p, %u) -> %p", (void *)mspace, block, (unsigned)size, result);
+    return result;
 }
 
 EXPORT(SceLibc, 0x52f780dd, void *, mspace_memalign, SceMSpace *mspace, size_t alignment,

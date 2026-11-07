@@ -689,6 +689,21 @@ Result threadStart(Thread *thread)
 
     pthread_attr_destroy(&attr);
 
+#if defined(__linux__)
+    if (ret == 0 && getenv("VITA2NATIVE_TRACE_THREAD_STACK")) {
+        pthread_attr_t got;
+        void *stack_addr = NULL;
+        size_t got_size = 0;
+
+        if (pthread_getattr_np(slot->thread, &got) == 0) {
+            if (pthread_attr_getstack(&got, &stack_addr, &got_size) == 0)
+                fprintf(stderr, "vita2native: thread stack %p..%p (0x%zx)\n", stack_addr,
+                        (char *)stack_addr + got_size, got_size);
+            pthread_attr_destroy(&got);
+        }
+    }
+#endif
+
     if (ret != 0)
         return -1;
 

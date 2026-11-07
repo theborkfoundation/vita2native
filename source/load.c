@@ -493,7 +493,7 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
     LOG("Total needed code size: 0x%" PRIx32, code_size);
     LOG("Total needed data size: 0x%" PRIx32, data_size);
 
-    res = jitCreate(jit, code_size);
+    res = jitCreate(jit, code_size + 0x1000);
     if (R_FAILED(res)) {
         LOG("jitCreate failed: 0x%" PRIx32, res);
         return -1;
@@ -543,6 +543,7 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
                 LoadedSegment *out = &info->segments[info->num_segments++];
 
                 out->perms = segments[i].p_flags;
+                out->vita_vaddr = segments[i].p_vaddr;
                 out->vaddr = (void *)addr_rx;
                 out->memsz = segments[i].p_memsz;
                 out->filesz = segments[i].p_filesz;
