@@ -93,6 +93,7 @@ add_executable(vita2native
     external/Vita3K/external/LibAtrac9/C/src/utility.c
     ${VITA2NATIVE_CTRL_SOURCE}
     source/modules/SceCtrl_common.c
+    source/modules/SceCtrl_script.c
     ${VITA2NATIVE_DISPLAY_SOURCE}
     ${VITA2NATIVE_AUDIO_SOURCE}
     source/modules/SceAudio.c
@@ -299,6 +300,7 @@ if(BUILD_TESTING)
     add_executable(ctrl_script_smoke
         tests/ctrl_script_smoke.c
         source/modules/SceCtrl_null.c
+        source/modules/SceCtrl_script.c
         source/host/host_video_sdl.c
     )
     target_include_directories(ctrl_script_smoke PRIVATE include external/vita-headers/include)
@@ -768,12 +770,14 @@ if(BUILD_TESTING)
         source/modules/SceGxm.c
         source/spirv_cross_glsl_es.cpp
         source/vita3k_shader_recompiler_iface_c.cpp
+        source/stb_image_write_impl.c
     )
     target_include_directories(gxm_draw_smoke PRIVATE
         include
         source/host
         external/khronos/include
-    external/Vita3K/external/LibAtrac9/C/src
+        external/Vita3K/external/stb
+        external/Vita3K/external/LibAtrac9/C/src
         external/vita-headers/include
         external/Vita3K/vita3k/renderer/include
     )

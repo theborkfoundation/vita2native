@@ -33,6 +33,11 @@
 #include "module.h"
 #include "spirv_cross_glsl_es.h"
 #include "util.h"
+
+/* stb_image_write is linked into the emulator, but its header is not on every
+   target's include path (the smoke tests compile this file too). */
+extern int stbi_write_png(const char *filename, int w, int h, int comp, const void *data,
+                          int stride_in_bytes);
 #include "vita3k_shader_recompiler_iface_c.h"
 
 extern int vita3k_gxm_get_attribute_location(const SceGxmProgram *program, uint16_t reg_index);
@@ -367,6 +372,7 @@ typedef struct SceGxmVertexProgram {
     SceGxmVertexStream *streams;
     unsigned int streamCount;
     GLuint shader;
+    uint32_t shader_hash;
     int refcount;
 } SceGxmVertexProgram;
 
@@ -376,6 +382,7 @@ typedef struct SceGxmFragmentProgram {
     SceGxmMultisampleMode multisampleMode;
     SceGxmBlendInfo blendInfo;
     GLuint shader;
+    uint32_t shader_hash;
     bool mask_update;
     int refcount;
 } SceGxmFragmentProgram;
@@ -396,8 +403,8 @@ typedef struct SceGxmRenderTarget {
 } SceGxmRenderTarget;
 
 typedef struct {
-    const SceGxmVertexProgram *vs;
-    const SceGxmFragmentProgram *fs;
+    uint32_t vs_hash;
+    uint32_t fs_hash;
     GLuint program;
     GLint block_vertex_data;
     GLint block_fragment_data;
@@ -471,6 +478,16 @@ static HostGles *g_gl;
 static uint32_t *g_notification_region;
 static GxmLinkedProgram g_linked[GXM_MAX_LINKED_PROGRAMS];
 static unsigned int g_linked_count;
+static unsigned int g_linked_next;
+
+#define GXM_MAX_CACHED_SHADERS 128
+typedef struct {
+    uint32_t hash;
+    GLenum stage;
+    GLuint shader;
+} GxmCachedShader;
+static GxmCachedShader g_cached_shaders[GXM_MAX_CACHED_SHADERS];
+static unsigned int g_cached_shader_count;
 static SceGxmContext *g_current_context;
 static GLuint g_bound_texture[2 * SCE_GXM_MAX_TEXTURE_UNITS];
 static unsigned int g_active_texture_unit = UINT_MAX;
@@ -761,12 +778,23 @@ static GLuint gxm_create_compiled_shader(GLenum stage, const char *name, const c
 }
 
 static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, const char *name,
-                                   const SceGxmVertexAttribute *attributes, unsigned int count)
+                                   const SceGxmVertexAttribute *attributes, unsigned int count,
+                                   uint32_t *hash_out)
 {
     uint32_t cache_hash = gxm_shader_cache_hash(program, stage, attributes, count);
-    char *glsl = gxm_shader_cache_read(cache_hash);
+    char *glsl;
     bool compiled = false;
     GLuint shader;
+
+    if (hash_out)
+        *hash_out = cache_hash;
+
+    for (unsigned int i = 0; i < g_cached_shader_count; i++) {
+        if (g_cached_shaders[i].hash == cache_hash && g_cached_shaders[i].stage == stage)
+            return g_cached_shaders[i].shader;
+    }
+
+    glsl = gxm_shader_cache_read(cache_hash);
 
     if (glsl) {
         shader = gxm_create_compiled_shader(stage, name, glsl, &compiled);
@@ -774,7 +802,7 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
             LOG("SceGxm: shader cache hit %08x (%s) program %p", cache_hash, name,
                 (const void *)program);
             free(glsl);
-            return shader;
+            goto cache_shader;
         }
 
         LOG("SceGxm: cached shader %08x failed to compile, regenerating", cache_hash);
@@ -808,6 +836,18 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
         gxm_shader_cache_write(cache_hash, glsl);
 
     free(glsl);
+
+cache_shader:
+    /* Titles such as Unity patch the same GXP blobs into fresh program objects
+       every frame; recompiling each time dominated the frame and the GL shader
+       object is independent of the guest-side program anyway. */
+    if (compiled && g_cached_shader_count < GXM_MAX_CACHED_SHADERS) {
+        g_cached_shaders[g_cached_shader_count].hash = cache_hash;
+        g_cached_shaders[g_cached_shader_count].stage = stage;
+        g_cached_shaders[g_cached_shader_count].shader = shader;
+        g_cached_shader_count++;
+    }
+
     return shader;
 }
 
@@ -827,17 +867,34 @@ static GLuint gxm_get_linked_program(const SceGxmVertexProgram *vs, const SceGxm
     GLint ok = 0;
     char log[1024];
     GxmLinkedProgram *linked;
+    uint32_t vs_hash = vs ? vs->shader_hash : 0;
+    uint32_t fs_hash = fs ? fs->shader_hash : 0;
 
     for (unsigned int i = 0; i < g_linked_count; i++) {
-        if (g_linked[i].vs == vs && g_linked[i].fs == fs) {
+        if (g_linked[i].vs_hash == vs_hash && g_linked[i].fs_hash == fs_hash) {
             if (linked_out)
                 *linked_out = &g_linked[i];
             return g_linked[i].program;
         }
     }
 
-    if (g_linked_count == GXM_MAX_LINKED_PROGRAMS)
-        return 0;
+    /* Titles that rebuild shader patcher programs every frame keep producing
+       new object pointers for the same shader bytes. Keying on the content
+       hash keeps one entry per material variant; the ring replacement below
+       only matters if a title really has more variants than the table holds. */
+    if (g_linked_count == GXM_MAX_LINKED_PROGRAMS) {
+        linked = &g_linked[g_linked_next++ % GXM_MAX_LINKED_PROGRAMS];
+        /* A batch that is still open may draw with this program in a moment;
+           keep it alive in that case (the draw would otherwise use a deleted
+           object). Eviction is rare, so the leak is bounded in practice. */
+        if (linked->program &&
+            !(g_current_context && g_current_context->batch.active &&
+              g_current_context->batch.state.program == linked->program))
+            g_gl->glDeleteProgram(linked->program);
+        memset(linked, 0, sizeof(*linked));
+    } else {
+        linked = &g_linked[g_linked_count++];
+    }
 
     GLuint program = g_gl->glCreateProgram();
     if (vs && vs->shader)
@@ -850,16 +907,17 @@ static GLuint gxm_get_linked_program(const SceGxmVertexProgram *vs, const SceGxm
         g_gl->glGetProgramInfoLog(program, sizeof(log), NULL, log);
         if (log[0] == '\0')
             snprintf(log, sizeof(log), "(no info log)");
-        LOG("SceGxm: program link failed (vs=%p shader %u, fs=%p shader %u):\n%s",
-            (const void *)vs, vs ? vs->shader : 0, (const void *)fs, fs ? fs->shader : 0,
-            log);
+        LOG("SceGxm: program link failed (vs=%p hash %08x, fs=%p hash %08x):\n%s",
+            (const void *)vs, vs_hash, (const void *)fs, fs_hash, log);
         g_gl->glDeleteProgram(program);
+        memset(linked, 0, sizeof(*linked));
+        if (g_linked_count && linked == &g_linked[g_linked_count - 1])
+            g_linked_count--;
         return 0;
     }
 
-    linked = &g_linked[g_linked_count++];
-    linked->vs = vs;
-    linked->fs = fs;
+    linked->vs_hash = vs_hash;
+    linked->fs_hash = fs_hash;
     linked->program = program;
     linked->block_vertex_data = g_gl->glGetUniformBlockIndex(program, "vertexDataType");
     linked->block_fragment_data = g_gl->glGetUniformBlockIndex(program, "fragmentDataType");
@@ -1196,6 +1254,23 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
 
             if (cube)
                 upload_target = GL_TEXTURE_CUBE_MAP_POSITIVE_X + face;
+
+            if (level == 0 && face == 0) {
+                static const char *dump_dir;
+                static unsigned int dumped;
+
+                if (!dump_dir)
+                    dump_dir = getenv("VITA2NATIVE_DUMP_TEXTURES");
+                if (dump_dir && dumped < 200) {
+                    char path[PATH_MAX];
+
+                    snprintf(path, sizeof(path), "%s/tex_%08x_%ux%u_%08x.png", dump_dir,
+                             (unsigned)gxm_texture_get_format(texture), (unsigned)width,
+                             (unsigned)height, hash);
+                    if (stbi_write_png(path, (int)width, (int)height, 4, rgba, (int)width * 4))
+                        dumped++;
+                }
+            }
 
             /*
              * A gamma texture stores sRGB-encoded texels. Decoding is done on
@@ -1813,6 +1888,7 @@ EXPORT(SceGxm, 0xB0F1E4EC, int, sceGxmInitialize, const SceGxmInitializeParams *
     g_display_callback = params ? params->displayQueueCallback : NULL;
     g_display_callback_data_size = params ? params->displayQueueCallbackDataSize : 0;
     g_linked_count = 0;
+    g_linked_next = 0;
     g_gxm_initialized = true;
 
     return 0;
@@ -1826,11 +1902,15 @@ EXPORT(SceGxm, 0xB627DE66, int, sceGxmTerminate)
     if (g_gl) {
         for (unsigned int i = 0; i < g_linked_count; i++)
             g_gl->glDeleteProgram(g_linked[i].program);
+        for (unsigned int i = 0; i < g_cached_shader_count; i++)
+            g_gl->glDeleteShader(g_cached_shaders[i].shader);
         gxm_texture_cache_flush();
         memset(g_bound_uniform_block, 0, sizeof(g_bound_uniform_block));
         memset(g_bound_render_ubo, 0, sizeof(g_bound_render_ubo));
     }
     g_linked_count = 0;
+    g_linked_next = 0;
+    g_cached_shader_count = 0;
     free(g_notification_region);
     g_notification_region = NULL;
     g_gxm_initialized = false;
@@ -2095,7 +2175,7 @@ EXPORT(SceGxm, 0xB7BBA6D5, int, sceGxmShaderPatcherCreateVertexProgram,
 
     if (g_gl)
         vp->shader = gxm_translate_shader(programId->programHeader, GL_VERTEX_SHADER, "vert",
-                                          attributes, attributeCount);
+                                          attributes, attributeCount, &vp->shader_hash);
     if (g_gl && !vp->shader) {
         free(vp->attributes);
         free(vp->streams);
@@ -2120,8 +2200,7 @@ EXPORT(SceGxm, 0xAC1FF2DA, int, sceGxmShaderPatcherReleaseVertexProgram,
         return SCE_GXM_ERROR_INVALID_POINTER;
     if (--vertexProgram->refcount > 0)
         return 0;
-    if (g_gl && vertexProgram->shader)
-        g_gl->glDeleteShader(vertexProgram->shader);
+    /* The GL shader is owned by the content-addressed shader cache. */
     free(vertexProgram->attributes);
     free(vertexProgram->streams);
     free(vertexProgram);
@@ -2160,7 +2239,7 @@ EXPORT(SceGxm, 0x4ED2E49D, int, sceGxmShaderPatcherCreateFragmentProgram,
 
     if (g_gl)
         fp->shader = gxm_translate_shader(programId->programHeader, GL_FRAGMENT_SHADER, "frag",
-                                          NULL, 0);
+                                          NULL, 0, &fp->shader_hash);
     if (g_gl && !fp->shader) {
         free(fp);
         return SCE_GXM_ERROR_INVALID_VALUE;
@@ -2187,8 +2266,7 @@ EXPORT(SceGxm, 0xBE2743D1, int, sceGxmShaderPatcherReleaseFragmentProgram,
     if (gxm_program_trace())
         LOG("SceGxm: release fp %p shader %u", (void *)fragmentProgram, fragmentProgram->shader);
 
-    if (g_gl && fragmentProgram->shader)
-        g_gl->glDeleteShader(fragmentProgram->shader);
+    /* The GL shader is owned by the content-addressed shader cache. */
     free(fragmentProgram);
     return 0;
 }
@@ -5448,6 +5526,180 @@ static bool gxm_batch_matches(SceGxmContext *context, const GxmDrawState *state,
     return true;
 }
 
+static int gxm_flush_trace_from(void)
+{
+    static int frame = -2;
+
+    if (frame == -2) {
+        const char *value = getenv("VITA2NATIVE_GXM_FLUSH_TRACE");
+        frame = value ? atoi(value) : -1;
+    }
+    return frame;
+}
+
+/* Debug aid: write the render target after every flush of one frame, so each
+   draw's contribution can be inspected on its own. */
+static void gxm_dump_flush(SceGxmContext *context, const GxmDrawBatch *batch)
+{
+    static int frame = -2;
+    static unsigned int seq;
+    const char *dir;
+    uint32_t width, height;
+    uint8_t *rgba, *flipped;
+    char path[PATH_MAX];
+
+    if (frame == -2) {
+        const char *value = getenv("VITA2NATIVE_GXM_FRAME_DUMP");
+        frame = value ? atoi(value) : -1;
+    }
+    if (frame < 0 || g_gxm_frame != (uint64_t)frame)
+        return;
+
+    if (context->render_target)
+        g_gl->glBindFramebuffer(GL_FRAMEBUFFER, context->render_target->fbo);
+
+    dir = getenv("VITA2NATIVE_GXM_FRAME_DUMP_DIR");
+    if (!dir)
+        dir = "/tmp";
+
+    width = batch->state.surface_width;
+    height = batch->state.surface_height;
+    if (!width || !height || width > 4096 || height > 4096)
+        return;
+
+    rgba = malloc((size_t)width * height * 4);
+    flipped = malloc((size_t)width * height * 4);
+    if (!rgba || !flipped) {
+        free(rgba);
+        free(flipped);
+        return;
+    }
+
+    g_gl->glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    g_gl->glReadPixels(0, 0, (GLsizei)width, (GLsizei)height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    for (uint32_t y = 0; y < height; y++)
+        memcpy(flipped + (size_t)y * width * 4,
+               rgba + (size_t)(height - 1 - y) * width * 4, (size_t)width * 4);
+
+    snprintf(path, sizeof(path), "%s/f%llu_%02u_prog%u_idx%u.png", dir,
+             (unsigned long long)g_gxm_frame, seq++, batch->state.program, batch->index_count);
+    stbi_write_png(path, (int)width, (int)height, 4, flipped, (int)width * 4);
+
+    free(rgba);
+    free(flipped);
+}
+
+static void gxm_trace_batch(SceGxmContext *context, const GxmDrawBatch *batch)
+{
+    static unsigned int traced;
+    const SceGxmTextureInner *t0 = &batch->fragment_textures[0];
+    const uint32_t *td = gxm_texture_get_data(t0);
+    static int vert_frame = -2;
+
+    if (vert_frame == -2) {
+        const char *value = getenv("VITA2NATIVE_GXM_VERT_TRACE");
+        vert_frame = value ? atoi(value) : -1;
+    }
+
+    if (vert_frame >= 0 && g_gxm_frame == (uint64_t)vert_frame) {
+        const SceGxmVertexProgram *vp = batch->vertex_program;
+
+        if (vp) {
+            LOG("vert frame %llu: attrs=%u streams=%u idx=%u verts=%u",
+                (unsigned long long)g_gxm_frame, vp->attributeCount, vp->streamCount,
+                batch->index_count, batch->vertex_count);
+            for (unsigned int a = 0; a < vp->attributeCount; a++) {
+                const SceGxmVertexAttribute *attr = &vp->attributes[a];
+
+                LOG("  attr %u: reg=%u stream=%u offset=%u fmt=%u comps=%u", a, attr->regIndex,
+                    attr->streamIndex, attr->offset, attr->format, attr->componentCount);
+            }
+            for (unsigned int s = 0; s < vp->streamCount; s++) {
+                const GxmBufferArena *arena = &context->stream_arena[s];
+                uint32_t stride = vp->streams[s].stride;
+
+                if (!stride || !arena->stage)
+                    continue;
+                LOG("  stream %u: stride=%u first=%p", s, stride,
+                    (const void *)(arena->stage + batch->stream_start[s]));
+                for (unsigned int v = 0; v < 4 && v < batch->vertex_count; v++) {
+                    const uint32_t *w =
+                        (const uint32_t *)(arena->stage + batch->stream_start[s] + (size_t)v * stride);
+
+                    LOG("    v%u: %08x %08x %08x %08x %08x %08x %08x %08x", v, w[0], w[1], w[2],
+                        w[3], w[4], w[5], w[6], w[7]);
+                }
+            }
+        }
+    }
+
+    if (traced >= 3000)
+        return;
+    traced++;
+
+    LOG("flush %llu: prog=%u draws=%u idx=%u verts=%u surf=%ux%u ds=%p tex=%p %ux%u fmt=0x%x "
+        "t0=%08x depth=%d/%d vp=%.1f,%.1f %.1f,%.1f clip=%u,%u..%u,%u prim=%u blend=%x/%d/%d/%d/%d",
+        (unsigned long long)g_gxm_frame, batch->state.program, batch->draws, batch->index_count,
+        batch->vertex_count, batch->state.surface_width, batch->state.surface_height,
+        (const void *)batch->state.ds_surface, (const void *)td,
+        (unsigned)gxm_texture_get_width(t0), (unsigned)gxm_texture_get_height(t0),
+        (unsigned)gxm_texture_get_format(t0), td ? td[0] : 0, (int)batch->state.depth_func,
+        (int)batch->state.depth_write, batch->state.viewport_x_offset,
+        batch->state.viewport_x_scale, batch->state.viewport_y_offset,
+        batch->state.viewport_y_scale, batch->state.region_clip_xmin,
+        batch->state.region_clip_ymin, batch->state.region_clip_xmax,
+        batch->state.region_clip_ymax, (unsigned)batch->state.prim,
+        batch->fragment_uniform_size ? ((const uint32_t *)batch->fragment_uniforms)[0] : 0,
+        batch->state.front_stencil_func, batch->state.front_stencil_fail,
+        batch->state.front_stencil_depth_fail, batch->state.front_stencil_pass,
+        batch->state.front_stencil_ref);
+
+    {
+        const SceGxmVertexProgram *vp = batch->vertex_program;
+        const SceGxmProgram *prog = vp ? vp->programId->programHeader : NULL;
+        const GxmBufferArena *raw = &context->stream_arena[0];
+        uint32_t raw_stride = vp && vp->streamCount ? vp->streams[0].stride : 0;
+
+        if (raw->stage && raw_stride) {
+            const uint8_t *raw_base = raw->stage + batch->stream_start[0];
+
+            for (unsigned int v = 0; v < 3 && v < batch->vertex_count; v++) {
+                const float *p = (const float *)(raw_base + (size_t)v * raw_stride);
+
+                LOG("flush raw %u: %.3f %.3f %.3f %.3f | %08x %08x", v, p[0], p[1], p[2], p[3],
+                    ((const uint32_t *)p)[4], ((const uint32_t *)p)[5]);
+            }
+        }
+        const SceGxmProgramParameter *pos =
+            prog ? sceGxmProgramFindParameterBySemantic(prog, SCE_GXM_PARAMETER_SEMANTIC_POSITION, 0)
+                 : NULL;
+
+        for (unsigned int a = 0; pos && a < vp->attributeCount; a++) {
+            const SceGxmVertexAttribute *attr = &vp->attributes[a];
+            const GxmBufferArena *arena;
+            uint32_t stride;
+            const uint8_t *base;
+
+            if (attr->regIndex != (uint16_t)pos->resource_index)
+                continue;
+            if (attr->streamIndex >= SCE_GXM_MAX_VERTEX_STREAMS)
+                break;
+            arena = &context->stream_arena[attr->streamIndex];
+            stride = vp->streams[attr->streamIndex].stride;
+            if (!arena->stage || !stride || attr->format != SCE_GXM_ATTRIBUTE_FORMAT_F32)
+                break;
+            base = arena->stage + batch->stream_start[attr->streamIndex] + attr->offset;
+            for (unsigned int v = 0; v < 4 && v < batch->vertex_count; v++) {
+                const float *p = (const float *)(base + (size_t)v * stride);
+
+                LOG("flush vert %u: %.2f %.2f %.2f %.2f", v, p[0], p[1], p[2],
+                    attr->componentCount > 3 ? p[3] : 1.0f);
+            }
+            break;
+        }
+    }
+}
+
 static void gxm_batch_flush(SceGxmContext *context)
 {
     GxmDrawBatch *batch = &context->batch;
@@ -5544,6 +5796,26 @@ static void gxm_batch_flush(SceGxmContext *context)
                 traced++;
             }
         }
+
+        if ((gxm_flush_trace_from() >= 0 &&
+             g_gxm_frame >= (uint64_t)gxm_flush_trace_from()) ||
+            getenv("VITA2NATIVE_GXM_VERT_TRACE"))
+            gxm_trace_batch(context, batch);
+
+        if (getenv("VITA2NATIVE_GXM_FLUSH_PIXEL") && batch->state.surface_width &&
+            batch->state.surface_height) {
+            uint8_t px[4] = {0, 0, 0, 0};
+
+            g_gl->glReadPixels((GLint)(batch->state.surface_width / 2),
+                               (GLint)(batch->state.surface_height / 2), 1, 1, GL_RGBA,
+                               GL_UNSIGNED_BYTE, px);
+            LOG("flush %llu prog=%u idx=%u -> centre pixel %02x%02x%02x%02x",
+                (unsigned long long)g_gxm_frame, batch->state.program, batch->index_count, px[0],
+                px[1], px[2], px[3]);
+        }
+
+        if (getenv("VITA2NATIVE_GXM_FRAME_DUMP"))
+            gxm_dump_flush(context, batch);
 
         if (batch->state.instances > 1 && batch->gl_primitive != GL_POINTS)
             g_gl->glDrawElementsInstanced(batch->gl_primitive, (GLsizei)batch->index_count,
@@ -5768,6 +6040,28 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
 
     host_gpu_thread_enter(g_device);
 
+    /* A rejected draw is invisible: the guest believes it rendered, so tracing
+       only the flushed batches makes missing geometry impossible to explain. */
+    if (getenv("VITA2NATIVE_GXM_DRAW_ERRORS")) {
+        static unsigned int logged;
+
+        if (logged < 32) {
+            const char *reason = NULL;
+
+            if (!context->in_scene)
+                reason = "not within scene";
+            else if (!context->vertex_program || !context->fragment_program)
+                reason = "null program";
+            else if (!indexData || !indexCount)
+                reason = "no index data";
+            if (reason) {
+                LOG("draw rejected (%s): prim=%u count=%u index=%p", reason, (unsigned)primType,
+                    indexCount, indexData);
+                logged++;
+            }
+        }
+    }
+
     if (context->deferred) {
         if (!context->command_list_active)
             return SCE_GXM_ERROR_NOT_WITHIN_COMMAND_LIST;
@@ -5790,8 +6084,21 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
         return 0;
 
     program = gxm_get_linked_program(context->vertex_program, context->fragment_program, &linked);
-    if (!program)
+    if (!program) {
+        if (getenv("VITA2NATIVE_GXM_DRAW_ERRORS")) {
+            static unsigned int logged;
+
+            if (logged < 64) {
+                LOG("frame %llu ctx %p: draw rejected (unlinked program, cache %u/128): "
+                    "vert=%p frag=%p count=%u",
+                    (unsigned long long)g_gxm_frame, (void *)context, g_linked_count,
+                    (const void *)context->vertex_program, (const void *)context->fragment_program,
+                    indexCount);
+                logged++;
+            }
+        }
         return SCE_GXM_ERROR_INVALID_VALUE;
+    }
 
     for (unsigned int i = 0; i < indexCount; i++) {
         uint32_t index = gxm_read_index(indexData, indexType, i);
@@ -5884,6 +6191,32 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
     fragment_uniform_size = gxm_build_uniforms(context, context->fragment_program->programId, false);
 
     gxm_fill_draw_state(context, program, primType, indexType, instances, &state);
+
+    if (getenv("VITA2NATIVE_GXM_VERT_TRACE")) {
+        static int blend_frame = -2;
+
+        if (blend_frame == -2) {
+            const char *value = getenv("VITA2NATIVE_GXM_VERT_TRACE");
+            blend_frame = value ? atoi(value) : -1;
+        }
+        if (blend_frame >= 0 && g_gxm_frame == (uint64_t)blend_frame &&
+            context->fragment_program) {
+            const SceGxmBlendInfo *b = &context->fragment_program->blendInfo;
+
+            LOG("  draw count=%u mask=%x func=%d/%d src=%d/%d dst=%d/%d mask_update=%d frag=%08x",
+                indexCount, b->colorMask, (int)b->colorFunc, (int)b->alphaFunc, (int)b->colorSrc,
+                (int)b->colorDst, (int)b->alphaSrc, (int)b->alphaDst,
+                (int)context->fragment_program->mask_update,
+                context->fragment_program->shader_hash);
+            {
+                const float *fu = (const float *)context->fragment_block_data;
+
+                if (fu)
+                    LOG("    frag uniforms: %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f",
+                        fu[0], fu[1], fu[2], fu[3], fu[4], fu[5], fu[6], fu[7]);
+            }
+        }
+    }
 
     if (getenv("VITA2NATIVE_BATCH_DEBUG")) {
         static bool logged;
@@ -6296,6 +6629,7 @@ EXPORT(SceGxm, 0xA4433427, int, sceGxmShaderPatcherCreateMaskUpdateFragmentProgr
 
     fp->refcount = 1;
     fp->mask_update = true;
+    fp->shader_hash = 0x4D41534Bu; /* "MASK": never collides with a GXP hash */
     fp->blendInfo = (SceGxmBlendInfo){
         SCE_GXM_COLOR_MASK_NONE, SCE_GXM_BLEND_FUNC_NONE, SCE_GXM_BLEND_FUNC_NONE,
         SCE_GXM_BLEND_FACTOR_ONE, SCE_GXM_BLEND_FACTOR_ZERO,
