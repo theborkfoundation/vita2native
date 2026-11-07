@@ -39,6 +39,32 @@ typedef struct VitaMspaceImpl {
 static pthread_mutex_t g_mspaces_lock = PTHREAD_MUTEX_INITIALIZER;
 static VitaMspaceImpl *g_mspaces;
 
+/* dlmalloc is compiled without internal locks: serialise every operation here.
+   Guest threads call the exported mspace functions concurrently. */
+static pthread_mutex_t g_mspace_op_lock;
+static pthread_once_t g_mspace_op_lock_once = PTHREAD_ONCE_INIT;
+
+static void mspace_op_lock_init(void)
+{
+    pthread_mutexattr_t attr;
+
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&g_mspace_op_lock, &attr);
+    pthread_mutexattr_destroy(&attr);
+}
+
+static void mspace_op_lock(void)
+{
+    pthread_once(&g_mspace_op_lock_once, mspace_op_lock_init);
+    pthread_mutex_lock(&g_mspace_op_lock);
+}
+
+static void mspace_op_unlock(void)
+{
+    pthread_mutex_unlock(&g_mspace_op_lock);
+}
+
 static int mspace_debug(void)
 {
     static int enabled = -1;
@@ -122,7 +148,9 @@ VitaMspace vita_mspace_create(void *base, size_t size)
     if (!impl)
         return NULL;
 
+    mspace_op_lock();
     impl->handle = create_mspace_with_base(base, size, 0);
+    mspace_op_unlock();
     if (!impl->handle) {
         free(impl);
         return NULL;
@@ -145,12 +173,16 @@ void vita_mspace_destroy(VitaMspace mspace)
     impl = mspace_lookup(mspace);
     if (impl) {
         mspace_unregister(impl);
+        mspace_op_lock();
         destroy_mspace(impl->handle);
+        mspace_op_unlock();
         free(impl);
         return;
     }
 
+    mspace_op_lock();
     destroy_mspace(mspace);
+    mspace_op_unlock();
 }
 
 void *vita_mspace_malloc(VitaMspace mspace, size_t size)
@@ -160,7 +192,9 @@ void *vita_mspace_malloc(VitaMspace mspace, size_t size)
     if (!mspace)
         return NULL;
 
+    mspace_op_lock();
     block = mspace_malloc(mspace, size);
+    mspace_op_unlock();
     if (block)
         mspace_note_alloc(mspace, 1);
 
@@ -178,18 +212,26 @@ void vita_mspace_free(VitaMspace mspace, void *ptr)
     if (impl)
         debug_chunk("free", impl, ptr);
 
+    mspace_op_lock();
     mspace_free(mspace, ptr);
+    mspace_op_unlock();
     mspace_note_alloc(mspace, -1);
 }
 
 void *vita_mspace_realloc(VitaMspace mspace, void *ptr, size_t size)
 {
+    void *block;
+
     if (!mspace)
         return NULL;
     if (!ptr)
         return vita_mspace_malloc(mspace, size);
 
-    return mspace_realloc(mspace, ptr, size);
+    mspace_op_lock();
+    block = mspace_realloc(mspace, ptr, size);
+    mspace_op_unlock();
+
+    return block;
 }
 
 void *vita_mspace_memalign(VitaMspace mspace, size_t alignment, size_t size)
@@ -199,7 +241,9 @@ void *vita_mspace_memalign(VitaMspace mspace, size_t alignment, size_t size)
     if (!mspace)
         return NULL;
 
+    mspace_op_lock();
     block = mspace_memalign(mspace, alignment, size);
+    mspace_op_unlock();
     if (block)
         mspace_note_alloc(mspace, 1);
 
@@ -220,7 +264,10 @@ void *vita_mspace_reallocalign(VitaMspace mspace, void *ptr, size_t size, size_t
         return NULL;
 
     if (ptr) {
-        size_t old = mspace_usable_size(ptr);
+        size_t old;
+
+        mspace_op_lock();
+        old = mspace_usable_size(ptr);
 
         if (mspace_debug()) {
             fprintf(stderr, "mspace reallocalign %p (usable %zu) -> %p (align %zu, size %zu)\n",
@@ -228,7 +275,9 @@ void *vita_mspace_reallocalign(VitaMspace mspace, void *ptr, size_t size, size_t
             fflush(stderr);
         }
         memcpy(fresh, ptr, old < size ? old : size);
-        vita_mspace_free(mspace, ptr);
+        mspace_free(mspace, ptr);
+        mspace_op_unlock();
+        mspace_note_alloc(mspace, -1);
     }
 
     return fresh;
@@ -236,9 +285,17 @@ void *vita_mspace_reallocalign(VitaMspace mspace, void *ptr, size_t size, size_t
 
 size_t vita_mspace_usable_size(VitaMspace mspace, const void *ptr)
 {
-    (void)mspace;
+    size_t size;
 
-    return ptr ? mspace_usable_size(ptr) : 0;
+    (void)mspace;
+    if (!ptr)
+        return 0;
+
+    mspace_op_lock();
+    size = mspace_usable_size(ptr);
+    mspace_op_unlock();
+
+    return size;
 }
 
 int vita_mspace_is_empty(VitaMspace mspace)
@@ -250,5 +307,14 @@ int vita_mspace_is_empty(VitaMspace mspace)
 
 size_t vita_mspace_footprint(VitaMspace mspace)
 {
-    return mspace ? mspace_footprint(mspace) : 0;
+    size_t size;
+
+    if (!mspace)
+        return 0;
+
+    mspace_op_lock();
+    size = mspace_footprint(mspace);
+    mspace_op_unlock();
+
+    return size;
 }

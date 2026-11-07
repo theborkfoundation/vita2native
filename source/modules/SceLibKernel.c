@@ -105,7 +105,7 @@ EXPORT(SceLibKernel, 0xB295EB61, void *, sceKernelGetTLSAddr, int key)
 
 EXPORT(SceLibKernel, 0x7595D9AA, int, sceKernelExitProcess, int res)
 {
-    LOG("sceKernelExitProcess called! Return value %d", res);
+    LOG("sceKernelExitProcess called! Return value %d ra=%p", res, __builtin_return_address(0));
 
     atomic_store(&g_process_exit_res, res);
     ueventSignal(&g_process_exit_event);
@@ -593,8 +593,27 @@ EXPORT(SceLibKernel, 0x0FB972F9, int, sceKernelGetThreadId)
     return SceKernelThreadMgr_get_thread_info()->uid;
 }
 
+/* Unity's assert path. Log the message (the varargs are guest pointers, which
+   are mapped on the host) and keep running so the failure is visible. */
+EXPORT(SceDbg, 0x1AF3678B, int, sceDbgAssertionHandler, const char *filename, int line,
+       int do_stop, const char *component, const char *format, ...)
+{
+    char message[512];
+    va_list args;
+
+    va_start(args, format);
+    vsnprintf(message, sizeof(message), format ? format : "(no message)", args);
+    va_end(args);
+
+    LOG("Assertion %s:%d [%s] stop=%d: %s", filename ? filename : "?", line,
+        component ? component : "?", do_stop, message);
+
+    return 0;
+}
+
 DECLARE_LIBRARY(SceLibKernel, 0xcae9ace6);
 DECLARE_LIBRARY(SceIofilemgr, 0xf2ff276e);
+DECLARE_LIBRARY(SceDbg, 0x623df986);
 
 int SceLibKernel_init(void)
 {

@@ -484,9 +484,16 @@ EXPORT(SceLibc, 0x915da59e, void *, sce_mspace_reallocalign, SceMSpace mspace, v
     return fresh;
 }
 
-EXPORT(SceLibc, 0x7ad7a737, size_t, sce_mspace_malloc_usable_size, SceMSpace mspace, void *block)
+/* Sony's entry point is the one-argument dlmalloc form:
+   mspace_malloc_usable_size(void *block). Unity calls it with the payload in
+   r0; the second register is whatever the caller left there. */
+EXPORT(SceLibc, 0x7ad7a737, size_t, sce_mspace_malloc_usable_size, void *block)
 {
-    return vita_mspace_usable_size(mspace, block);
+    size_t size = vita_mspace_usable_size(NULL, block);
+
+    if (trace_alloc())
+        LOG("mspace_usable_size(block=%p) -> %u", block, (unsigned)size);
+    return size;
 }
 
 EXPORT(SceLibc, 0xf355f381, int, sce_mspace_is_heap_empty, SceMSpace mspace)
