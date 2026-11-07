@@ -144,8 +144,11 @@ EXPORT(SceLibKernel, 0x6C60AC61, SceUID, sceIoOpen, const char *file, int flags,
     char resolved[PATH_MAX];
     FILE *fp;
 
-    if (host_fs_resolve_path(file, resolved, sizeof(resolved)) < 0)
+    if (host_fs_resolve_path(file, resolved, sizeof(resolved)) < 0) {
+        if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+            LOG("sceIoOpen(\"%s\") resolve failed", file ? file : "(null)");
         return SCE_ERROR_ERRNO_ENODEV;
+    }
     host_file = resolved;
 
     if (*host_file == '\0')
@@ -161,8 +164,12 @@ EXPORT(SceLibKernel, 0x6C60AC61, SceUID, sceIoOpen, const char *file, int flags,
         int access = flags & (SCE_O_RDONLY | SCE_O_WRONLY);
         fp = fopen(host_file, access == SCE_O_WRONLY ? "w" : "w+");
     }
-    if (!fp)
+    if (!fp) {
+        if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+            LOG("sceIoOpen(\"%s\") failed: %s (host \"%s\")", file ? file : "(null)",
+                strerror(errno), host_file);
         return sce_error_from_errno(errno);
+    }
 
     (void)mode;
 
@@ -180,6 +187,9 @@ EXPORT(SceLibKernel, 0x6C60AC61, SceUID, sceIoOpen, const char *file, int flags,
     rwlockWriteLock(&g_vita_opened_files_lock);
     vita_opened_files_dict_set_at(g_vita_opened_files, vfile->uid, vfile);
     rwlockWriteUnlock(&g_vita_opened_files_lock);
+
+    if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+        LOG("sceIoOpen(\"%s\") -> uid=0x%x", file ? file : "(null)", vfile->uid);
 
     return vfile->uid;
 }
@@ -208,10 +218,17 @@ EXPORT(SceIofilemgr, 0xC70B8886, int, sceIoClose, SceUID fd)
 EXPORT(SceIofilemgr, 0xFDB32293, SceSSize, sceIoRead, SceUID fd, void *buf, SceSize nbyte)
 {
     VitaOpenedFile *vfile = get_opened_file_for_fd(fd);
+    SceSSize result;
+
     if (!vfile)
         return SCE_ERROR_ERRNO_EBADF;
 
-    return fread(buf, 1, nbyte, vfile->fp);
+    result = (SceSSize)fread(buf, 1, nbyte, vfile->fp);
+
+    if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+        LOG("sceIoRead(0x%x, %u) -> %d", fd, (unsigned)nbyte, (int)result);
+
+    return result;
 }
 
 EXPORT(SceIofilemgr, 0x34EFD876, SceSSize, sceIoWrite, SceUID fd, const void *buf, SceSize nbyte)

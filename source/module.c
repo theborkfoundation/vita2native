@@ -148,24 +148,27 @@ static bool skip_host_mspace(uint32_t func_nid)
     return false;
 }
 
-const void *module_get_func_export(uint32_t lib_nid, uint32_t func_nid, void *importer)
+static int prefer_guest_exports(uint32_t lib_nid)
 {
-    size_t num_libs = NUM_EXPORTED_LIBS;
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_PREFER_GUEST_EXPORTS") != NULL;
+    if (enabled)
+        return lib_nid != 0xbe43bb07;
+
+    /* SceLibc stays on the host: Sony's libc module_start expects a real
+       Vita kernel and aborts before publishing anything usable here. For Fios
+       the situation is the opposite: the application's libfios2.suprx
+       implements the full 168-function async API on top of the kernel calls we
+       provide, while the host only stands in for a handful of sync entry
+       points. Use the module when the title ships it. */
+    return lib_nid == 0x3ad4d630;
+}
+
+static const void *guest_func_export(uint32_t lib_nid, uint32_t func_nid, void *importer)
+{
     const void *result = NULL;
-
-    if (!skip_host_mspace(func_nid)) {
-        for (size_t i = 0; i < num_libs; i++) {
-            if (__start_exported_libraries[i].nid == lib_nid) {
-                const library_t *const lib = &__start_exported_libraries[i];
-                size_t num_funcs = NUM_FUNCS(lib);
-
-                for (size_t j = 0; j < num_funcs; j++) {
-                    if (lib->func_nidtable_start[j] == func_nid)
-                        return lib->func_table_start[j];
-                }
-            }
-        }
-    }
 
     pthread_mutex_lock(&g_guest_libraries_lock);
     for (int i = 0; i < MAX_GUEST_LIBRARIES; i++) {
@@ -186,6 +189,47 @@ const void *module_get_func_export(uint32_t lib_nid, uint32_t func_nid, void *im
 done:
     pthread_mutex_unlock(&g_guest_libraries_lock);
     return result;
+}
+
+static const void *host_func_export(uint32_t lib_nid, uint32_t func_nid)
+{
+    size_t num_libs = NUM_EXPORTED_LIBS;
+
+    for (size_t i = 0; i < num_libs; i++) {
+        if (__start_exported_libraries[i].nid == lib_nid) {
+            const library_t *const lib = &__start_exported_libraries[i];
+            size_t num_funcs = NUM_FUNCS(lib);
+
+            for (size_t j = 0; j < num_funcs; j++) {
+                if (lib->func_nidtable_start[j] == func_nid)
+                    return lib->func_table_start[j];
+            }
+        }
+    }
+
+    return NULL;
+}
+
+const void *module_get_func_export(uint32_t lib_nid, uint32_t func_nid, void *importer)
+{
+    const void *result;
+
+    if (prefer_guest_exports(lib_nid)) {
+        result = guest_func_export(lib_nid, func_nid, importer);
+        if (result)
+            return result;
+    }
+
+    if (!skip_host_mspace(func_nid)) {
+        result = host_func_export(lib_nid, func_nid);
+        if (result)
+            return result;
+    }
+
+    if (!prefer_guest_exports(lib_nid))
+        return guest_func_export(lib_nid, func_nid, importer);
+
+    return NULL;
 }
 
 void *module_get_var_export(uint32_t lib_nid, uint32_t var_nid, void *importer)
