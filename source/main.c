@@ -417,6 +417,39 @@ static void dump_guest_words(unsigned long address, int count)
     }
 }
 
+/* Anonymous read/write mappings of at least 1 MiB, with their first words.
+   Used to tell host-allocated arenas from guest ones when tracking down heap
+   problems. */
+static void dump_big_anon_mappings(const char *tag)
+{
+    char line[512];
+    FILE *maps = fopen("/proc/self/maps", "r");
+
+    if (!maps)
+        return;
+
+    while (fgets(line, sizeof(line), maps)) {
+        unsigned long lo, hi;
+        char message[160];
+        int length;
+
+        if (sscanf(line, "%lx-%lx", &lo, &hi) != 2)
+            continue;
+        if (hi - lo < 0x100000)
+            continue;
+        if (!strstr(line, "rw-p 00000000 00:00 0"))
+            continue;
+
+        length = snprintf(message, sizeof(message),
+                          "vita2native: %s anon %08lx-%08lx (0x%lx)\n", tag, lo, hi, hi - lo);
+        if (length > 0)
+            write(STDERR_FILENO, message, (size_t)length);
+        dump_guest_words(lo, 8);
+    }
+
+    fclose(maps);
+}
+
 static void guest_signal_handler(int signal, siginfo_t *info, void *context)
 {
     ucontext_t *uc = context;
@@ -448,6 +481,8 @@ static void guest_signal_handler(int signal, siginfo_t *info, void *context)
 
     /* Optional guest-memory dump at crash: offsets are relative to the image. */
     trace_dump_ring();
+    if (getenv("VITA2NATIVE_DUMP_MAPS"))
+        dump_big_anon_mappings("crash");
 
     {
         const char *dump = getenv("VITA2NATIVE_CRASH_DUMP");
@@ -746,6 +781,16 @@ int main(int argc, char *argv[])
                         " %08" PRIx32 " %08" PRIx32 " %08" PRIx32 " %08" PRIx32 " %08" PRIx32,
                         i, words[i], words[i + 1], words[i + 2], words[i + 3], words[i + 4],
                         words[i + 5], words[i + 6], words[i + 7]);
+
+                if (words[11]) {
+                    const uint32_t *libc = (const uint32_t *)(uintptr_t)words[11];
+
+                    for (unsigned i = 0; i < 80; i += 8)
+                        LOG("libc_param[%02u] %08" PRIx32 " %08" PRIx32 " %08" PRIx32
+                            " %08" PRIx32 " %08" PRIx32 " %08" PRIx32 " %08" PRIx32 " %08" PRIx32,
+                            i, libc[i], libc[i + 1], libc[i + 2], libc[i + 3], libc[i + 4],
+                            libc[i + 5], libc[i + 6], libc[i + 7]);
+                }
             }
         }
 
@@ -840,6 +885,15 @@ int main(int argc, char *argv[])
         }
 
         LOG("Launching PlayStation Vita executable!");
+
+#if defined(__arm__)
+        /* Snapshot the host mappings before any guest code runs, so heap
+           regions created by the title can be told apart from ours. */
+        if (getenv("VITA2NATIVE_DUMP_MAPS")) {
+            dump_maps_around(0);
+            dump_big_anon_mappings("prelaunch");
+        }
+#endif
 
         /* Jump to Vita's executable entrypoint */
         ret = launch(entry);

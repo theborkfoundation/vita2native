@@ -249,6 +249,8 @@ EXPORT(SceSysmem, 0x0144FBD9, int, sceKernelCheckModelCapability, int mask)
 
 EXPORT(SceSysmem, 0x87CC580B, int, sceKernelGetFreeMemorySize, SceKernelFreeMemorySizeInfo *info)
 {
+    static int logged;
+
     if (!info)
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
 
@@ -258,6 +260,19 @@ EXPORT(SceSysmem, 0x87CC580B, int, sceKernelGetFreeMemorySize, SceKernelFreeMemo
     info->size_user = 0x6000000;
     info->size_cdram = 0x1000000;
     info->size_phycont = 0x800000;
+
+    {
+        const char *override = getenv("VITA2NATIVE_FREE_MEM");
+
+        if (override)
+            info->size_user = (SceSize)strtoul(override, NULL, 0);
+    }
+
+    if (!logged) {
+        logged = 1;
+        LOG("sceKernelGetFreeMemorySize -> user=0x%x cdram=0x%x phycont=0x%x",
+            info->size_user, info->size_cdram, info->size_phycont);
+    }
 
     return 0;
 }
