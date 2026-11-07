@@ -450,6 +450,58 @@ static void dump_big_anon_mappings(const char *tag)
     fclose(maps);
 }
 
+static void dump_guest_bytes(const char *path, unsigned long address, size_t length)
+{
+    struct iovec local;
+    struct iovec remote;
+    uint8_t *buffer;
+    FILE *file;
+
+    buffer = malloc(length);
+    if (!buffer)
+        return;
+
+    local.iov_base = buffer;
+    local.iov_len = length;
+    remote.iov_base = (void *)address;
+    remote.iov_len = length;
+
+    if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) != (ssize_t)length) {
+        free(buffer);
+        return;
+    }
+
+    file = fopen(path, "wb");
+    if (file) {
+        fwrite(buffer, 1, length, file);
+        fclose(file);
+    }
+
+    free(buffer);
+}
+
+static unsigned long mapping_start(unsigned long address)
+{
+    char line[512];
+    FILE *maps = fopen("/proc/self/maps", "r");
+    unsigned long start = 0;
+
+    if (!maps)
+        return 0;
+
+    while (fgets(line, sizeof(line), maps)) {
+        unsigned long lo, hi;
+
+        if (sscanf(line, "%lx-%lx", &lo, &hi) == 2 && address >= lo && address < hi) {
+            start = lo;
+            break;
+        }
+    }
+
+    fclose(maps);
+    return start;
+}
+
 static void guest_signal_handler(int signal, siginfo_t *info, void *context)
 {
     ucontext_t *uc = context;
@@ -506,6 +558,17 @@ static void guest_signal_handler(int signal, siginfo_t *info, void *context)
 
     dump_maps_around(info ? (unsigned long)info->si_addr : 0UL);
 
+    {
+        const char *code_dump = getenv("VITA2NATIVE_CRASH_CODE_DUMP");
+
+        if (code_dump && uc->uc_mcontext.arm_pc > 0x100) {
+            unsigned long start = mapping_start((unsigned long)uc->uc_mcontext.arm_pc);
+
+            if (start)
+                dump_guest_bytes(code_dump, start, 0x400000);
+        }
+    }
+
     /* The first argument often points at the structure being processed. */
     dump_guest_words((unsigned long)uc->uc_mcontext.arm_r0, 32);
     if (uc->uc_mcontext.arm_r1)
@@ -549,7 +612,7 @@ static void debug_sample_handler(int signal, siginfo_t *info, void *context)
 
 static void install_guest_signal_handlers(void)
 {
-    static const int signals[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP };
+    static const int signals[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP, SIGABRT };
     struct sigaction action;
 
     memset(&action, 0, sizeof(action));

@@ -13,10 +13,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "log.h"
 #include "module.h"
 
 EXPORT(SceLibKernel, 0x2F2C6046, void, sceClibAbort, void)
 {
+    LOG("sceClibAbort called");
     abort();
 }
 
@@ -138,8 +140,10 @@ EXPORT(SceLibKernel, 0x2E3B02A1, void *, sceClibMemcpy_safe, void *dst, const vo
 EXPORT(SceLibKernel, 0x1F94EF45, void *, sceClibMemcpyChk, void *dst, const void *src, SceSize len,
        SceSize dst_size)
 {
-    if (len > dst_size)
+    if (len > dst_size) {
+        LOG("sceClibMemcpyChk: len %u > dst_size %u", len, dst_size);
         abort();
+    }
 
     return memcpy(dst, src, len);
 }
@@ -152,8 +156,10 @@ EXPORT(SceLibKernel, 0x736753C8, void *, sceClibMemmove, void *dst, const void *
 EXPORT(SceLibKernel, 0xA18068FC, void *, sceClibMemmoveChk, void *dst, const void *src,
        SceSize len, SceSize dst_size)
 {
-    if (len > dst_size)
+    if (len > dst_size) {
+        LOG("sceClibMemmoveChk: len %u > dst_size %u", len, dst_size);
         abort();
+    }
 
     return memmove(dst, src, len);
 }
@@ -225,8 +231,10 @@ EXPORT(SceLibKernel, 0xC458D60A, char *, sceClibStrncpy, char *dst, const char *
 EXPORT(SceLibKernel, 0x9CBE1475, char *, sceClibStrncpyChk, char *dst, const char *src,
        SceSize len, SceSize dst_size)
 {
-    if (len > dst_size)
+    if (len > dst_size) {
+        LOG("sceClibStrncpyChk: len %u > dst_size %u", len, dst_size);
         abort();
+    }
 
     return strncpy(dst, src, len);
 }
@@ -416,6 +424,7 @@ EXPORT(SceLibKernel, 0x738E0322, void, sceClibMspaceMallocStatsFast, SceClibMspa
 
 EXPORT(SceLibKernel, 0x37691BF8, void, __stack_chk_fail, void)
 {
+    LOG("__stack_chk_fail called (guest stack canary mismatch)");
     abort();
 }
 
@@ -426,6 +435,7 @@ EXPORT(SceLibKernel, 0x4458BCF3, uint32_t, SceKernelStackChkGuard, void)
 
 EXPORT(SceLibKernel, 0xEC287338, void, sceKernelStackChkFail, void)
 {
+    LOG("sceKernelStackChkFail called (guest stack canary mismatch)");
     abort();
 }
 
@@ -436,6 +446,7 @@ EXPORT(SceLibKernel, 0x1EA375E6, uint32_t, sceLibSspStackChkGuard, void)
 
 EXPORT(SceLibKernel, 0x39AD080B, void, sceLibSspStackChkFail, void)
 {
+    LOG("sceLibSspStackChkFail called (guest stack canary mismatch)");
     abort();
 }
 
