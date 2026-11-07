@@ -38,9 +38,11 @@ static vita_audiodec_dict_t g_decoders;
 static bool g_at9_initialized;
 static bool g_mp3_initialized;
 static bool g_aac_initialized;
+static bool g_celp_initialized;
 static uint32_t g_at9_channels;
 static uint32_t g_mp3_streams;
 static uint32_t g_aac_streams;
+static uint32_t g_celp_streams;
 static SceUID g_next_handle;
 
 static AudioDecoder *audiodec_lookup(SceUID uid)
@@ -83,7 +85,14 @@ EXPORT(SceAudiodecUser, 0x445C2CEF, int, sceAudiodecInitLibrary, SceUInt32 codec
         g_aac_initialized = true;
         return 0;
     case SCE_AUDIODEC_TYPE_CELP:
-        return SCE_AUDIODEC_ERROR_INVALID_TYPE;
+        if (g_celp_initialized)
+            return SCE_AUDIODEC_ERROR_ALREADY_INITIALIZED;
+        if (init_param->celp.totalStreams == 0 ||
+            init_param->celp.totalStreams > SCE_AUDIODEC_CELP_MAX_STREAMS)
+            return SCE_AUDIODEC_ERROR_INVALID_INIT_PARAM;
+        g_celp_streams = init_param->celp.totalStreams;
+        g_celp_initialized = true;
+        return 0;
     default:
         return SCE_AUDIODEC_ERROR_INVALID_TYPE;
     }
@@ -99,6 +108,8 @@ EXPORT(SceAudiodecUser, 0x45719B9D, int, sceAudiodecTermLibrary, SceUInt32 codec
         g_mp3_initialized = false;
     if (codec_type == SCE_AUDIODEC_TYPE_AAC)
         g_aac_initialized = false;
+    if (codec_type == SCE_AUDIODEC_TYPE_CELP)
+        g_celp_initialized = false;
     return 0;
 }
 
@@ -270,6 +281,53 @@ static int create_aac_decoder(SceAudiodecCtrl *ctrl)
     return 0;
 }
 
+static int create_celp_decoder(SceAudiodecCtrl *ctrl)
+{
+    AudioDecoder *decoder;
+    uint32_t rate;
+    uint32_t bitrate;
+
+    if (!g_celp_initialized)
+        return SCE_AUDIODEC_ERROR_NOT_INITIALIZED;
+    if (!ctrl || !ctrl->pInfo)
+        return SCE_AUDIODEC_ERROR_INVALID_PTR;
+
+    rate = ctrl->pInfo->celp.samplingRate;
+    if (rate == 0)
+        rate = SCE_AUDIODEC_CELP_SAMPLING_RATE_8KHZ;
+    if (rate != SCE_AUDIODEC_CELP_SAMPLING_RATE_8KHZ)
+        return SCE_AUDIODEC_CELP_ERROR_INVALID_CONFIG;
+
+    bitrate = ctrl->pInfo->celp.bitRate;
+    if (bitrate == 0)
+        bitrate = SCE_AUDIODEC_CELP_BIT_RATE_3850BPS;
+
+    decoder = calloc(1, sizeof(*decoder));
+    if (!decoder)
+        return SCE_AUDIODEC_ERROR_OUT_OF_MEMORY;
+
+    decoder->type = SCE_AUDIODEC_TYPE_CELP;
+    decoder->frame_samples = SCE_AUDIODEC_CELP_MAX_SAMPLES;
+    decoder->uid = ++g_next_handle;
+
+    memset(&ctrl->pInfo->celp, 0, sizeof(ctrl->pInfo->celp));
+    ctrl->pInfo->celp.size = sizeof(SceAudiodecInfoCelp);
+    ctrl->pInfo->celp.excitationMode = SCE_AUDIODEC_CELP_MPE;
+    ctrl->pInfo->celp.samplingRate = rate;
+    ctrl->pInfo->celp.bitRate = bitrate;
+    ctrl->maxEsSize = SCE_AUDIODEC_CELP_MAX_ES_SIZE;
+    ctrl->maxPcmSize = SCE_AUDIODEC_CELP_MAX_SAMPLES * (SceUInt32)sizeof(int16_t);
+    ctrl->wordLength = 16;
+    ctrl->handle = (SceInt32)decoder->uid;
+
+    vita_audiodec_dict_set_at(g_decoders, decoder->uid, decoder);
+
+    /* No open decoder exists for CELP; decode produces silence so voice
+       tracks do not break games that only use them for dialogue. */
+    LOG("SceAudiodec: CELP decoder (silent): %u stream(s), %u bps", g_celp_streams, bitrate);
+    return 0;
+}
+
 EXPORT(SceAudiodecUser, 0x4DFD3AAA, int, sceAudiodecCreateDecoder, SceAudiodecCtrl *ctrl,
        SceUInt32 codec_type)
 {
@@ -283,6 +341,8 @@ EXPORT(SceAudiodecUser, 0x4DFD3AAA, int, sceAudiodecCreateDecoder, SceAudiodecCt
         return create_mp3_decoder(ctrl);
     case SCE_AUDIODEC_TYPE_AAC:
         return create_aac_decoder(ctrl);
+    case SCE_AUDIODEC_TYPE_CELP:
+        return create_celp_decoder(ctrl);
     default:
         return SCE_AUDIODEC_ERROR_INVALID_TYPE;
     }
@@ -497,6 +557,20 @@ static int audiodec_decode_frames(SceAudiodecCtrl *ctrl, SceUInt32 frame_count)
             ctrl->pInfo->aac.ch = frame_info.channels;
             ctrl->pInfo->aac.samplingRate = frame_info.samplerate;
             ctrl->pInfo->aac.isSbr = frame_info.sbr ? 1 : 0;
+            pcm += bytes;
+        } else if (decoder->type == SCE_AUDIODEC_TYPE_CELP) {
+            uint32_t consumed = ctrl->maxEsSize;
+            uint32_t bytes = decoder->frame_samples * (uint32_t)sizeof(int16_t);
+
+            if (consumed > SCE_AUDIODEC_CELP_MAX_ES_SIZE)
+                consumed = SCE_AUDIODEC_CELP_MAX_ES_SIZE;
+            if (bytes > ctrl->maxPcmSize)
+                bytes = ctrl->maxPcmSize;
+
+            memset(pcm, 0, bytes);
+            ctrl->inputEsSize += consumed;
+            ctrl->outputPcmSize += bytes;
+            es += consumed;
             pcm += bytes;
         } else {
             return SCE_AUDIODEC_ERROR_INVALID_TYPE;

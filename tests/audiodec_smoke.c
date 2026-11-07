@@ -109,6 +109,73 @@ static int test_aac(void)
     return 0;
 }
 
+static int test_celp(void)
+{
+    SceAudiodecInitParam init_param;
+    SceAudiodecInfo info;
+    SceAudiodecCtrl ctrl;
+    int16_t pcm[SCE_AUDIODEC_CELP_MAX_SAMPLES];
+    uint8_t es[SCE_AUDIODEC_CELP_MAX_ES_SIZE];
+
+    memset(es, 0x5a, sizeof(es));
+
+    memset(&init_param, 0, sizeof(init_param));
+    init_param.celp.size = sizeof(SceAudiodecInitStreamParam);
+    init_param.celp.totalStreams = 1;
+    if (sceAudiodecInitLibrary(SCE_AUDIODEC_TYPE_CELP, &init_param) != 0) {
+        puts("audiodec_smoke: CELP init library failed");
+        return 1;
+    }
+
+    memset(&info, 0, sizeof(info));
+    info.celp.size = sizeof(SceAudiodecInfoCelp);
+    info.celp.samplingRate = SCE_AUDIODEC_CELP_SAMPLING_RATE_8KHZ;
+    info.celp.bitRate = SCE_AUDIODEC_CELP_BIT_RATE_3850BPS;
+
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.size = sizeof(ctrl);
+    ctrl.pInfo = &info;
+    if (sceAudiodecCreateDecoder(&ctrl, SCE_AUDIODEC_TYPE_CELP) != 0) {
+        puts("audiodec_smoke: CELP create decoder failed");
+        return 1;
+    }
+    if (ctrl.maxEsSize != SCE_AUDIODEC_CELP_MAX_ES_SIZE ||
+        ctrl.maxPcmSize != SCE_AUDIODEC_CELP_MAX_SAMPLES * sizeof(int16_t)) {
+        puts("audiodec_smoke: CELP control block sizes are wrong");
+        return 1;
+    }
+
+    memset(pcm, 0xa5, sizeof(pcm));
+    ctrl.pEs = es;
+    ctrl.pPcm = pcm;
+    ctrl.maxPcmSize = sizeof(pcm);
+    if (sceAudiodecDecode(&ctrl) != 0) {
+        puts("audiodec_smoke: CELP decode failed");
+        return 1;
+    }
+    if (ctrl.inputEsSize != SCE_AUDIODEC_CELP_MAX_ES_SIZE ||
+        ctrl.outputPcmSize != SCE_AUDIODEC_CELP_MAX_SAMPLES * sizeof(int16_t)) {
+        printf("audiodec_smoke: CELP consumed %u / produced %u\n", ctrl.inputEsSize,
+               ctrl.outputPcmSize);
+        return 1;
+    }
+    for (size_t i = 0; i < sizeof(pcm) / sizeof(pcm[0]); i++) {
+        if (pcm[i] != 0) {
+            puts("audiodec_smoke: CELP PCM is not silent");
+            return 1;
+        }
+    }
+
+    if (sceAudiodecDeleteDecoder(&ctrl) != 0 ||
+        sceAudiodecTermLibrary(SCE_AUDIODEC_TYPE_CELP) != 0) {
+        puts("audiodec_smoke: CELP teardown failed");
+        return 1;
+    }
+
+    puts("audiodec_smoke: CELP ok");
+    return 0;
+}
+
 static int test_mp3(const char *path)
 {
     FILE *file = fopen(path, "rb");
@@ -287,6 +354,9 @@ int main(int argc, char *argv[])
         return 1;
 
     if (test_aac() != 0)
+        return 1;
+
+    if (test_celp() != 0)
         return 1;
 
     SceAudiodec_finish();
