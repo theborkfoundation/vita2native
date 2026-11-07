@@ -47,6 +47,7 @@ typedef struct {
     uintptr_t rw_addr;
     uintptr_t rx_addr; /* Only used for executable segments */
     Elf32_Word p_type;
+    Elf32_Addr p_vaddr;
     Elf32_Word p_filesz;
     Elf32_Word p_memsz;
     Elf32_Word p_flags;
@@ -63,7 +64,88 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
                          int num_segments, LoadedModuleInfo *info);
 static int resolve_imports(uintptr_t rx_base, uintptr_t rw_base, sce_module_imports_u_t *import,
                            void *importer);
-static int relocate(const void *reloc, uint32_t size, segment_info_t *segs);
+static int relocate(const void *reloc, uint32_t size, segment_info_t *segs, int num_segments);
+
+/* Per-NID resolution logs are very noisy for large titles; unresolved NIDs are
+   always reported. */
+static bool trace_imports(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_TRACE_IMPORTS") != NULL;
+
+    return enabled != 0;
+}
+
+/*
+ * Vita userland code is Thumb-2 in practice, but the module info entry points
+ * do not carry a Thumb bit in every build: VitaSDK stores them tagged, Sony's
+ * and Unity's linkers store plain offsets. Relocation codes are unambiguous
+ * (Thumb functions only carry R_ARM_THM_* relocations), so use them to decide.
+ * Set VITA2NATIVE_GUEST_ARM=1 to force ARM mode.
+ */
+static bool module_is_thumb(const segment_info_t *segments, int num_segments)
+{
+    const char *force_arm = getenv("VITA2NATIVE_GUEST_ARM");
+    int thumb = 0;
+    int arm = 0;
+
+    if (force_arm && force_arm[0] == '1')
+        return false;
+
+    for (int i = 0; i < num_segments && thumb + arm < 512; i++) {
+        const uint8_t *reloc;
+        uint32_t size;
+        uint32_t pos;
+
+        if (segments[i].p_type != PT_SCE_RELA || !segments[i].src_data)
+            continue;
+
+        reloc = segments[i].src_data;
+        size = segments[i].p_filesz;
+
+        for (pos = 0; pos + 8 <= size;) {
+            uint32_t word;
+            uint32_t format;
+            uint32_t code;
+
+            memcpy(&word, reloc + pos, sizeof(word));
+            format = word & 0xF;
+            code = (word >> 8) & 0xFF;
+
+            switch (code) {
+            case 28: /* R_ARM_CALL */
+            case 29: /* R_ARM_JUMP24 */
+            case 43: /* R_ARM_MOVW_ABS_NC */
+            case 44: /* R_ARM_MOVT_ABS */
+            case 45: /* R_ARM_MOVW_PREL_NC */
+            case 46: /* R_ARM_MOVT_PREL */
+                arm++;
+                break;
+            case 10:  /* R_ARM_THM_CALL */
+            case 30:  /* R_ARM_THM_JUMP24 */
+            case 47:  /* R_ARM_THM_MOVW_ABS_NC */
+            case 48:  /* R_ARM_THM_MOVT_ABS */
+            case 49:  /* R_ARM_THM_MOVW_PREL_NC */
+            case 50:  /* R_ARM_THM_MOVT_PREL */
+            case 102: /* R_ARM_THM_JUMP11 */
+            case 103: /* R_ARM_THM_JUMP8 */
+            case 104: /* R_ARM_THM_JUMP6 */
+                thumb++;
+                break;
+            default:
+                break;
+            }
+
+            pos += (format == 0) ? 12 : 8;
+        }
+    }
+
+    /* Mixed modules (Unity ships ARM code with Thumb entry wrappers) still
+       call their entry points in Thumb mode. */
+    return thumb > 0;
+}
 
 int elf_check_vita_header(const Elf32_Ehdr *hdr)
 {
@@ -268,6 +350,7 @@ static int load_self(Jit *jit, const void *data, void **entry, LoadedModuleInfo 
             seg_infos[i].compression);
 
         segments[i].p_type = seg_header->p_type;
+        segments[i].p_vaddr = seg_header->p_vaddr;
         segments[i].p_filesz = seg_header->p_filesz;
         segments[i].p_memsz = seg_header->p_memsz;
         segments[i].p_flags = seg_header->p_flags;
@@ -362,6 +445,7 @@ static int load_elf(Jit *jit, const void *data, void **entry, LoadedModuleInfo *
     for (Elf32_Half i = 0; i < elf_hdr->e_phnum; i++) {
         segments[i].src_data = (char *)data + prog_hdrs[i].p_offset;
         segments[i].p_type = prog_hdrs[i].p_type;
+        segments[i].p_vaddr = prog_hdrs[i].p_vaddr;
         segments[i].p_filesz = prog_hdrs[i].p_filesz;
         segments[i].p_memsz = prog_hdrs[i].p_memsz;
         segments[i].p_flags = prog_hdrs[i].p_flags;
@@ -387,6 +471,7 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
     sce_module_info_raw *mod_info;
     const char *imp_name;
     int mod_info_idx;
+    bool module_entry_is_thumb;
     Result res;
 
     if (info) {
@@ -477,7 +562,7 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
                        segments[i].p_memsz - segments[i].p_filesz);
         } else if (segments[i].p_type == PT_SCE_RELA) {
             LOG("Found relocations segment (%u)", i);
-            relocate(segments[i].src_data, segments[i].p_filesz, segments);
+            relocate(segments[i].src_data, segments[i].p_filesz, segments, num_segments);
         } else {
             LOG("Segment %u is not loadable. Skipping.", i);
             continue;
@@ -491,18 +576,30 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
         goto err_free_data;
     }
     LOG("Module name: %s", mod_info->name);
+
+    {
+        bool thumb = module_is_thumb(segments, num_segments);
+
+        LOG("Module code: %s", thumb ? "Thumb" : "ARM");
+        module_entry_is_thumb = thumb;
+    }
+
     if (info) {
         uint8_t *segment_base = (uint8_t *)segments[mod_info_idx].rw_addr;
         uint8_t *loaded_info = segment_base + ((uint8_t *)mod_info -
                                                (uint8_t *)segments[mod_info_idx].src_data);
 
         info->module_info = loaded_info;
+        info->module_segment = segment_base;
         strncpy(info->name, mod_info->name, sizeof(info->name) - 1);
         info->attributes = mod_info->attributes;
         if (mod_info->module_stop != 0 && mod_info->module_stop != 0xFFFFFFFFu)
             info->module_stop = (void *)(segments[mod_info_idx].rx_addr + mod_info->module_stop);
         else
             info->module_stop = NULL;
+
+        if (module_entry_is_thumb && info->module_stop)
+            info->module_stop = (void *)((uintptr_t)info->module_stop | 1);
 
         if (mod_info->export_top && mod_info->export_top != mod_info->export_end) {
             sce_module_exports_raw *export = (void *)(segment_base + mod_info->export_top);
@@ -544,6 +641,8 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
 
     /* Find the entry point (address belonging to the RX JIT area) */
     *entry = (char *)segments[mod_info_idx].rx_addr + mod_info->module_start;
+    if (module_entry_is_thumb && *entry)
+        *entry = (void *)((uintptr_t)*entry | 1);
     if (*entry == NULL) {
         LOG("Invalid module entry function.");
         goto err_free_data;
@@ -575,6 +674,28 @@ err_jit_close:
     return -1;
 }
 
+int load_repatch_imports(LoadedModuleInfo *info)
+{
+    sce_module_info_raw *mod_info;
+    sce_module_imports_u_t *import;
+    void *end;
+
+    if (!info || !info->module_info || !info->module_segment || !info->code_rx || !info->code_rw)
+        return -1;
+
+    mod_info = info->module_info;
+    import = (void *)((uint8_t *)info->module_segment + mod_info->import_top);
+    end = (void *)((uint8_t *)info->module_segment + mod_info->import_end);
+
+    for (; (void *)import < end; import = IMP_GET_NEXT(import)) {
+        if (resolve_imports((uintptr_t)info->code_rx, (uintptr_t)info->code_rw, import,
+                            info->module_info) < 0)
+            return -1;
+    }
+
+    return 0;
+}
+
 static int resolve_imports(uintptr_t rx_base, uintptr_t rw_base, sce_module_imports_u_t *import,
                            void *importer)
 {
@@ -592,7 +713,9 @@ static int resolve_imports(uintptr_t rx_base, uintptr_t rw_base, sce_module_impo
         addr = module_get_func_export(lib_nid, nid, importer);
 
         if (addr) {
-            LOG("  Resolved NID 0x%08" PRIx32 " to %p", nid, addr);
+            if (trace_imports())
+                LOG("  Resolved NID 0x%08" PRIx32 " to %p (stub 0x%08" PRIx32 ")", nid, addr,
+                    (uint32_t)(rx_base + ((uintptr_t)stub - rw_base)));
             stub[0] = arm_encode_movw(12, (uint16_t)(uintptr_t)addr);
             stub[1] = arm_encode_movt(12, (uint16_t)(((uintptr_t)addr) >> 16));
             stub[2] = arm_encode_bx(12);
@@ -608,7 +731,8 @@ static int resolve_imports(uintptr_t rx_base, uintptr_t rw_base, sce_module_impo
 
     for (uint32_t i = 0; i < IMP_GET_VARS_COUNT(import); i++) {
         nid = ((uint32_t *)CODE_RX_TO_RW_ADDR(rx_base, rw_base, IMP_GET_VARS_TABLE(import)))[i];
-        LOG("  Trying to resolve variable NID 0x%08" PRIx32, nid);
+        if (trace_imports())
+            LOG("  Trying to resolve variable NID 0x%08" PRIx32, nid);
 
         addr = module_get_var_export(lib_nid, nid, importer);
         if (addr) {
@@ -623,159 +747,374 @@ static int resolve_imports(uintptr_t rx_base, uintptr_t rw_base, sce_module_impo
     return 0;
 }
 
-static int relocate(const void *reloc, uint32_t size, segment_info_t *segs)
+/*
+ * The SCE relocation stream is a compact, stateful format (formats 0-9, see
+ * vita-toolchain's sce-elf.h). Most entries are format 0 (12 bytes, fully
+ * specified) or format 1 (8 bytes, the 32-bit offset split across two fields);
+ * the rest are deltas against the previous entry.
+ *
+ * A format 0 entry can patch two locations at once: `code` at `offset` and
+ * `code2` at `offset + dist2 * 2` (bytes). Sony's and Unity's toolchains use
+ * that to pair a MOVW with its MOVT, so ignoring code2 leaves the high half of
+ * every absolute address pointing into the link-time image instead of the JIT.
+ */
+
+static void apply_relocation(uint32_t code, uint32_t addend, uintptr_t symval,
+                             uintptr_t loc_rw, uintptr_t loc_rx)
 {
-    SCE_Rel *entry;
-    uint32_t pos;
-    uint16_t r_code = 0;
-    uint32_t r_offset;
-    uint32_t r_addend;
-    uint8_t r_symseg;
-    uint8_t r_datseg;
     int32_t offset;
-    uintptr_t symval, loc_rw, loc_rx;
-    uint32_t upper, lower, sign, j1, j2;
     uint32_t value = 0;
+    uint32_t upper, lower, sign, j1, j2;
 
-    pos = 0;
-    while (pos < size) {
-        // get entry
-        entry = (SCE_Rel *)((char *)reloc + pos);
-        if (SCE_REL_IS_SHORT(*entry)) {
-            r_offset = SCE_REL_SHORT_OFFSET(entry->r_short);
-            r_addend = SCE_REL_SHORT_ADDEND(entry->r_short);
-            pos += 8;
-        } else {
-            r_offset = SCE_REL_LONG_OFFSET(entry->r_long);
-            r_addend = SCE_REL_LONG_ADDEND(entry->r_long);
-            if (SCE_REL_LONG_CODE2(entry->r_long))
-                LOG("Code2 ignored for relocation at 0x%" PRIx32, pos);
-            pos += 12;
+    switch (code) {
+    case R_ARM_NONE:
+        return;
+    case R_ARM_V4BX:
+        /* Preserve Rm and the condition code. Alter other bits to re-code
+           the instruction as MOV PC,Rm. */
+        value = (*(uint32_t *)loc_rw & 0xf000000f) | 0x01a0f000;
+        break;
+    case R_ARM_ABS32:
+    case R_ARM_TARGET1:
+        value = addend + symval;
+        break;
+    case R_ARM_REL32:
+    case R_ARM_TARGET2:
+        value = addend + symval - loc_rx;
+        break;
+    case R_ARM_THM_PC22: {
+        upper = *(uint16_t *)loc_rw;
+        lower = *(uint16_t *)(loc_rw + 2);
+
+        /*
+         * 25 bit signed address range (Thumb-2 BL and B.W instructions):
+         *   S:I1:I2:imm10:imm11:0
+         * where:
+         *   S     = upper[10]   = offset[24]
+         *   I1    = ~(J1 ^ S)   = offset[23]
+         *   I2    = ~(J2 ^ S)   = offset[22]
+         *   imm10 = upper[9:0]  = offset[21:12]
+         *   imm11 = lower[10:0] = offset[11:1]
+         *   J1    = lower[13]
+         *   J2    = lower[11]
+         */
+        offset = (int32_t)(addend + symval - loc_rx);
+
+        if (offset <= (int32_t)0xff000000 || offset >= (int32_t)0x01000000) {
+            LOG("THM_PC22 relocation out of range: 0x%08" PRIx32, (uint32_t)symval);
+            return;
         }
 
-        // get values
-        r_symseg = SCE_REL_SYMSEG(*entry);
-        r_datseg = SCE_REL_DATSEG(*entry);
-        symval = r_symseg == 15 ? 0 : (uintptr_t)segs[r_symseg].rx_addr;
-        loc_rw = (uintptr_t)segs[r_datseg].rw_addr + r_offset;
-        loc_rx = (uintptr_t)segs[r_datseg].rx_addr + r_offset;
+        sign = (offset >> 24) & 1;
+        j1 = sign ^ (~(offset >> 23) & 1);
+        j2 = sign ^ (~(offset >> 22) & 1);
+        upper = (uint16_t)((upper & 0xf800) | (sign << 10) | ((offset >> 12) & 0x03ff));
+        lower = (uint16_t)((lower & 0xd000) | (j1 << 13) | (j2 << 11) | ((offset >> 1) & 0x07ff));
 
-        // perform relocation
-        // taken from linux/arch/arm/kernel/module.c of Linux Kernel 4.0
-        switch (SCE_REL_CODE(*entry)) {
-        case R_ARM_V4BX: {
-            /* Preserve Rm and the condition code. Alter
-             * other bits to re-code instruction as
-             * MOV PC,Rm.
-             */
-            value = (*(uint32_t *)loc_rw & 0xf000000f) | 0x01a0f000;
-        } break;
-        case R_ARM_ABS32:
-        case R_ARM_TARGET1: {
-            value = r_addend + symval;
-        } break;
-        case R_ARM_REL32:
-        case R_ARM_TARGET2: {
-            value = r_addend + symval - loc_rx;
-        } break;
-        case R_ARM_THM_PC22: {
-            upper = *(uint16_t *)loc_rw;
-            lower = *(uint16_t *)(loc_rw + 2);
+        value = ((uint32_t)lower << 16) | upper;
+    } break;
+    case R_ARM_CALL:
+    case R_ARM_JUMP24: {
+        offset = (int32_t)(addend + symval - loc_rx);
+        if (offset <= (int32_t)0xfe000000 || offset >= (int32_t)0x02000000) {
+            LOG("branch relocation out of range: 0x%08" PRIx32, (uint32_t)symval);
+            return;
+        }
 
-            /*
-             * 25 bit signed address range (Thumb-2 BL and B.W
-             * instructions):
-             *   S:I1:I2:imm10:imm11:0
-             * where:
-             *   S     = upper[10]   = offset[24]
-             *   I1    = ~(J1 ^ S)   = offset[23]
-             *   I2    = ~(J2 ^ S)   = offset[22]
-             *   imm10 = upper[9:0]  = offset[21:12]
-             *   imm11 = lower[10:0] = offset[11:1]
-             *   J1    = lower[13]
-             *   J2    = lower[11]
-             */
-            sign = (upper >> 10) & 1;
-            j1 = (lower >> 13) & 1;
-            j2 = (lower >> 11) & 1;
-            offset = r_addend + symval - loc_rx;
+        offset >>= 2;
+        offset &= 0x00ffffff;
 
-            if (offset <= (int32_t)0xff000000 || offset >= (int32_t)0x01000000) {
-                LOG("reloc 0x%" PRIx32 " out of range: 0x%08" PRIx32, pos, (uint32_t)symval);
+        value = (*(uint32_t *)loc_rw & 0xff000000) | (uint32_t)offset;
+    } break;
+    case R_ARM_PREL31:
+        offset = (int32_t)(addend + symval - loc_rx);
+        value = (uint32_t)offset & 0x7fffffff;
+        break;
+    case R_ARM_MOVW_ABS_NC:
+    case R_ARM_MOVT_ABS: {
+        offset = (int32_t)(symval + addend);
+        if (code == R_ARM_MOVT_ABS)
+            offset >>= 16;
+
+        value = *(uint32_t *)loc_rw;
+        value &= 0xfff0f000;
+        value |= ((uint32_t)offset & 0xf000) << 4 | ((uint32_t)offset & 0x0fff);
+    } break;
+    case R_ARM_THM_MOVW_ABS_NC:
+    case R_ARM_THM_MOVT_ABS: {
+        upper = *(uint16_t *)loc_rw;
+        lower = *(uint16_t *)(loc_rw + 2);
+
+        /*
+         * MOVT/MOVW instruction encoding in Thumb-2:
+         *
+         * i    = upper[10]
+         * imm4 = upper[3:0]
+         * imm3 = lower[14:12]
+         * imm8 = lower[7:0]
+         *
+         * imm16 = imm4:i:imm3:imm8
+         */
+        offset = (int32_t)(addend + symval);
+
+        if (code == R_ARM_THM_MOVT_ABS)
+            offset >>= 16;
+
+        upper = (uint16_t)((upper & 0xfbf0) | (((uint32_t)offset & 0xf000) >> 12) |
+                           (((uint32_t)offset & 0x0800) >> 1));
+        lower = (uint16_t)((lower & 0x8f00) | (((uint32_t)offset & 0x0700) << 4) |
+                           ((uint32_t)offset & 0x00ff));
+
+        value = ((uint32_t)lower << 16) | upper;
+    } break;
+    default:
+        LOG("Unknown relocation code %" PRIu32, code);
+        return;
+    }
+
+    memcpy((void *)loc_rw, &value, sizeof(value));
+}
+
+/* Rebase an ABS32 slot whose current content is a link-time address. */
+static void relocate_absolute_slot(uintptr_t loc_rw, uintptr_t loc_rx, const segment_info_t *segs,
+                                   int num_segments)
+{
+    uint32_t original;
+    uintptr_t symval = 0;
+    uint32_t addend = 0;
+
+    memcpy(&original, (const void *)loc_rw, sizeof(original));
+
+    for (int i = 0; i < num_segments; i++) {
+        if (original >= segs[i].p_vaddr && original < segs[i].p_vaddr + segs[i].p_memsz) {
+            symval = (uintptr_t)segs[i].rx_addr;
+            addend = original - segs[i].p_vaddr;
+            break;
+        }
+    }
+
+    apply_relocation(R_ARM_ABS32, addend, symval, loc_rw, loc_rx);
+}
+
+static int relocate(const void *reloc, uint32_t size, segment_info_t *segs, int num_segments)
+{
+    const uint8_t *bytes = reloc;
+    uintptr_t g_addr = 0;
+    uintptr_t g_offset = 0;
+    uint32_t g_patchseg = 0;
+    uint32_t g_saddr = 0;
+    uint32_t g_addend = 0;
+    uint32_t g_type = 0;
+    uint32_t g_type2 = 0;
+    uint32_t pos = 0;
+
+    while (pos + 8 <= size) {
+        uint32_t w1, w2 = 0, w3 = 0;
+        uint32_t format;
+        uint32_t step;
+
+        memcpy(&w1, bytes + pos, 4);
+        memcpy(&w2, bytes + pos + 4, 4);
+        format = w1 & 0xF;
+        step = (format == 0) ? 12 : 8;
+
+        if (pos + step > size) {
+            LOG("Truncated relocation entry at 0x%" PRIx32, pos);
+            break;
+        }
+        if (step == 12)
+            memcpy(&w3, bytes + pos + 8, 4);
+
+        switch (format) {
+        case 0: {
+            uint32_t symseg = (w1 >> 4) & 0xF;
+            uint32_t code = (w1 >> 8) & 0xFF;
+            uint32_t patchseg = (w1 >> 16) & 0xF;
+            uint32_t code2 = (w1 >> 20) & 0xFF;
+            uint32_t dist2 = (w1 >> 28) & 0xF;
+            uintptr_t patch_rw, patch_rx, symval;
+
+            if (patchseg >= (uint32_t)num_segments)
                 break;
-            }
 
-            sign = (offset >> 24) & 1;
-            j1 = sign ^ (~(offset >> 23) & 1);
-            j2 = sign ^ (~(offset >> 22) & 1);
-            upper = (uint16_t)((upper & 0xf800) | (sign << 10) | ((offset >> 12) & 0x03ff));
-            lower =
-                (uint16_t)((lower & 0xd000) | (j1 << 13) | (j2 << 11) | ((offset >> 1) & 0x07ff));
+            symval = symseg == 15 ? 0 : (uintptr_t)segs[symseg].rx_addr;
+            patch_rw = (uintptr_t)segs[patchseg].rw_addr + w3;
+            patch_rx = (uintptr_t)segs[patchseg].rx_addr + w3;
 
-            value = ((uint32_t)lower << 16) | upper;
+            apply_relocation(code, w2, symval, patch_rw, patch_rx);
+            if (code2)
+                apply_relocation(code2, w2, symval, patch_rw + dist2 * 2, patch_rx + dist2 * 2);
+
+            g_addr = (uintptr_t)segs[patchseg].rw_addr;
+            g_offset = w3;
+            g_patchseg = patchseg;
+            g_saddr = (uint32_t)symval;
+            g_addend = w2;
+            g_type = code;
+            g_type2 = code2;
         } break;
-        case R_ARM_CALL:
-        case R_ARM_JUMP24: {
-            offset = r_addend + symval - loc_rx;
-            if (offset <= (int32_t)0xfe000000 || offset >= (int32_t)0x02000000) {
-                LOG("reloc 0x%" PRIx32 " out of range: 0x%08" PRIx32, pos, (uint32_t)symval);
+        case 1: {
+            uint32_t symseg = (w1 >> 4) & 0xF;
+            uint32_t code = (w1 >> 8) & 0xFF;
+            uint32_t patchseg = (w1 >> 16) & 0xF;
+            uint32_t offset = (w1 >> 20) | ((w2 & 0x3FF) << 12);
+            uint32_t addend = w2 >> 10;
+            uint32_t symval;
+            uintptr_t patch_rw, patch_rx;
+
+            if (patchseg >= (uint32_t)num_segments)
                 break;
-            }
 
-            offset >>= 2;
-            offset &= 0x00ffffff;
+            symval = symseg == 15 ? 0 : (uint32_t)(uintptr_t)segs[symseg].rx_addr;
+            patch_rw = (uintptr_t)segs[patchseg].rw_addr + offset;
+            patch_rx = (uintptr_t)segs[patchseg].rx_addr + offset;
 
-            value = (*(uint32_t *)loc_rw & 0xff000000) | offset;
+            apply_relocation(code, addend, symval, patch_rw, patch_rx);
+
+            g_addr = (uintptr_t)segs[patchseg].rw_addr;
+            g_offset = offset;
+            g_patchseg = patchseg;
+            g_saddr = symval;
+            g_addend = addend;
+            g_type = code;
+            g_type2 = 0;
         } break;
-        case R_ARM_PREL31: {
-            offset = r_addend + symval - loc_rx;
-            value = offset & 0x7fffffff;
+        case 2: {
+            uint32_t symseg = (w1 >> 4) & 0xF;
+            uint32_t code = (w1 >> 8) & 0xFF;
+            uint32_t offset = (w1 >> 16) & 0xFFFF;
+            uint32_t symval;
+            uintptr_t patch_rw, patch_rx;
+
+            if (g_patchseg >= (uint32_t)num_segments)
+                break;
+
+            g_offset += offset;
+            symval = symseg == 15 ? 0 : (uint32_t)(uintptr_t)segs[symseg].rx_addr;
+            patch_rw = g_addr + g_offset;
+            patch_rx = patch_rw - (uintptr_t)segs[g_patchseg].rw_addr +
+                       (uintptr_t)segs[g_patchseg].rx_addr;
+
+            apply_relocation(code, w2, symval, patch_rw, patch_rx);
+
+            g_saddr = symval;
+            g_addend = w2;
+            g_type = code;
+            g_type2 = 0;
         } break;
-        case R_ARM_MOVW_ABS_NC:
-        case R_ARM_MOVT_ABS: {
-            offset = symval + r_addend;
-            if (SCE_REL_CODE(*entry) == R_ARM_MOVT_ABS)
-                offset >>= 16;
+        case 3: {
+            uint32_t symseg = (w1 >> 4) & 0xF;
+            uint32_t mode = (w1 >> 8) & 0x1;
+            uint32_t offset = (w1 >> 9) & 0x3FFFF;
+            uint32_t dist2 = (w1 >> 27) & 0x1F;
+            uint32_t addend = w2 & 0x3FFFFF;
+            uint32_t symval;
+            uintptr_t patch_rw, patch_rx;
 
-            value = *(uint32_t *)loc_rw;
-            value &= 0xfff0f000;
-            value |= ((offset & 0xf000) << 4) | (offset & 0x0fff);
+            if (g_patchseg >= (uint32_t)num_segments)
+                break;
+
+            g_type = mode ? R_ARM_THM_MOVW_ABS_NC : R_ARM_MOVW_ABS_NC;
+            g_type2 = mode ? R_ARM_THM_MOVT_ABS : R_ARM_MOVT_ABS;
+            g_offset += offset;
+            symval = symseg == 15 ? 0 : (uint32_t)(uintptr_t)segs[symseg].rx_addr;
+            g_saddr = symval;
+            g_addend = addend;
+
+            patch_rw = g_addr + g_offset;
+            patch_rx = patch_rw - (uintptr_t)segs[g_patchseg].rw_addr +
+                       (uintptr_t)segs[g_patchseg].rx_addr;
+
+            apply_relocation(g_type, addend, symval, patch_rw, patch_rx);
+            apply_relocation(g_type2, addend, symval, patch_rw + dist2, patch_rx + dist2);
         } break;
-        case R_ARM_THM_MOVW_ABS_NC:
-        case R_ARM_THM_MOVT_ABS: {
-            upper = *(uint16_t *)loc_rw;
-            lower = *(uint16_t *)(loc_rw + 2);
+        case 4: {
+            uint32_t offset = (w1 >> 4) & 0x7FFFFF;
+            uint32_t dist2 = (w1 >> 27) & 0x1F;
+            uintptr_t patch_rw, patch_rx;
 
-            /*
-             * MOVT/MOVW instructions encoding in Thumb-2:
-             *
-             * i    = upper[10]
-             * imm4 = upper[3:0]
-             * imm3 = lower[14:12]
-             * imm8 = lower[7:0]
-             *
-             * imm16 = imm4:i:imm3:imm8
-             */
-            offset = r_addend + symval;
+            if (g_patchseg >= (uint32_t)num_segments)
+                break;
 
-            if (SCE_REL_CODE(*entry) == R_ARM_THM_MOVT_ABS)
-                offset >>= 16;
+            g_offset += offset;
+            patch_rw = g_addr + g_offset;
+            patch_rx = patch_rw - (uintptr_t)segs[g_patchseg].rw_addr +
+                       (uintptr_t)segs[g_patchseg].rx_addr;
 
-            upper =
-                (uint16_t)((upper & 0xfbf0) | ((offset & 0xf000) >> 12) | ((offset & 0x0800) >> 1));
-            lower = (uint16_t)((lower & 0x8f00) | ((offset & 0x0700) << 4) | (offset & 0x00ff));
-
-            value = ((uint32_t)lower << 16) | upper;
+            apply_relocation(g_type, g_addend, g_saddr, patch_rw, patch_rx);
+            apply_relocation(g_type2, g_addend, g_saddr, patch_rw + dist2, patch_rx + dist2);
         } break;
-        default: {
-            LOG("Unknown relocation code %u at 0x%" PRIx32, r_code, pos);
-            __attribute__((fallthrough));
+        case 5: {
+            uint32_t dist1 = (w1 >> 4) & 0x1FF;
+            uint32_t dist2 = (w1 >> 13) & 0x1F;
+            uint32_t dist3 = (w1 >> 18) & 0x1FF;
+            uint32_t dist4 = (w1 >> 27) & 0x1F;
+            uintptr_t patch_rw, patch_rx;
+
+            if (g_patchseg >= (uint32_t)num_segments)
+                break;
+
+            g_offset += dist1;
+            patch_rw = g_addr + g_offset;
+            patch_rx = patch_rw - (uintptr_t)segs[g_patchseg].rw_addr +
+                       (uintptr_t)segs[g_patchseg].rx_addr;
+            apply_relocation(g_type, g_addend, g_saddr, patch_rw, patch_rx);
+            apply_relocation(g_type2, g_addend, g_saddr, patch_rw + dist2, patch_rx + dist2);
+
+            g_offset += dist3;
+            patch_rw = g_addr + g_offset;
+            patch_rx = patch_rw - (uintptr_t)segs[g_patchseg].rw_addr +
+                       (uintptr_t)segs[g_patchseg].rx_addr;
+            apply_relocation(g_type, g_addend, g_saddr, patch_rw, patch_rx);
+            apply_relocation(g_type2, g_addend, g_saddr, patch_rw + dist4, patch_rx + dist4);
+        } break;
+        case 6: {
+            uint32_t offset = w1 >> 4;
+            uintptr_t patch_rw, patch_rx;
+
+            if (g_patchseg >= (uint32_t)num_segments)
+                break;
+
+            g_offset += offset;
+            patch_rw = g_addr + g_offset;
+            patch_rx = patch_rw - (uintptr_t)segs[g_patchseg].rw_addr +
+                       (uintptr_t)segs[g_patchseg].rx_addr;
+
+            relocate_absolute_slot(patch_rw, patch_rx, segs, num_segments);
+            g_type = R_ARM_ABS32;
+            g_type2 = 0;
+        } break;
+        case 7:
+        case 8:
+        case 9: {
+            uint32_t offsets = w1 >> 4;
+            uint32_t bits = format == 7 ? 7 : (format == 8 ? 4 : 2);
+            uint32_t mask = format == 7 ? 0x7F : (format == 8 ? 0x0F : 0x03);
+
+            if (g_patchseg >= (uint32_t)num_segments)
+                break;
+
+            do {
+                uintptr_t patch_rw, patch_rx;
+
+                g_offset += (offsets & mask) * 4;
+                patch_rw = g_addr + g_offset;
+                patch_rx = patch_rw - (uintptr_t)segs[g_patchseg].rw_addr +
+                           (uintptr_t)segs[g_patchseg].rx_addr;
+
+                relocate_absolute_slot(patch_rw, patch_rx, segs, num_segments);
+                offsets >>= bits;
+            } while (offsets);
+
+            g_type = R_ARM_ABS32;
+            g_type2 = 0;
+        } break;
+        default:
+            LOG("Unsupported relocation entry format %" PRIu32 " at 0x%" PRIx32, format, pos);
+            break;
         }
-        case R_ARM_NONE:
-            continue;
-        }
 
-        memcpy((char *)segs[r_datseg].rw_addr + r_offset, &value, sizeof(value));
+        pos += step;
     }
 
     return 0;

@@ -27,6 +27,7 @@
 #include "modules/SceGxm.h"
 #include "modules/SceKernelThreadMgr.h"
 #include "modules/SceLibKernel.h"
+#include "modules/SceModulemgr.h"
 #include "modules/SceProcessmgr.h"
 #include "modules/SceSqlite.h"
 #include "modules/SceSysmem.h"
@@ -37,6 +38,7 @@
 #include <signal.h>
 #include <sys/auxv.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <ucontext.h>
 #include <unistd.h>
 
@@ -76,6 +78,35 @@ static void dump_maps_around(unsigned long address)
     fclose(maps);
 }
 
+static void dump_guest_words(unsigned long address, int count)
+{
+    uint32_t words[16];
+    char message[512];
+    struct iovec local;
+    struct iovec remote;
+    int length;
+
+    if (count > (int)ARRAY_SIZE(words))
+        count = (int)ARRAY_SIZE(words);
+
+    local.iov_base = words;
+    local.iov_len = sizeof(uint32_t) * (size_t)count;
+    remote.iov_base = (void *)address;
+    remote.iov_len = local.iov_len;
+
+    if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) != (ssize_t)local.iov_len)
+        return;
+
+    length = snprintf(message, sizeof(message), "vita2native: [0x%08lx]", address);
+    for (int i = 0; i < count && length > 0 && length < (int)sizeof(message) - 16; i++)
+        length += snprintf(message + length, sizeof(message) - (size_t)length, " %08" PRIx32,
+                           words[i]);
+    if (length > 0) {
+        message[length++] = '\n';
+        write(STDERR_FILENO, message, (size_t)length);
+    }
+}
+
 static void guest_signal_handler(int signal, siginfo_t *info, void *context)
 {
     ucontext_t *uc = context;
@@ -92,7 +123,24 @@ static void guest_signal_handler(int signal, siginfo_t *info, void *context)
     if (length > 0)
         write(STDERR_FILENO, message, (size_t)length);
 
+    length = snprintf(message, sizeof(message),
+                      "vita2native: r0=%08lx r1=%08lx r2=%08lx r3=%08lx r4=%08lx r5=%08lx "
+                      "r6=%08lx r7=%08lx r8=%08lx r9=%08lx r10=%08lx r11=%08lx r12=%08lx\n",
+                      (unsigned long)uc->uc_mcontext.arm_r0, (unsigned long)uc->uc_mcontext.arm_r1,
+                      (unsigned long)uc->uc_mcontext.arm_r2, (unsigned long)uc->uc_mcontext.arm_r3,
+                      (unsigned long)uc->uc_mcontext.arm_r4, (unsigned long)uc->uc_mcontext.arm_r5,
+                      (unsigned long)uc->uc_mcontext.arm_r6, (unsigned long)uc->uc_mcontext.arm_r7,
+                      (unsigned long)uc->uc_mcontext.arm_r8, (unsigned long)uc->uc_mcontext.arm_r9,
+                      (unsigned long)uc->uc_mcontext.arm_r10, (unsigned long)uc->uc_mcontext.arm_fp,
+                      (unsigned long)uc->uc_mcontext.arm_ip);
+    if (length > 0)
+        write(STDERR_FILENO, message, (size_t)length);
+
     dump_maps_around(info ? (unsigned long)info->si_addr : 0UL);
+
+    /* The first argument often points at the structure being processed. */
+    dump_guest_words((unsigned long)uc->uc_mcontext.arm_r0, 12);
+    dump_guest_words((unsigned long)uc->uc_mcontext.arm_sp, 16);
 
     {
         void *frames[24];
@@ -131,7 +179,7 @@ static void debug_sample_handler(int signal, siginfo_t *info, void *context)
 
 static void install_guest_signal_handlers(void)
 {
-    static const int signals[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE };
+    static const int signals[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP };
     struct sigaction action;
 
     memset(&action, 0, sizeof(action));
@@ -156,68 +204,67 @@ static void install_guest_signal_handlers(void)
 #endif
 
 static bool g_headless;
+static HostGpuDevice g_device;
 
-static int launch(SceKernelThreadEntry entry)
+static int host_init(void)
 {
     HostGpuConfig gpu_config = { 960, 544, g_headless };
-    HostGpuDevice device;
     int ret;
 
-    device = host_gpu_create(&gpu_config);
-    if (!device)
+    g_device = host_gpu_create(&gpu_config);
+    if (!g_device)
         return -1;
-    LOG("GPU: %s", host_gpu_description(device));
+    LOG("GPU: %s", host_gpu_description(g_device));
 
     /* Init modules */
-    ret = SceSysmem_init(device);
+    ret = SceSysmem_init(g_device);
     if (ret != 0)
-        goto done;
+        return ret;
     ret = SceLibKernel_init();
     if (ret != 0)
-        goto done;
+        return ret;
     ret = SceFios2_init();
     if (ret != 0)
-        goto done;
+        return ret;
     ret = SceSqlite_init();
     if (ret != 0)
-        goto done;
+        return ret;
     ret = SceKernelThreadMgr_init();
     if (ret != 0)
-        goto done;
+        return ret;
     ret = SceKernelSync_init();
     if (ret != 0)
-        goto done;
+        return ret;
     ret = SceProcessmgr_init();
     if (ret != 0)
-        goto done;
-    ret = SceDisplay_init(device);
+        return ret;
+    ret = SceDisplay_init(g_device);
     if (ret != 0)
-        goto done;
-    ret = SceGxm_init(device);
+        return ret;
+    ret = SceGxm_init(g_device);
     if (ret != 0)
-        goto done;
+        return ret;
     ret = SceCtrl_init();
     if (ret != 0)
-        goto done;
+        return ret;
     ret = SceTouch_init();
     if (ret != 0)
-        goto done;
+        return ret;
     ret = SceAudio_init();
     if (ret != 0)
-        goto done;
+        return ret;
     ret = SceAudiodec_init();
     if (ret != 0)
-        goto done;
+        return ret;
     ret = SceAtrac_init();
     if (ret != 0)
-        goto done;
+        return ret;
 
-    LOG("Entering SceKernelThreadMgr...");
+    return 0;
+}
 
-    ret = SceKernelThreadMgr_main_entry(entry, 0, NULL);
-
-    LOG("SceKernelThreadMgr returned...");
-
+static void host_finish(void)
+{
     SceGxm_finish();
     SceDisplay_finish();
     SceAtrac_finish();
@@ -227,10 +274,22 @@ static int launch(SceKernelThreadEntry entry)
     SceKernelThreadMgr_finish();
     SceProcessmgr_finish();
     SceSqlite_finish();
+}
+
+static int launch(SceKernelThreadEntry entry)
+{
+    int ret;
+
+    LOG("Entering SceKernelThreadMgr...");
+
+    ret = SceKernelThreadMgr_main_entry(entry, 0, NULL);
+
+    LOG("SceKernelThreadMgr returned...");
+
+    host_finish();
 
     LOG("Process finished! Returned: %d", ret);
 
-done:
     return ret;
 }
 
@@ -326,6 +385,19 @@ int main(int argc, char *argv[])
     now = time(NULL);
     strftime(timestr, sizeof(timestr), "%c", localtime(&now));
     LOG("Starting at %s", timestr);
+
+    if (host_init() != 0)
+        fatal_error("Could not initialize the host services.", "Check the log for details.");
+
+    /*
+     * User modules shipped with the application (libc, libfios2, pthread,
+     * IL2CPP, ...) export libraries the main executable imports. Load and start
+     * them before patching its imports so it binds against them in one pass.
+     */
+    if (SceModulemgr_load_app_modules() > 0) {
+        SceModulemgr_repatch_modules();
+        SceModulemgr_start_modules();
+    }
 
     ret = load_file(&jit, exe_path, &entry);
     if (ret == 0) {

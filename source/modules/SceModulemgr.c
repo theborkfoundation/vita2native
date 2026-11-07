@@ -10,13 +10,16 @@
  * case (a PRX that only consumes firmware libraries).
  */
 
+#include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include <psp2/kernel/error.h>
 #include <psp2/kernel/modulemgr.h>
@@ -27,6 +30,7 @@
 #include "load.h"
 #include "log.h"
 #include "module.h"
+#include "modules/SceModulemgr.h"
 #include "modules/SceSysmem.h"
 
 #define VITA_MODULE_SLOTS 32
@@ -44,6 +48,8 @@ typedef struct {
 
 static VitaModuleInfo g_modules[VITA_MODULE_SLOTS];
 static pthread_mutex_t g_modules_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int module_start(VitaModuleInfo *module, SceSize args, void *argp, int *status);
 
 static VitaModuleInfo *module_find_locked(SceUID uid)
 {
@@ -131,16 +137,304 @@ static SceUID module_load(const char *path)
     return module->uid;
 }
 
+/* Returns the UID of an already loaded module with the same name, or -1. */
+static SceUID module_find_by_name_locked(const char *name, const VitaModuleInfo *self)
+{
+    if (!name || !name[0])
+        return -1;
+
+    for (int i = 0; i < VITA_MODULE_SLOTS; i++) {
+        VitaModuleInfo *module = &g_modules[i];
+
+        if (!module->used || module == self)
+            continue;
+        if (strcmp(module->loader.name, name) == 0)
+            return module->uid;
+    }
+
+    return -1;
+}
+
+/*
+ * The firmware keeps a single instance of each user module. Applications that
+ * probe several paths for the same module (Unity loads its IL2CPP assemblies
+ * both from app0: and from the module search path) must not get a second copy:
+ * duplicate guest export libraries would shadow each other.
+ */
+static SceUID module_load_unique(const char *path)
+{
+    SceUID uid = module_load(path);
+    SceUID duplicate = -1;
+
+    if (uid < 0)
+        return uid;
+
+    pthread_mutex_lock(&g_modules_lock);
+    {
+        VitaModuleInfo *module = module_find_locked(uid);
+
+        if (module)
+            duplicate = module_find_by_name_locked(module->loader.name, module);
+    }
+    pthread_mutex_unlock(&g_modules_lock);
+
+    if (duplicate >= 0) {
+        LOG("Module \"%s\" is already loaded as 0x%x", path, duplicate);
+        sceKernelUnloadModule(uid, 0, NULL);
+        return duplicate;
+    }
+
+    return uid;
+}
+
+static bool has_suprx_suffix(const char *name)
+{
+    size_t length = strlen(name);
+
+    return length > 6 && strcmp(name + length - 6, ".suprx") == 0;
+}
+
+/*
+ * VITA2NATIVE_SKIP_MODULES is a comma-separated list of module file names that
+ * must not be loaded from the application (e.g. "libc.suprx" to use the host
+ * implementation only).
+ */
+static bool is_skipped_module(const char *name)
+{
+    const char *list = getenv("VITA2NATIVE_SKIP_MODULES");
+    const char *cursor;
+
+    if (!list || !name)
+        return false;
+
+    cursor = list;
+    while (*cursor) {
+        const char *separator = strchr(cursor, ',');
+        size_t length = separator ? (size_t)(separator - cursor) : strlen(cursor);
+
+        if (length > 0 && strncmp(cursor, name, length) == 0 && name[length] == '\0')
+            return true;
+
+        if (!separator)
+            break;
+        cursor = separator + 1;
+    }
+
+    return false;
+}
+
+/*
+ * Names listed in VITA2NATIVE_SKIP_MODULE_START are loaded (so their exports
+ * are available) but their module_start is not called.
+ */
+static bool should_skip_start(const char *name)
+{
+    const char *list = getenv("VITA2NATIVE_SKIP_MODULE_START");
+    const char *cursor;
+
+    if (!list || !name || !name[0])
+        return false;
+
+    cursor = list;
+    while (*cursor) {
+        const char *separator = strchr(cursor, ',');
+        size_t length = separator ? (size_t)(separator - cursor) : strlen(cursor);
+
+        if (length > 0 && strncmp(cursor, name, length) == 0 && name[length] == '\0')
+            return true;
+
+        if (!separator)
+            break;
+        cursor = separator + 1;
+    }
+
+    return false;
+}
+
+static int module_name_compare(const void *a, const void *b)
+{
+    const char *lhs = a;
+    const char *rhs = b;
+    bool lhs_pthread = strncmp(lhs, "pthread", 7) == 0;
+    bool rhs_pthread = strncmp(rhs, "pthread", 7) == 0;
+
+    /* IL2CPP modules import the bundled pthread; start it first. */
+    if (lhs_pthread != rhs_pthread)
+        return lhs_pthread ? -1 : 1;
+
+    return strcmp(lhs, rhs);
+}
+
+static int load_modules_in_dir(const char *subdir)
+{
+    char dir_path[PATH_MAX];
+    char (*names)[256] = NULL;
+    size_t count = 0;
+    size_t capacity = 0;
+    DIR *dir;
+    struct dirent *entry;
+    int loaded = 0;
+
+    if (snprintf(dir_path, sizeof(dir_path), "%s/%s", host_fs_app_dir(), subdir) >=
+        (int)sizeof(dir_path))
+        return 0;
+
+    dir = opendir(dir_path);
+    if (!dir)
+        return 0;
+
+    while ((entry = readdir(dir))) {
+        char(*grown)[256];
+
+        if (entry->d_name[0] == '.' || !has_suprx_suffix(entry->d_name))
+            continue;
+
+        if (is_skipped_module(entry->d_name)) {
+            LOG("Skipping \"%s/%s\": excluded by VITA2NATIVE_SKIP_MODULES", subdir,
+                entry->d_name);
+            continue;
+        }
+
+        if (count == capacity) {
+            capacity = capacity ? capacity * 2 : 8;
+            grown = realloc(names, capacity * sizeof(*names));
+            if (!grown)
+                break;
+            names = grown;
+        }
+
+        snprintf(names[count++], sizeof(names[0]), "%s", entry->d_name);
+    }
+    closedir(dir);
+
+    qsort(names, count, sizeof(*names), module_name_compare);
+
+    for (size_t i = 0; i < count; i++) {
+        char vita_path[512];
+        SceUID uid;
+
+        if (snprintf(vita_path, sizeof(vita_path), "app0:%s/%s", subdir, names[i]) >=
+            (int)sizeof(vita_path))
+            continue;
+
+        uid = module_load_unique(vita_path);
+        if (uid < 0) {
+            LOG("Could not load user module \"%s\" (0x%08x)", vita_path, uid);
+            continue;
+        }
+
+        loaded++;
+    }
+
+    free(names);
+    return loaded;
+}
+
+int SceModulemgr_load_app_modules(void)
+{
+    static const char *const dirs[] = { "sce_module", "Media/Modules" };
+    int loaded = 0;
+
+    if (getenv("VITA2NATIVE_NO_MODULE_AUTOLOAD"))
+        return 0;
+
+    for (size_t i = 0; i < ARRAY_SIZE(dirs); i++)
+        loaded += load_modules_in_dir(dirs[i]);
+
+    LOG("Loaded %d user module(s) shipped with the application", loaded);
+
+    return loaded;
+}
+
+void SceModulemgr_repatch_modules(void)
+{
+    pthread_mutex_lock(&g_modules_lock);
+    for (int i = 0; i < VITA_MODULE_SLOTS; i++) {
+        if (!g_modules[i].used)
+            continue;
+        load_repatch_imports(&g_modules[i].loader);
+    }
+    pthread_mutex_unlock(&g_modules_lock);
+}
+
+int SceModulemgr_start_modules(void)
+{
+    int started = 0;
+
+    pthread_mutex_lock(&g_modules_lock);
+    for (int i = 0; i < VITA_MODULE_SLOTS; i++) {
+        VitaModuleInfo *module = &g_modules[i];
+        int status;
+
+        if (!module->used || module->state != SCE_KERNEL_MODULE_STATE_READY)
+            continue;
+
+        if (should_skip_start(module->loader.name)) {
+            LOG("Skipping module_start for \"%s\"", module->loader.name);
+            module->state = SCE_KERNEL_MODULE_STATE_STARTED;
+            continue;
+        }
+
+        module->refs++;
+        pthread_mutex_unlock(&g_modules_lock);
+
+        if (module_start(module, 0, NULL, &status) == 0)
+            started++;
+
+        pthread_mutex_lock(&g_modules_lock);
+        module->refs--;
+    }
+    pthread_mutex_unlock(&g_modules_lock);
+
+    return started;
+}
+
+typedef struct {
+    int (*entry)(SceSize, void *);
+    SceSize args;
+    void *argp;
+    int result;
+} ModuleStartCall;
+
+static void *module_start_thread(void *argument)
+{
+    ModuleStartCall *call = argument;
+
+    call->result = call->entry(call->args, call->argp);
+
+    return NULL;
+}
+
 static int module_start(VitaModuleInfo *module, SceSize args, void *argp, int *status)
 {
+    ModuleStartCall call;
+    pthread_t thread;
     int ret;
 
     if (!module->entry)
         return SCE_KERNEL_ERROR_MODULEMGR_NO_MOD_ENTRY;
 
+    call.entry = (int (*)(SceSize, void *))module->entry;
+    call.args = args;
+    call.argp = argp;
+    call.result = 0;
+
+    /*
+     * The firmware runs module_start on a dedicated thread, and some modules
+     * (libc.suprx among them) end it with sceKernelExitThread instead of
+     * returning. Join the thread so a normal exit still counts as success.
+     */
     LOG("Calling module_start for \"%s\" at %p", module->loader.name, module->entry);
-    ret = ((int (*)(SceSize, void *))module->entry)(args, argp);
+
+    if (pthread_create(&thread, NULL, module_start_thread, &call) == 0) {
+        pthread_join(thread, NULL);
+        ret = call.result;
+    } else {
+        ret = call.entry(call.args, call.argp);
+    }
+
     LOG("module_start for \"%s\" returned 0x%x", module->loader.name, ret);
+
     if (status)
         *status = ret;
 

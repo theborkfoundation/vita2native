@@ -153,6 +153,25 @@ EXPORT(SceAppMgr, 0x3EF143BF, int, sceAppMgrDestroyOtherApp, void)
     return 0;
 }
 
+EXPORT(SceAppMgr, 0xAD9022A1, int, sceAppMgrSetInfobarState, SceAppMgrInfoBarVisibility visibility,
+       SceAppMgrInfoBarColor color, SceAppMgrInfoBarTransparency transparency)
+{
+    (void)visibility;
+    (void)color;
+    (void)transparency;
+    return 0;
+}
+
+/*
+ * SceShutterSound: the camera shutter effect. Some engines call it while
+ * initialising their audio path; there is nothing to play here.
+ */
+EXPORT(SceShutterSound, 0x7FFB6D79, int, sceShutterSoundPlay, int type)
+{
+    (void)type;
+    return 0;
+}
+
 static int64_t appmgr_unimplemented(void)
 {
     return (int64_t)(int32_t)SCE_APPMGR_ERROR_INVALID;
@@ -162,3 +181,4 @@ static int64_t appmgr_unimplemented(void)
 
 DECLARE_LIBRARY(SceAppMgrUser, 0xa6605d6f);
 DECLARE_LIBRARY(SceAppMgr, 0x8af17416);
+DECLARE_LIBRARY(SceShutterSound, 0x877181ed);

@@ -6,6 +6,8 @@
 #include <string.h>
 
 #include "module.h"
+#include "modules/SceProcessmgr.h"
+#include "util.h"
 
 #define MAX_GUEST_LIBRARIES 64
 #define MAX_GUEST_DEPENDENTS 32
@@ -26,6 +28,28 @@ static guest_library_t g_guest_libraries[MAX_GUEST_LIBRARIES];
 static pthread_mutex_t g_guest_libraries_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static uint32_t g_stack_chk_guard = 0x0DEADBEEu;
+
+/*
+ * Value of the SceLibcParam:__sce_libcparam variable. SceProcessmgr points this
+ * at the process's libc parameters when it initialises.
+ */
+void *g_sce_libc_param;
+
+/* Value of std::nothrow (an empty tag object). */
+static uint32_t g_nothrow_tag;
+
+typedef struct {
+    uint32_t library_nid;
+    uint32_t var_nid;
+    void *address;
+} host_var_export_t;
+
+static const host_var_export_t g_host_var_exports[] = {
+    /* SceLibstdcxx: std::nothrow */
+    { 0xf7629240, 0xbfef56b5, &g_nothrow_tag },
+    /* SceLibcParam: __sce_libcparam */
+    { 0x5ad9c136, 0xdf084dfa, &g_sce_libc_param },
+};
 
 static void add_dependent(guest_library_t *lib, void *importer)
 {
@@ -118,6 +142,13 @@ void *module_get_var_export(uint32_t lib_nid, uint32_t var_nid, void *importer)
     /* The firmware exports its stack guard as a variable as well as a function. */
     if (lib_nid == 0xCAE9ACE6 && var_nid == 0x93B8AA67)
         return &g_stack_chk_guard;
+
+    for (size_t i = 0; i < ARRAY_SIZE(g_host_var_exports); i++) {
+        if (g_host_var_exports[i].library_nid == lib_nid &&
+            g_host_var_exports[i].var_nid == var_nid) {
+            return g_host_var_exports[i].address;
+        }
+    }
 
     pthread_mutex_lock(&g_guest_libraries_lock);
     for (int i = 0; i < MAX_GUEST_LIBRARIES; i++) {

@@ -138,6 +138,7 @@ add_executable(vita2native
     source/modules/SceSqlite.c
     source/modules/SceIoAsync.c
     source/modules/SceLibClib.c
+    source/modules/SceLibc.c
     source/modules/SceNet.c
     source/modules/SceNetCtl.c
     source/minimp3_impl.c
@@ -575,6 +576,7 @@ if(BUILD_TESTING)
 
     add_executable(processmgr_smoke
         tests/processmgr_smoke.c
+        source/module.c
         source/modules/SceProcessmgr.c
         source/host/host_thread.c
     )

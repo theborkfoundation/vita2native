@@ -21,6 +21,7 @@ typedef struct {
     void *entry;
     void *module_stop;
     void *module_info;
+    void *module_segment;
     void *code_rx;
     void *code_rw;
     void *data_addr;
@@ -30,5 +31,13 @@ typedef struct {
 
 int load_file(Jit *jit, const char *filename, void **entry);
 int load_file_info(Jit *jit, const char *filename, void **entry, LoadedModuleInfo *info);
+
+/*
+ * Re-run import resolution for an already loaded module. Useful when modules are
+ * loaded in an order that does not match their dependency graph: imports that
+ * were patched to error stubs resolve to the real entry point once the exporting
+ * module has been registered.
+ */
+int load_repatch_imports(LoadedModuleInfo *info);
 
 #endif

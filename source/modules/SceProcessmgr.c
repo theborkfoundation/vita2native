@@ -40,15 +40,29 @@ typedef struct {
     SceUInt32 unk;
 } VitaProcessParam;
 
+typedef struct {
+    SceUInt32 size;
+    SceUInt32 reserved[15];
+} VitaLibcParam;
+
+/*
+ * libc.suprx reads the executable's libc parameters through the process
+ * parameter block (and through the SceLibcParam:__sce_libcparam variable).
+ * A zeroed block with a valid size makes the module use its built-in defaults.
+ */
+static VitaLibcParam g_libc_param = { .size = 0x0c };
+
 static VitaProcessParam g_process_param = {
     .size = sizeof(VitaProcessParam),
     .magic = 0x5052504D, /* "PRPM" */
-    .version = 1,
+    .version = 5,
+    .fw_version = 0x03600000,
     .main_thread_name = "main",
     .main_thread_priority = 160,
     .main_thread_stacksize = 256 * 1024,
     .process_name = VITA_PROCESS_NAME,
     .main_thread_cpu_affinity_mask = 0x00070000,
+    .sce_libc_param = &g_libc_param,
 };
 
 typedef void (*VitaTerminationCallback)(void *arg);
@@ -79,6 +93,8 @@ void SceProcessmgr_run_termination_callbacks(void)
 
 int SceProcessmgr_init(void)
 {
+    g_sce_libc_param = &g_libc_param;
+
     return 0;
 }
 

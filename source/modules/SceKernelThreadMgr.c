@@ -372,6 +372,7 @@ EXPORT(SceThreadmgrCoredumpTime, 0x0C8A38E1, int NORETURN, sceKernelExitThread, 
 {
     VitaThreadInfo *ti = SceKernelThreadMgr_get_thread_info();
 
+    LOG("sceKernelExitThread(%d)", status);
     ti->return_status = status;
     threadExit();
 }
@@ -2467,5 +2468,41 @@ int SceKernelThreadMgr_finish(void)
 
 VitaThreadInfo *SceKernelThreadMgr_get_thread_info(void)
 {
-    return threadTlsGet(g_vita_thread_info_tls_slot_id);
+    VitaThreadInfo *ti = threadTlsGet(g_vita_thread_info_tls_slot_id);
+
+    if (ti)
+        return ti;
+
+    return SceKernelThreadMgr_get_fallback_thread_info();
+}
+
+/*
+ * Host threads that were not created by the guest (the module_start of a
+ * loaded library, SDL's audio callback, ...) still need a thread context: the
+ * firmware never runs guest code without one.
+ */
+VitaThreadInfo *SceKernelThreadMgr_get_fallback_thread_info(void)
+{
+    static VitaThreadInfo *fallback;
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+
+    pthread_mutex_lock(&lock);
+    if (!fallback) {
+        VitaThreadInfo *ti = calloc(1, sizeof(*ti));
+
+        if (ti) {
+            ti->uid = 1;
+            snprintf(ti->name, sizeof(ti->name), "host");
+            ti->current_priority = SCE_KERNEL_DEFAULT_PRIORITY_GAME_APP;
+            ti->init_priority = ti->current_priority;
+            ti->affinity_mask = 1;
+            ti->vita_tls = calloc(1, SCE_KERNEL_TLS_SIZE);
+            mutexInit(&ti->signal_lock);
+            condvarInit(&ti->signal_cond);
+            fallback = ti;
+        }
+    }
+    pthread_mutex_unlock(&lock);
+
+    return fallback;
 }
