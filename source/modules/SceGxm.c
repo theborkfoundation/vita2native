@@ -1164,7 +1164,15 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
     uint32_t height = (uint32_t)gxm_texture_get_height(texture);
     uint32_t mip_count = gxm_texture_true_mip_count(texture);
     const void *palette = (const void *)(uintptr_t)(texture->palette_addr << 6);
+    static int force_level0 = -1;
     uint32_t hash;
+
+    /* Diagnostic: ignore the mip chain so the scene can be compared against a
+       level-0-only baseline. */
+    if (force_level0 < 0)
+        force_level0 = getenv("VITA2NATIVE_TEXTURE_LEVEL0") != NULL;
+    if (force_level0)
+        mip_count = 1;
     GxmTextureCache *cache;
     uint8_t *rgba;
     uint64_t started;
@@ -1300,6 +1308,24 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
                              (unsigned)height, hash);
                     if (stbi_write_png(path, (int)width, (int)height, 4, rgba, (int)width * 4))
                         dumped++;
+                }
+            }
+
+            {
+                static const char *mip_dir;
+                static unsigned int dumped_mips;
+
+                if (!mip_dir)
+                    mip_dir = getenv("VITA2NATIVE_DUMP_TEXTURE_MIPS");
+                if (mip_dir && dumped_mips < 4000) {
+                    char path[PATH_MAX];
+
+                    snprintf(path, sizeof(path), "%s/mip_%08x_f%u_l%u_%ux%u_%08x.png", mip_dir,
+                             (unsigned)gxm_texture_get_format(texture), face, level,
+                             (unsigned)info.width, (unsigned)info.height, hash);
+                    if (stbi_write_png(path, (int)info.width, (int)info.height, 4, rgba,
+                                       (int)info.width * 4))
+                        dumped_mips++;
                 }
             }
 
