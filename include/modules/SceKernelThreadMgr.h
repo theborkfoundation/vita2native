@@ -19,6 +19,7 @@ typedef struct {
     int init_priority;
     int current_priority;
     SceSize stack_size;
+    uintptr_t stack_base;
     SceUInt attr;
     int affinity_mask;
     uint32_t vfp_exception;

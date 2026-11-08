@@ -85,6 +85,10 @@ Result threadWaitForExit(Thread *thread);
 Result threadClose(Thread *thread);
 void threadExit(void) NORETURN;
 
+/* Bounds of the calling thread's stack. `base` is the lowest address and
+   `size` the usable size; the initial stack pointer is at base + size. */
+Result threadGetStackBounds(void **base, size_t *size);
+
 int threadTlsAlloc(void (*destructor)(void *));
 void threadTlsFree(int slot);
 void threadTlsSet(int slot, void *value);

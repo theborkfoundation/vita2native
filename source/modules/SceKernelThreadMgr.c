@@ -249,6 +249,24 @@ static void NORETURN thread_entry_wrapper(void *arg)
     }
     LOG("Thread 0x%x \"%s\" runs as host tid %d", ti->uid, ti->name, ti->host_tid);
 
+    /*
+     * Report a stack base such that base + stack_size is the real top of the
+     * host stack. Vita's Boehm GC port asks sceKernelGetThreadInfo for the
+     * stack and uses stack + stackSize as the stack bottom; leaving it unset
+     * makes it scan from a bogus address and collect live managed objects.
+     */
+    {
+        void *host_base = NULL;
+        size_t host_size = 0;
+
+        if (threadGetStackBounds(&host_base, &host_size) == 0 && host_base) {
+            uintptr_t top = (uintptr_t)host_base + host_size;
+            uintptr_t size = ti->stack_size ? ti->stack_size : host_size;
+
+            ti->stack_base = top > size ? top - size : (uintptr_t)host_base;
+        }
+    }
+
     thread_event_notify(SCE_KERNEL_THREAD_EVENT_TYPE_START, ti->uid);
 
     ret = ti->entry(ti->arglen, ti->argp);
@@ -1513,6 +1531,7 @@ EXPORT(SceLibKernel, 0x8D9C5461, int, sceKernelGetThreadInfo, SceUID thid,
     info->attr = ti->attr;
     info->status = 0x2; /* running */
     info->entry = ti->entry;
+    info->stack = (void *)ti->stack_base;
     info->stackSize = (SceInt32)ti->stack_size;
     info->initPriority = ti->init_priority;
     info->currentPriority = ti->current_priority;

@@ -713,6 +713,42 @@ Result threadStart(Thread *thread)
     return 0;
 }
 
+Result threadGetStackBounds(void **base, size_t *size)
+{
+#if defined(__linux__)
+    pthread_attr_t attr;
+    void *stack_addr = NULL;
+    size_t stack_size = 0;
+
+    if (pthread_getattr_np(pthread_self(), &attr) != 0)
+        return -1;
+    if (pthread_attr_getstack(&attr, &stack_addr, &stack_size) != 0) {
+        pthread_attr_destroy(&attr);
+        return -1;
+    }
+    pthread_attr_destroy(&attr);
+
+    if (base)
+        *base = stack_addr;
+    if (size)
+        *size = stack_size;
+    return 0;
+#elif defined(__APPLE__)
+    size_t stack_size = pthread_get_stacksize_np(pthread_self());
+    void *stack_top = pthread_get_stackaddr_np(pthread_self());
+
+    if (base)
+        *base = (uint8_t *)stack_top - stack_size;
+    if (size)
+        *size = stack_size;
+    return 0;
+#else
+    (void)base;
+    (void)size;
+    return -1;
+#endif
+}
+
 Result threadWaitForExit(Thread *thread)
 {
     return waitSingle(waiterForThread(thread), UINT64_MAX);
