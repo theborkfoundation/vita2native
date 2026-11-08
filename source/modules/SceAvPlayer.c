@@ -20,8 +20,11 @@
 #define AVPLAYER_WIDTH       960
 #define AVPLAYER_HEIGHT      544
 #define AVPLAYER_FPS         30
-#define AVPLAYER_DURATION_MS 60000ull
+#define AVPLAYER_DURATION_MS 3000ull
 #define AVPLAYER_AUDIO_SIZE  2048
+#define AVPLAYER_Y_SIZE      (AVPLAYER_WIDTH * AVPLAYER_HEIGHT)
+#define AVPLAYER_UV_SIZE     ((AVPLAYER_WIDTH / 2) * (AVPLAYER_HEIGHT / 2))
+#define AVPLAYER_FRAME_SIZE  (AVPLAYER_Y_SIZE + 2 * AVPLAYER_UV_SIZE)
 
 typedef struct {
     bool used;
@@ -41,6 +44,9 @@ typedef struct {
     uint8_t *video_buffer;
     uint8_t *audio_buffer;
     SceAvPlayerMemReplacement memory;
+    void *event_arg;
+    SceAvPlayerEventCallback event_callback;
+    bool ended;
     char source[256];
 } AvPlayer;
 
@@ -72,28 +78,65 @@ static uint64_t player_now_ms(const AvPlayer *player)
     return ns;
 }
 
+static void player_fire_event(AvPlayer *player, int32_t event_id)
+{
+    if (player->event_callback)
+        player->event_callback(player->event_arg, event_id, 0, NULL);
+}
+
+/* Synthetic playback is short; report the end so the guest can move on. */
+static void player_check_end(AvPlayer *player)
+{
+    if (!player->active || player->ended || player->looping)
+        return;
+    if (player_now_ms(player) < AVPLAYER_DURATION_MS)
+        return;
+
+    player->ended = true;
+    player->active = false;
+    player->paused = false;
+    player_fire_event(player, 1); /* stop */
+}
+
 static void player_fill_video(AvPlayer *player)
 {
+    /* RGB value of eight colour bars, converted to I420 below. */
     static const uint8_t bars[8][3] = {
         { 255, 255, 255 }, { 255, 255, 0 }, { 0, 255, 255 }, { 0, 255, 0 },
         { 255, 0, 255 },   { 255, 0, 0 },   { 0, 0, 255 },   { 0, 0, 0 },
     };
-    uint32_t marker = (player->frame_index * 12) % AVPLAYER_WIDTH;
-    uint32_t band = (player->frame_index * 4) % AVPLAYER_HEIGHT;
+    uint8_t *y_plane = player->video_buffer;
+    uint8_t *v_plane = y_plane + AVPLAYER_Y_SIZE;
+    uint8_t *u_plane = v_plane + AVPLAYER_UV_SIZE;
+    uint32_t band = (player->frame_index * 8) % (AVPLAYER_HEIGHT + 64);
 
+    /*
+     * The player hands YUV420P to the guest, which uploads it as three
+     * textures and converts in its shader; RGBA here renders as noise.
+     */
     for (uint32_t y = 0; y < AVPLAYER_HEIGHT; y++) {
-        for (uint32_t x = 0; x < AVPLAYER_WIDTH; x++) {
-            uint8_t *p = player->video_buffer + ((size_t)y * AVPLAYER_WIDTH + x) * 4;
-            const uint8_t *bar = bars[x * 8 / AVPLAYER_WIDTH];
+        bool in_band = y >= band && y < band + 48;
 
-            if (x == marker || (y >= band && y < band + 4)) {
-                p[0] = p[1] = p[2] = 255;
-            } else {
-                p[0] = bar[0];
-                p[1] = bar[1];
-                p[2] = bar[2];
-            }
-            p[3] = 255;
+        for (uint32_t x = 0; x < AVPLAYER_WIDTH; x++) {
+            const uint8_t *rgb = bars[x * 8 / AVPLAYER_WIDTH];
+            float r = rgb[0], g = rgb[1], b = rgb[2];
+            float luma = 0.299f * r + 0.587f * g + 0.114f * b;
+
+            if (in_band)
+                luma = 235.0f;
+            y_plane[y * AVPLAYER_WIDTH + x] = (uint8_t)(luma + 0.5f);
+        }
+    }
+
+    for (uint32_t y = 0; y < AVPLAYER_HEIGHT / 2; y++) {
+        for (uint32_t x = 0; x < AVPLAYER_WIDTH / 2; x++) {
+            const uint8_t *rgb = bars[(x * 2) * 8 / AVPLAYER_WIDTH];
+            float r = rgb[0], g = rgb[1], b = rgb[2];
+
+            u_plane[y * (AVPLAYER_WIDTH / 2) + x] =
+                (uint8_t)(-0.169f * r - 0.331f * g + 0.5f * b + 128.0f + 0.5f);
+            v_plane[y * (AVPLAYER_WIDTH / 2) + x] =
+                (uint8_t)(0.5f * r - 0.419f * g - 0.081f * b + 128.0f + 0.5f);
         }
     }
 }
@@ -109,8 +152,13 @@ EXPORT(SceAvPlayer, 0x4C847ADF, SceAvPlayerHandle, sceAvPlayerInit, SceAvPlayerI
         g_players[i].video_enabled = true;
         g_players[i].audio_enabled = true;
         g_players[i].trick_speed = 100;
-        if (data)
+        if (data) {
             g_players[i].memory = data->memoryReplacement;
+            g_players[i].event_arg = data->eventReplacement.objectPointer;
+            g_players[i].event_callback = data->eventReplacement.eventCallback;
+        }
+        fprintf(stderr, "SceAvPlayer: init handle %d callback %p arg %p\n", i + 1,
+                (void *)g_players[i].event_callback, g_players[i].event_arg);
 
         return (SceAvPlayerHandle)(i + 1);
     }
@@ -133,6 +181,16 @@ EXPORT(SceAvPlayer, 0xBC83C8FD, int, sceAvPlayerAddSource, SceAvPlayerHandle han
 
     snprintf(player->source, sizeof(player->source), "%s", filename);
     player->have_source = true;
+    player->ended = false;
+    fprintf(stderr, "SceAvPlayer: add source '%s'\n", filename);
+
+    /*
+     * A source is opened and ready synchronously here, but guests wait for
+     * these events (Angry Birds spins on a flag its callback clears after
+     * AddSource returns), so they have to be delivered regardless.
+     */
+    player_fire_event(player, 5); /* buffering */
+    player_fire_event(player, 2); /* ready */
 
     return 0;
 }
@@ -148,9 +206,12 @@ EXPORT(SceAvPlayer, 0x2ACB4217, int, sceAvPlayerStart, SceAvPlayerHandle handle)
         player->resume_ns = host_monotonic_ns();
         player->active = true;
         player->paused = false;
+        player->ended = false;
         player->last_video_ns = 0;
         player->last_audio_ns = 0;
     }
+
+    player_fire_event(player, 3); /* play */
 
     return 0;
 }
@@ -167,6 +228,8 @@ EXPORT(SceAvPlayer, 0xBD35E360, int, sceAvPlayerStop, SceAvPlayerHandle handle)
     player->active = false;
     player->paused = false;
 
+    player_fire_event(player, 1); /* stop */
+
     return 0;
 }
 
@@ -180,6 +243,8 @@ EXPORT(SceAvPlayer, 0x34FD744B, int, sceAvPlayerPause, SceAvPlayerHandle handle)
         player->position_ns += host_monotonic_ns() - player->resume_ns;
         player->paused = true;
     }
+
+    player_fire_event(player, 4); /* pause */
 
     return 0;
 }
@@ -195,6 +260,8 @@ EXPORT(SceAvPlayer, 0x11FF162D, int, sceAvPlayerResume, SceAvPlayerHandle handle
         player->paused = false;
         player->active = true;
     }
+
+    player_fire_event(player, 3); /* play */
 
     return 0;
 }
@@ -215,14 +282,22 @@ EXPORT(SceAvPlayer, 0x2E4FF35F, SceBool, sceAvPlayerIsActive, SceAvPlayerHandle 
 {
     AvPlayer *player = player_get(handle);
 
-    return player && player->active && !player->paused ? SCE_TRUE : SCE_FALSE;
+    if (!player)
+        return SCE_FALSE;
+
+    player_check_end(player);
+    return player->active && !player->paused ? SCE_TRUE : SCE_FALSE;
 }
 
 EXPORT(SceAvPlayer, 0x804DCECD, uint64_t, sceAvPlayerCurrentTime, SceAvPlayerHandle handle)
 {
     AvPlayer *player = player_get(handle);
 
-    return player ? player_now_ms(player) : 0;
+    if (!player)
+        return 0;
+
+    player_check_end(player);
+    return player_now_ms(player);
 }
 
 EXPORT(SceAvPlayer, 0x5B7DB4BC, int, sceAvPlayerJumpToTime, SceAvPlayerHandle handle,
@@ -328,12 +403,16 @@ EXPORT(SceAvPlayer, 0x8BC3221B, SceBool, sceAvPlayerGetVideoData, SceAvPlayerHan
     if (!player || !info || !player->active || player->paused || !player->video_enabled)
         return SCE_FALSE;
 
+    player_check_end(player);
+    if (!player->active)
+        return SCE_FALSE;
+
     now = host_monotonic_ns();
     if (player->last_video_ns && now - player->last_video_ns < 1000000000ull / AVPLAYER_FPS)
         return SCE_FALSE;
 
     if (!player->video_buffer) {
-        size_t size = (size_t)AVPLAYER_WIDTH * AVPLAYER_HEIGHT * 4;
+        size_t size = AVPLAYER_FRAME_SIZE;
 
         if (player->memory.allocateTexture && player->memory.objectPointer)
             player->video_buffer =
