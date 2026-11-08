@@ -56,6 +56,13 @@ int gxm_texture_decode_level_at(uint8_t *dest, const SceGxmTextureInner *texture
                                 uint32_t face, uint32_t level);
 
 /*
+ * Decodes one F32/F32M level into a tightly packed float buffer (one value per
+ * texel). Used to upload shadow/depth maps without losing precision.
+ */
+int gxm_texture_decode_level_f32(float *dest, const SceGxmTextureInner *texture, const void *data,
+                                 uint32_t face, uint32_t level);
+
+/*
  * Compatibility entry point: decode a single linear/swizzled level from an
  * explicit pointer. `dest` must hold width * height * 4 bytes.
  */

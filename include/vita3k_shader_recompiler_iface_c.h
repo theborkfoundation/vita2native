@@ -13,6 +13,17 @@ typedef struct {
     uint32_t member_size;  /* bytes reserved in the container (16-byte aligned) */
 } Vita3kUniformBufferLayout;
 
+/* One GXP program parameter, as the recompiler sees it. Used by debug tracing. */
+typedef struct {
+    char name[64];
+    uint32_t category;
+    uint32_t type;
+    uint32_t component_count;
+    uint32_t container_index; /* GXM uniform buffer index, 14 is the default buffer */
+    uint32_t resource_index;  /* float offset inside the container */
+    uint32_t array_size;
+} Vita3kProgramParameter;
+
 bool convert_gxp_to_spirv_c(uint32_t **spirv, uint32_t *num_instr, const SceGxmProgram *program,
                             const char *shader_name, bool support_shader_interlock,
                             bool support_texture_barrier, bool direct_fragcolor, bool spirv_shader,
@@ -35,6 +46,10 @@ bool convert_gxp_to_glsl_c(char **glsl, const SceGxmProgram *program, const char
  */
 uint32_t vita3k_gxm_get_uniform_buffer_layout(const SceGxmProgram *program,
                                               Vita3kUniformBufferLayout *out, uint32_t max);
+
+/* Enumerates the program's parameters; returns the number written (up to max). */
+uint32_t vita3k_gxm_get_parameters(const SceGxmProgram *program, Vita3kProgramParameter *out,
+                                   uint32_t max);
 
 #ifdef __cplusplus
 }

@@ -800,12 +800,100 @@ static GLuint gxm_create_compiled_shader(GLenum stage, const char *name, const c
     return shader;
 }
 
+/*
+ * Debug: paint every fragment program in a unique flat colour so the draw that
+ * produces a given part of the screen can be identified from a single frame.
+ */
+static int gxm_debug_program_colors(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_DEBUG_PROGRAM_COLORS") != NULL;
+    return enabled;
+}
+
+/* Debug: drops the draws that use a fragment program with the given hash. */
+static uint32_t gxm_skip_program(void)
+{
+    static int loaded;
+    static uint32_t hash;
+
+    if (!loaded) {
+        const char *value = getenv("VITA2NATIVE_SKIP_PROGRAM");
+
+        if (value)
+            hash = (uint32_t)strtoul(value, NULL, 16);
+        loaded = 1;
+    }
+    return hash;
+}
+
+static char *gxm_patch_program_color(char *glsl, uint32_t hash)
+{
+    static const uint8_t palette[][3] = {
+        {255, 0, 0},   {0, 255, 0},   {0, 0, 255},   {255, 255, 0}, {255, 0, 255},
+        {0, 255, 255}, {255, 128, 0}, {128, 0, 255}, {0, 128, 255}, {128, 255, 0},
+        {255, 0, 128}, {0, 255, 128}, {160, 160, 255}, {255, 160, 160}, {160, 255, 160},
+        {80, 80, 80},  {192, 96, 0},  {96, 192, 0},  {0, 96, 192},  {96, 0, 192},
+        {192, 0, 96},  {0, 192, 96},  {230, 230, 130}, {130, 230, 230}, {230, 130, 230},
+        {64, 64, 160}, {160, 64, 64}, {64, 160, 64},  {220, 90, 40}, {40, 90, 220},
+    };
+    static uint32_t assigned[64];
+    static unsigned int assigned_count;
+    const uint8_t *color;
+    char injection[96];
+    char *closing;
+    char *patched;
+    size_t length, head, tail;
+    unsigned int slot;
+    int written;
+
+    if (!glsl || !strstr(glsl, "out_color"))
+        return glsl;
+
+    for (slot = 0; slot < assigned_count; slot++) {
+        if (assigned[slot] == hash)
+            break;
+    }
+    if (slot == assigned_count && assigned_count < ARRAY_SIZE(assigned))
+        assigned[assigned_count++] = hash;
+    color = palette[slot % ARRAY_SIZE(palette)];
+
+    closing = strrchr(glsl, '}');
+    if (!closing)
+        return glsl;
+
+    written = snprintf(injection, sizeof(injection),
+                       "    out_color.rgb = vec3(%.6f, %.6f, %.6f);\n", color[0] / 255.0,
+                       color[1] / 255.0, color[2] / 255.0);
+    if (written <= 0)
+        return glsl;
+
+    length = strlen(glsl);
+    head = (size_t)(closing - glsl);
+    tail = length - head;
+    patched = malloc(length + (size_t)written + 1);
+    if (!patched)
+        return glsl;
+
+    memcpy(patched, glsl, head);
+    memcpy(patched + head, injection, (size_t)written);
+    memcpy(patched + head + (size_t)written, closing, tail);
+    patched[head + (size_t)written + tail] = '\0';
+    free(glsl);
+
+    LOG("SceGxm: program %08x painted rgb(%u,%u,%u)", hash, color[0], color[1], color[2]);
+    return patched;
+}
+
 static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, const char *name,
                                    const SceGxmVertexAttribute *attributes, unsigned int count,
                                    uint32_t *hash_out)
 {
     uint32_t cache_hash = gxm_shader_cache_hash(program, stage, attributes, count);
-    char *glsl;
+    bool debug_colors = gxm_debug_program_colors();
+    char *glsl = NULL;
     bool compiled = false;
     GLuint shader;
 
@@ -817,7 +905,7 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
             return g_cached_shaders[i].shader;
     }
 
-    glsl = gxm_shader_cache_read(cache_hash);
+    glsl = debug_colors ? NULL : gxm_shader_cache_read(cache_hash);
 
     if (glsl) {
         shader = gxm_create_compiled_shader(stage, name, glsl, &compiled);
@@ -859,11 +947,14 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
         }
 
         free(spirv);
+
+        if (debug_colors)
+            glsl = gxm_patch_program_color(glsl, cache_hash);
     }
 
     LOG("SceGxm: shader cache miss %08x (%s) program %p", cache_hash, name, (const void *)program);
     shader = gxm_create_compiled_shader(stage, name, glsl, &compiled);
-    if (compiled)
+    if (compiled && !debug_colors)
         gxm_shader_cache_write(cache_hash, glsl);
 
     free(glsl);
@@ -1069,10 +1160,28 @@ static uint64_t gxm_time_ns(void)
 
 static void gxm_texture_params(const SceGxmTextureInner *texture, GLenum target, uint32_t mip_count)
 {
-    g_gl->glTexParameteri(target, GL_TEXTURE_MIN_FILTER, (GLint)gxm_min_filter(texture, mip_count));
-    g_gl->glTexParameteri(target, GL_TEXTURE_MAG_FILTER,
-                          texture->mag_filter == SCE_GXM_TEXTURE_FILTER_LINEAR ? GL_LINEAR
-                                                                                : GL_NEAREST);
+    uint32_t base = gxm_texture_get_format(texture) & SCE_GXM_TEXTURE_BASE_FORMAT_MASK;
+    static int float_textures = -1;
+    bool float_format;
+
+    if (float_textures < 0)
+        float_textures = getenv("VITA2NATIVE_FLOAT_TEXTURES") != NULL;
+    float_format = float_textures && (base == SCE_GXM_TEXTURE_BASE_FORMAT_F32 ||
+                                      base == SCE_GXM_TEXTURE_BASE_FORMAT_F32M);
+
+    /* GLES 3.0 does not make float textures filterable, so a LINEAR sampler on
+       them leaves the texture incomplete on several drivers. Depth-like
+       textures are point sampled anyway. */
+    if (float_format) {
+        g_gl->glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        g_gl->glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    } else {
+        g_gl->glTexParameteri(target, GL_TEXTURE_MIN_FILTER,
+                              (GLint)gxm_min_filter(texture, mip_count));
+        g_gl->glTexParameteri(target, GL_TEXTURE_MAG_FILTER,
+                              texture->mag_filter == SCE_GXM_TEXTURE_FILTER_LINEAR ? GL_LINEAR
+                                                                                    : GL_NEAREST);
+    }
     g_gl->glTexParameteri(target, GL_TEXTURE_WRAP_S, (GLint)gxm_wrap_mode(texture->uaddr_mode));
     g_gl->glTexParameteri(target, GL_TEXTURE_WRAP_T, (GLint)gxm_wrap_mode(texture->vaddr_mode));
     if (target == GL_TEXTURE_CUBE_MAP)
@@ -1165,16 +1274,21 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
     uint32_t mip_count = gxm_texture_true_mip_count(texture);
     const void *palette = (const void *)(uintptr_t)(texture->palette_addr << 6);
     static int force_level0 = -1;
+    static int force_lit_shadow = -1;
     uint32_t hash;
 
     /* Diagnostic: ignore the mip chain so the scene can be compared against a
        level-0-only baseline. */
     if (force_level0 < 0)
         force_level0 = getenv("VITA2NATIVE_TEXTURE_LEVEL0") != NULL;
+    if (force_lit_shadow < 0)
+        force_lit_shadow = getenv("VITA2NATIVE_FORCE_SHADOW_LIT") != NULL;
     if (force_level0)
         mip_count = 1;
     GxmTextureCache *cache;
-    uint8_t *rgba;
+    uint8_t *rgba = NULL;
+    float *f32 = NULL;
+    bool float_upload;
     uint64_t started;
 
     if (g_active_texture_unit != unit) {
@@ -1238,8 +1352,20 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
     g_gl->glBindTexture(target, cache->tex);
     g_bound_texture[unit] = cache->tex;
 
-    rgba = malloc((size_t)width * height * 4);
-    if (!rgba) {
+    {
+        uint32_t base = gxm_texture_get_format(texture) & SCE_GXM_TEXTURE_BASE_FORMAT_MASK;
+        static int float_textures = -1;
+
+        if (float_textures < 0)
+            float_textures = getenv("VITA2NATIVE_FLOAT_TEXTURES") != NULL;
+        float_upload = float_textures && (base == SCE_GXM_TEXTURE_BASE_FORMAT_F32 ||
+                                          base == SCE_GXM_TEXTURE_BASE_FORMAT_F32M);
+    }
+
+    rgba = float_upload ? NULL : malloc((size_t)width * height * 4);
+    if (float_upload)
+        f32 = malloc((size_t)width * height * sizeof(float));
+    if (float_upload ? !f32 : !rgba) {
         if (cache->tex) {
             gxm_forget_texture(cache->tex);
             g_gl->glDeleteTextures(1, &cache->tex);
@@ -1247,6 +1373,7 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
         memset(cache, 0, sizeof(*cache));
         g_bound_texture[unit] = 0;
         g_gl->glBindTexture(target, 0);
+        free(f32);
         return false;
     }
 
@@ -1261,6 +1388,37 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
 
             if (gxm_texture_get_level(texture, face, level, &info) != 0)
                 continue;
+
+            /* Depth-like textures keep full float precision: quantising a
+               shadow map to RGBA8 loses the comparisons Unity relies on. */
+            if (float_upload) {
+                if (gxm_texture_decode_level_f32(f32, texture, data, face, level) != 0) {
+                    LOG("SceGxm: float texture decode failed: fmt=0x%08x %ux%u",
+                        (unsigned)gxm_texture_get_format(texture), (unsigned)info.width,
+                        (unsigned)info.height);
+                    free(f32);
+                    gxm_forget_texture(cache->tex);
+                    g_gl->glDeleteTextures(1, &cache->tex);
+                    memset(cache, 0, sizeof(*cache));
+                    g_bound_texture[unit] = 0;
+                    g_gl->glBindTexture(target, 0);
+                    return false;
+                }
+
+                if (force_lit_shadow &&
+                    (uint32_t)gxm_texture_get_format(texture) == 0x13000000u &&
+                    info.width == 512 && info.height == 512) {
+                    for (uint32_t i = 0; i < info.width * info.height; i++)
+                        f32[i] = 1.0f;
+                }
+
+                if (cube)
+                    upload_target = GL_TEXTURE_CUBE_MAP_POSITIVE_X + face;
+                g_gl->glTexImage2D(upload_target, (GLint)level, GL_R32F, (GLsizei)info.width,
+                                   (GLsizei)info.height, 0, GL_RED, GL_FLOAT, f32);
+                continue;
+            }
+
             if (gxm_texture_decode_level_at(rgba, texture, data, face, level) != 0) {
                 static uint32_t warned_formats[8];
                 uint32_t format = (uint32_t)gxm_texture_get_format(texture);
@@ -1290,6 +1448,10 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
                 g_gl->glBindTexture(target, 0);
                 return false;
             }
+
+            if (force_lit_shadow && (uint32_t)gxm_texture_get_format(texture) == 0x13000000u &&
+                info.width == 512 && info.height == 512)
+                memset(rgba, 0xFF, (size_t)info.width * info.height * 4);
 
             if (cube)
                 upload_target = GL_TEXTURE_CUBE_MAP_POSITIVE_X + face;
@@ -1354,12 +1516,33 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
     }
 
     free(rgba);
+    free(f32);
 
     if (getenv("VITA2NATIVE_TRACE_TEXTURES") || gxm_time_ns() - started >= 50000000ull) {
         LOG("SceGxm: texture upload unit %u %ux%u fmt=0x%08x type=%d mips=%u data=%p "
             "hash=%08x took %.1f ms",
             unit, width, height, (uint32_t)gxm_texture_get_format(texture), (int)type, mip_count,
             data, hash, (double)(gxm_time_ns() - started) / 1e6);
+    }
+
+    {
+        static int trace_f32m = -1;
+
+        if (trace_f32m < 0)
+            trace_f32m = getenv("VITA2NATIVE_TRACE_F32M") != NULL;
+        if (trace_f32m && (uint32_t)gxm_texture_get_format(texture) == 0x13000000u) {
+            static unsigned int traced;
+
+            if (traced < 12) {
+                const uint32_t *words = (const uint32_t *)data;
+
+                LOG("SceGxm: F32M sample %ux%u gamma=%u mips=%u data=%p words %08x %08x %08x %08x",
+                    (unsigned)width, (unsigned)height, (unsigned)texture->gamma_mode,
+                    (unsigned)mip_count, data, words ? words[0] : 0, words ? words[1] : 0,
+                    words ? words[2] : 0, words ? words[3] : 0);
+                traced++;
+            }
+        }
     }
 
     gxm_texture_params(texture, target, mip_count);
@@ -3943,6 +4126,19 @@ EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsign
         g_gl->glViewport(0, 0, renderTarget->params.width, renderTarget->params.height);
         g_gl->glDisable(GL_SCISSOR_TEST);
 
+        {
+            const char *color = getenv("VITA2NATIVE_CLEAR_COLOR");
+
+            if (color) {
+                uint32_t rgb = (uint32_t)strtoul(color, NULL, 16);
+
+                g_gl->glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                g_gl->glClearColor(((rgb >> 16) & 0xFF) / 255.0f, ((rgb >> 8) & 0xFF) / 255.0f,
+                                   (rgb & 0xFF) / 255.0f, 1.0f);
+                g_gl->glClear(GL_COLOR_BUFFER_BIT);
+            }
+        }
+
         if (gxm_ds_load_surface((SceGxmRenderTarget *)renderTarget, context->ds_surface)) {
             gxm_blit_depth_stencil_to_msaa((SceGxmRenderTarget *)renderTarget);
         } else {
@@ -4319,6 +4515,19 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
 
     surface = context->color_surface;
     if (surface && surface->data && !surface->disabled) {
+        if (getenv("VITA2NATIVE_TRACE_F32M") &&
+            (surface->width != 960 || surface->height != 544)) {
+            static unsigned int traced;
+
+            if (traced < 40) {
+                LOG("SceGxm: offscreen surface %ux%u fmt=0x%08x type=%u gamma=%u dither=%u clip=%u,%u->%u,%u data=%p",
+                    surface->width, surface->height, surface->colorFormat,
+                    (unsigned)surface->surfaceType, (unsigned)surface->gamma_mode,
+                    (unsigned)surface->dither_mode, surface->clipXMin, surface->clipYMin,
+                    surface->clipXMax, surface->clipYMax, (const void *)surface->data);
+                traced++;
+            }
+        }
         const SceGxmRenderTarget *target = context->render_target;
         uint32_t scale = 1;
 
@@ -6205,6 +6414,266 @@ static int gxm_replay_commands(SceGxmContext *context, GxmCommand *command)
     return 0;
 }
 
+/*
+ * Debug: prints the values of selected Unity shader constants for every
+ * distinct program. Correlates a material shader with the data the title
+ * actually feeds it, which the disassembled GXP cannot show by itself.
+ */
+static int gxm_uniform_names_trace(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_UNIFORM_NAMES") != NULL;
+    return enabled;
+}
+
+static bool gxm_uniform_name_is_traced(const char *name)
+{
+    static const char *const names[] = {
+        "_Color", "_MainTex_ST", "_BumpMap_ST", "_EmissionColor", "_Cutoff",
+        "_Glossiness", "_Metallic", "_GlossMapScale", "_UVSec", "_AlphaClip",
+        "_ShadowColor", "_PlaneHeight",
+        "unity_SHAr", "unity_SHAg", "unity_SHAb", "unity_SHBr", "unity_SHBg",
+        "unity_SHBb", "unity_SHC", "_LightColor0", "_WorldSpaceLightPos0",
+        "_WorldSpaceCameraPos", "unity_AmbientSky", "unity_AmbientEquator",
+        "unity_AmbientGround", "unity_LightColor", "unity_LightPosition",
+        "unity_LightAtten", "unity_WorldToLight", "unity_LightShadowBias",
+        "unity_ShadowFadeCenterAndType", "unity_MatrixV", "unity_MatrixVP",
+    };
+
+    for (unsigned int i = 0; i < ARRAY_SIZE(names); i++) {
+        if (strcmp(name, names[i]) == 0)
+            return true;
+    }
+    return false;
+}
+
+static const void *gxm_param_buffer(SceGxmContext *context, uint32_t container, bool vertex)
+{
+    if (container == SCE_GXM_MAX_UNIFORM_BUFFERS)
+        return vertex ? context->vertex_uniforms : context->fragment_uniforms;
+    if (container < SCE_GXM_MAX_UNIFORM_BUFFERS)
+        return vertex ? context->vertex_uniform_buffers[container]
+                      : context->fragment_uniform_buffers[container];
+    return NULL;
+}
+
+/* Unity's Vita shaders store most constants as packed fp16 pairs. */
+static float gxm_half_to_float(uint16_t h)
+{
+    int sign = (h >> 15) & 1;
+    int exponent = (h >> 10) & 0x1F;
+    int mantissa = h & 0x3FF;
+    float value;
+
+    if (exponent == 0)
+        value = (float)mantissa / 1024.0f * powf(2.0f, -14.0f);
+    else if (exponent == 0x1F)
+        value = mantissa ? NAN : INFINITY;
+    else
+        value = (1.0f + (float)mantissa / 1024.0f) * powf(2.0f, (float)(exponent - 15));
+
+    return sign ? -value : value;
+}
+
+static void gxm_force_draw_color(SceGxmContext *context, const Vita3kProgramParameter *param,
+                                 uint32_t red, uint32_t green, uint32_t blue)
+{
+    const SceGxmRegisteredProgram *program = context->fragment_program->programId;
+    const Vita3kUniformBufferLayout *layout = NULL;
+    uint32_t word0, word1;
+    uint8_t *destination;
+
+    for (uint32_t i = 0; i < program->uniform_buffer_count; i++) {
+        if (program->uniform_buffers[i].guest_index == param->container_index) {
+            layout = &program->uniform_buffers[i];
+            break;
+        }
+    }
+    if (!layout || !context->fragment_block_data)
+        return;
+
+    word0 = (uint32_t)gxm_float_to_half(red / 255.0f) |
+            ((uint32_t)gxm_float_to_half(green / 255.0f) << 16);
+    word1 = (uint32_t)gxm_float_to_half(blue / 255.0f) |
+            ((uint32_t)gxm_float_to_half(1.0f) << 16);
+    destination = context->fragment_block_data + layout->offset + param->resource_index * 4;
+    memcpy(destination, &word0, sizeof(word0));
+    memcpy(destination + 4, &word1, sizeof(word1));
+}
+
+/*
+ * Debug: logs the material colour of every ground-like draw. Unity reuses one
+ * program for many materials and feeds _Color per draw, so a per-program trace
+ * cannot show whether an individual draw receives black.
+ */
+static void gxm_trace_draw_color(SceGxmContext *context, uint32_t shader_hash)
+{
+    static int enabled = -1;
+    static uint64_t start_frame;
+    static unsigned int logged;
+    static Vita3kProgramParameter params[192];
+    uint32_t count;
+    const SceGxmRegisteredProgram *program;
+
+    if (enabled < 0) {
+        const char *value = getenv("VITA2NATIVE_DRAW_COLOR_TRACE");
+
+        enabled = value != NULL || getenv("VITA2NATIVE_FORCE_COLOR") != NULL;
+        start_frame = value ? (uint64_t)strtoull(value, NULL, 10) : 0;
+    }
+    if (!enabled || g_gxm_frame < start_frame || logged >= 200000)
+        return;
+
+    program = context->fragment_program ? context->fragment_program->programId : NULL;
+    if (!program)
+        return;
+
+    count = vita3k_gxm_get_parameters(program->programHeader, params, ARRAY_SIZE(params));
+    for (uint32_t i = 0; i < count; i++) {
+        const Vita3kProgramParameter *p = &params[i];
+        const void *source;
+        const uint32_t *words;
+
+        if (p->category != 1 || strcmp(p->name, "_Color") != 0)
+            continue;
+        {
+            static int force_loaded;
+            static uint32_t force_rgb;
+
+            if (!force_loaded) {
+                const char *force = getenv("VITA2NATIVE_FORCE_COLOR");
+
+                if (force)
+                    force_rgb = (uint32_t)strtoul(force, NULL, 16);
+                force_loaded = 1;
+            }
+            if (force_rgb) {
+                gxm_force_draw_color(context, p, (force_rgb >> 16) & 0xFF, (force_rgb >> 8) & 0xFF,
+                                     force_rgb & 0xFF);
+                continue;
+            }
+        }
+        source = gxm_param_buffer(context, p->container_index, false);
+        if (!source)
+            continue;
+        words = (const uint32_t *)source + p->resource_index;
+
+        LOG("draw color %u frame %llu fs %08x offset %u: %.4f %.4f %.4f %.4f t0 %08x %ux%u t1 %08x %ux%u",
+            logged, (unsigned long long)g_gxm_frame, shader_hash, p->resource_index,
+            (double)gxm_half_to_float(words[0] & 0xFFFF),
+            (double)gxm_half_to_float(words[0] >> 16),
+            (double)gxm_half_to_float(words[1] & 0xFFFF),
+            (double)gxm_half_to_float(words[1] >> 16),
+            (unsigned)gxm_texture_get_format(&context->fragment_textures[0]),
+            (unsigned)gxm_texture_get_width(&context->fragment_textures[0]),
+            (unsigned)gxm_texture_get_height(&context->fragment_textures[0]),
+            (unsigned)gxm_texture_get_format(&context->fragment_textures[1]),
+            (unsigned)gxm_texture_get_width(&context->fragment_textures[1]),
+            (unsigned)gxm_texture_get_height(&context->fragment_textures[1]));
+        logged++;
+    }
+}
+
+static void gxm_trace_named_uniforms(SceGxmContext *context, uint32_t shader_hash, bool vertex)
+{
+    static uint32_t seen[256];
+    static unsigned int seen_count;
+    static unsigned int logged;
+    const SceGxmRegisteredProgram *program;
+    static Vita3kProgramParameter params[192];
+    uint32_t count;
+    uint32_t key;
+
+    if (!gxm_uniform_names_trace() || logged >= 400)
+        return;
+
+    program = vertex ? (context->vertex_program ? context->vertex_program->programId : NULL)
+                     : (context->fragment_program ? context->fragment_program->programId : NULL);
+    if (!program)
+        return;
+
+    key = shader_hash ^ (vertex ? 0x80000000u : 0);
+    for (unsigned int i = 0; i < seen_count; i++) {
+        if (seen[i] == key)
+            return;
+    }
+    if (seen_count < ARRAY_SIZE(seen))
+        seen[seen_count++] = key;
+    logged++;
+
+    LOG("GXM named uniforms %s hash %08x (containers %u, %u bytes)", vertex ? "vs" : "fs",
+        shader_hash, program->uniform_buffer_count, program->uniform_buffer_size);
+
+    count = vita3k_gxm_get_parameters(program->programHeader, params, ARRAY_SIZE(params));
+    for (uint32_t i = 0; i < count; i++) {
+        const Vita3kProgramParameter *p = &params[i];
+        const float *value;
+        const void *source;
+
+        /* Category 1 is a uniform vector; skip attributes and samplers. */
+        if (p->category != 1 || !gxm_uniform_name_is_traced(p->name))
+            continue;
+
+        source = gxm_param_buffer(context, p->container_index, vertex);
+        if (!source)
+            continue;
+        value = (const float *)source + p->resource_index;
+
+        if (p->component_count == 4) {
+            const uint32_t *words = (const uint32_t *)value;
+
+            LOG("  %-28s c%u[%u] h4 = %.4f %.4f %.4f %.4f", p->name, p->container_index,
+                p->resource_index, (double)gxm_half_to_float(words[0] & 0xFFFF),
+                (double)gxm_half_to_float(words[0] >> 16),
+                (double)gxm_half_to_float(words[1] & 0xFFFF),
+                (double)gxm_half_to_float(words[1] >> 16));
+            continue;
+        }
+
+        switch (p->component_count) {
+        case 1:
+            LOG("  %-28s c%u[%u] = %.5f", p->name, p->container_index, p->resource_index,
+                (double)value[0]);
+            break;
+        case 2:
+            LOG("  %-28s c%u[%u] = %.5f %.5f", p->name, p->container_index, p->resource_index,
+                (double)value[0], (double)value[1]);
+            break;
+        case 3:
+            LOG("  %-28s c%u[%u] = %.5f %.5f %.5f", p->name, p->container_index,
+                p->resource_index, (double)value[0], (double)value[1], (double)value[2]);
+            break;
+        default:
+            LOG("  %-28s c%u[%u] = %.5f %.5f %.5f %.5f", p->name, p->container_index,
+                p->resource_index, (double)value[0], (double)value[1], (double)value[2],
+                (double)value[3]);
+            break;
+        }
+    }
+
+    {
+        const char *dump = getenv("VITA2NATIVE_UNIFORM_DUMP");
+        const uint32_t dump_hash = dump ? (uint32_t)strtoul(dump, NULL, 16) : 0;
+
+        if (dump_hash && dump_hash == shader_hash) {
+            const float *source = gxm_param_buffer(context, SCE_GXM_MAX_UNIFORM_BUFFERS, vertex);
+            uint32_t words = program->programHeader->default_uniform_buffer_count;
+
+            LOG("GXM default uniform dump %s %08x: %p, %u floats", vertex ? "vs" : "fs",
+                shader_hash, (const void *)source, words);
+            for (uint32_t row = 0; source && row + 3 < words; row += 4) {
+                LOG("  [%3u] %11.6f %11.6f %11.6f %11.6f  %08x %08x %08x %08x", row,
+                    (double)source[row], (double)source[row + 1], (double)source[row + 2],
+                    (double)source[row + 3], ((const uint32_t *)source)[row],
+                    ((const uint32_t *)source)[row + 1], ((const uint32_t *)source)[row + 2],
+                    ((const uint32_t *)source)[row + 3]);
+            }
+        }
+    }
+}
+
 static void gxm_uniform_trace(SceGxmContext *context, unsigned int indexCount)
 {
     static unsigned int traces;
@@ -6343,6 +6812,17 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
             max_index = index;
     }
 
+    if (gxm_skip_program() && context->fragment_program->shader_hash == gxm_skip_program()) {
+        static unsigned int logged;
+
+        if (logged < 8) {
+            LOG("SceGxm: skipped draw for program %08x (%u indices)",
+                context->fragment_program->shader_hash, indexCount);
+            logged++;
+        }
+        return 0;
+    }
+
     polygon_mode = context->front_polygon_mode;
 
     /* Batched draws are expanded to lists, so strips and fans become
@@ -6428,6 +6908,9 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
     fragment_uniform_size = gxm_build_uniforms(context, context->fragment_program->programId, false);
 
     gxm_uniform_trace(context, indexCount);
+    gxm_trace_named_uniforms(context, context->vertex_program->shader_hash, true);
+    gxm_trace_named_uniforms(context, context->fragment_program->shader_hash, false);
+    gxm_trace_draw_color(context, context->fragment_program->shader_hash);
 
     gxm_fill_draw_state(context, program, primType, indexType, instances, &state);
 

@@ -767,11 +767,20 @@ static int decode_texel_prepared(uint8_t out[4], const uint8_t *data, uint32_t i
     {
         uint64_t mask = info->width[0] >= 64 ? ~0ull : ((1ull << info->width[0]) - 1);
         uint8_t value = component_to_u8((uint32_t)(word & mask), info->width[0], info->kind[0]);
+        static int replicate = -1;
+
+        if (replicate < 0)
+            replicate = getenv("VITA2NATIVE_MASK_REPLICATE") != NULL;
 
         switch (swizzle) {
         case 0: /* R */
             out[0] = value;
-            out[1] = out[2] = 0;
+            /* Diagnostic: a mask texture sampled as RRR1 instead of R001. */
+            if (replicate && (base == SCE_GXM_TEXTURE_BASE_FORMAT_F32M ||
+                              base == SCE_GXM_TEXTURE_BASE_FORMAT_F32))
+                out[1] = out[2] = value;
+            else
+                out[1] = out[2] = 0;
             out[3] = 255;
             break;
         case 1: /* 000R */
@@ -1501,6 +1510,86 @@ int gxm_texture_decode_level_at(uint8_t *dest, const SceGxmTextureInner *texture
 
     return decode_level_rgba8(dest, (const uint8_t *)data + info.offset, texture, type, format,
                               &info);
+}
+
+/*
+ * Float decode for F32M/F32 textures. Sampling these as RGBA8 would quantise a
+ * depth map to 256 levels, which is far too coarse for Unity's shadow compare
+ * (Vita3K uploads them as R32F for the same reason).
+ */
+static int decode_level_f32(float *dest, const uint8_t *input, SceGxmTextureType type,
+                            const GxmTextureLevel *info)
+{
+    if (type == SCE_GXM_TEXTURE_SWIZZLED || type == SCE_GXM_TEXTURE_CUBE || is_arbitrary(type)) {
+        uint32_t minimum = info->layout_width < info->layout_height ? info->layout_width
+                                                                    : info->layout_height;
+        uint32_t k = highest_bit(minimum);
+        uint32_t count = info->layout_width * info->layout_height;
+
+        if (!minimum)
+            return -1;
+
+        for (uint32_t i = 0; i < count; i++) {
+            uint32_t x = decode_morton2_x(i) & (minimum - 1);
+            uint32_t y = decode_morton2_y(i) & (minimum - 1);
+            uint32_t upper = (i >> (2 * k)) << k;
+            uint32_t raw = (uint32_t)read_word(input, i, 32) & 0x7fffffffu;
+
+            if (info->layout_width >= info->layout_height)
+                x |= upper;
+            else
+                y |= upper;
+
+            if (x >= info->width || y >= info->height)
+                continue;
+            memcpy(&dest[y * info->width + x], &raw, sizeof(float));
+        }
+
+        return 0;
+    }
+
+    if (type == SCE_GXM_TEXTURE_TILED) {
+        uint32_t tiles_per_row = info->layout_width >> 5;
+
+        for (uint32_t y = 0; y < info->height; y++) {
+            for (uint32_t x = 0; x < info->width; x++) {
+                uint32_t tile = (x >> 5) + tiles_per_row * (y >> 5);
+                uint32_t index = (tile << 10) | (x & 31) | ((y & 31) << 5);
+                uint32_t raw = (uint32_t)read_word(input, index, 32) & 0x7fffffffu;
+
+                memcpy(&dest[y * info->width + x], &raw, sizeof(float));
+            }
+        }
+
+        return 0;
+    }
+
+    for (uint32_t y = 0; y < info->height; y++) {
+        for (uint32_t x = 0; x < info->width; x++) {
+            uint32_t raw =
+                (uint32_t)read_word(input, y * info->layout_width + x, 32) & 0x7fffffffu;
+
+            memcpy(&dest[y * info->width + x], &raw, sizeof(float));
+        }
+    }
+
+    return 0;
+}
+
+int gxm_texture_decode_level_f32(float *dest, const SceGxmTextureInner *texture, const void *data,
+                                 uint32_t face, uint32_t level)
+{
+    SceGxmTextureType type;
+    GxmTextureLevel info;
+
+    if (!dest || !texture || !data)
+        return -1;
+    if (gxm_texture_get_level(texture, face, level, &info) != 0)
+        return -1;
+
+    type = (SceGxmTextureType)gxm_texture_get_type(texture);
+
+    return decode_level_f32(dest, (const uint8_t *)data + info.offset, type, &info);
 }
 
 int gxm_texture_decode_level_rgba8(uint8_t *dest, const SceGxmTextureInner *texture, uint32_t face,

@@ -83,6 +83,28 @@ uint32_t vita3k_gxm_get_uniform_buffer_layout(const SceGxmProgram *program,
     return offset;
 }
 
+uint32_t vita3k_gxm_get_parameters(const SceGxmProgram *program, Vita3kProgramParameter *out,
+                                   uint32_t max)
+{
+    const SceGxmProgramParameter *params = program->program_parameters();
+    uint32_t count = 0;
+
+    for (uint32_t i = 0; i < program->parameter_count && count < max; i++) {
+        const SceGxmProgramParameter &p = params[i];
+        Vita3kProgramParameter *o = &out[count++];
+
+        std::snprintf(o->name, sizeof(o->name), "%s", p.name());
+        o->category = static_cast<uint32_t>(p.category);
+        o->type = static_cast<uint32_t>(p.type);
+        o->component_count = p.component_count;
+        o->container_index = p.container_index;
+        o->resource_index = p.resource_index;
+        o->array_size = p.array_size;
+    }
+
+    return count;
+}
+
 
 static shader::GeneratedShader
 convert_gxp_internal(const SceGxmProgram *program, const char *shader_name,
