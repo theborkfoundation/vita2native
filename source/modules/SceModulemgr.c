@@ -10,6 +10,7 @@
  * case (a PRX that only consumes firmware libraries).
  */
 
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <limits.h>
@@ -63,6 +64,7 @@ static bool trace_module_lookups(void)
 
 static int module_start(VitaModuleInfo *module, SceSize args, void *argp, int *status);
 static void module_dump_code(const VitaModuleInfo *module);
+static void module_apply_debug_patches(VitaModuleInfo *module);
 
 static VitaModuleInfo *module_find_locked(SceUID uid)
 {
@@ -164,8 +166,122 @@ static SceUID module_load(const char *path)
         module->entry);
 
     module_dump_code(module);
+    module_apply_debug_patches(module);
 
     return module->uid;
+}
+
+/* Case-insensitive substring search, for matching module names from the
+   environment without depending on strcasestr(). */
+static bool contains_ignore_case(const char *haystack, const char *needle)
+{
+    size_t length;
+
+    if (!haystack || !needle)
+        return false;
+
+    length = strlen(needle);
+    if (length == 0)
+        return false;
+
+    for (; *haystack; haystack++) {
+        size_t i = 0;
+
+        while (i < length && haystack[i] &&
+               tolower((unsigned char)haystack[i]) == tolower((unsigned char)needle[i]))
+            i++;
+        if (i == length)
+            return true;
+    }
+
+    return false;
+}
+
+static bool module_matches(const VitaModuleInfo *module, const char *name, size_t length)
+{
+    char needle[64];
+
+    if (length == 0 || length >= sizeof(needle))
+        return false;
+
+    memcpy(needle, name, length);
+    needle[length] = '\0';
+
+    return contains_ignore_case(module->loader.name, needle) ||
+           contains_ignore_case(module->loader.path, needle) ||
+           contains_ignore_case(module->host_path, needle);
+}
+
+static void module_apply_patch_list(VitaModuleInfo *module, const char *list, bool breakpoint)
+{
+    const char *cursor = list;
+
+    while (*cursor) {
+        const char *end = strchr(cursor, ',');
+        size_t entry_length = end ? (size_t)(end - cursor) : strlen(cursor);
+        const char *separator = memchr(cursor, ':', entry_length);
+
+        if (!separator) {
+            LOG("Module patch: expected <name>:<offset> in \"%.*s\"", (int)entry_length,
+                cursor);
+        } else if (module_matches(module, cursor, (size_t)(separator - cursor))) {
+            const char *offset_text = separator + 1;
+            char *offset_end = NULL;
+            unsigned long offset = strtoul(offset_text, &offset_end, 0);
+
+            if (module->jit.rw && offset + 2 <= module->jit.size) {
+                uint8_t *target = (uint8_t *)module->jit.rw + offset;
+
+                if (breakpoint) {
+                    const uint16_t udf = 0xde00;
+
+                    memcpy(target, &udf, sizeof(udf));
+                    LOG("Module %s: planted breakpoint at image+0x%lx", module->loader.name,
+                        offset);
+                } else if (*offset_end == '=') {
+                    unsigned long value = strtoul(offset_end + 1, NULL, 16);
+                    const uint16_t halfword = (uint16_t)value;
+
+                    memcpy(target, &halfword, sizeof(halfword));
+                    LOG("Module %s: patched image+0x%lx with 0x%04lx", module->loader.name,
+                        offset, value);
+                }
+            }
+        }
+
+        if (!end)
+            break;
+        cursor = end + 1;
+    }
+}
+
+/*
+ * Debug helpers, applied once a module is mapped:
+ *   VITA2NATIVE_MODULE_BKPT=<name>:<offset>[,<name>:<offset>...]
+ *   VITA2NATIVE_MODULE_PATCH=<name>:<offset>=<hex16>[,...]
+ * The name is a case-insensitive substring of the module name or path and the
+ * offset is relative to the start of its mapped image.
+ */
+static void module_apply_debug_patches(VitaModuleInfo *module)
+{
+    const char *breakpoints = getenv("VITA2NATIVE_MODULE_BKPT");
+    const char *patches = getenv("VITA2NATIVE_MODULE_PATCH");
+
+    if (!module->jit.rw || !module->jit.size)
+        return;
+    if (!breakpoints && !patches)
+        return;
+
+    if (breakpoints)
+        module_apply_patch_list(module, breakpoints, true);
+    if (patches)
+        module_apply_patch_list(module, patches, false);
+
+    __builtin___clear_cache((char *)module->jit.rw,
+                            (char *)module->jit.rw + module->jit.size);
+    if (module->jit.rx && module->jit.rx != module->jit.rw)
+        __builtin___clear_cache((char *)module->jit.rx,
+                                (char *)module->jit.rx + module->jit.size);
 }
 
 static void module_dump_code(const VitaModuleInfo *module)
@@ -188,6 +304,26 @@ static void module_dump_code(const VitaModuleInfo *module)
     fwrite(module->jit.rx, 1, module->jit.size, file);
     fclose(file);
     LOG("Dumped module code to %s", path);
+
+    for (int i = 0; i < module->loader.num_segments; i++) {
+        const LoadedSegment *segment = &module->loader.segments[i];
+
+        if ((segment->perms & 1) || !segment->vaddr || !segment->memsz)
+            continue;
+
+        if (snprintf(path, sizeof(path), "%s/%03x-%s.data%d.bin", dir, module->uid,
+                     module->loader.name, i) >= (int)sizeof(path))
+            continue;
+
+        file = fopen(path, "wb");
+        if (!file)
+            continue;
+
+        fwrite(segment->vaddr, 1, segment->memsz, file);
+        fclose(file);
+        LOG("Dumped module data segment %d (%p, 0x%x) to %s", i, segment->vaddr,
+            segment->memsz, path);
+    }
 }
 
 /* Returns the UID of an already loaded module with the same name, or -1. */

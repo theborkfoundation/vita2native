@@ -388,6 +388,14 @@ static void dump_maps_around(unsigned long address)
     fclose(maps);
 }
 
+static bool read_guest_u32(unsigned long address, uint32_t *out)
+{
+    struct iovec local = { out, sizeof(*out) };
+    struct iovec remote = { (void *)address, sizeof(*out) };
+
+    return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == (ssize_t)sizeof(*out);
+}
+
 static void dump_guest_words(unsigned long address, int count)
 {
     uint32_t words[64];
@@ -566,6 +574,151 @@ static void guest_signal_handler(int signal, siginfo_t *info, void *context)
 
             if (start)
                 dump_guest_bytes(code_dump, start, 0x400000);
+        }
+    }
+
+    {
+        const char *array_slot = getenv("VITA2NATIVE_CRASH_DUMP_ARRAY");
+
+        if (array_slot) {
+            uint32_t array = 0;
+            struct iovec local = { &array, sizeof(array) };
+            struct iovec remote = { (void *)((uintptr_t)uc->uc_mcontext.arm_sp +
+                                             strtoul(array_slot, NULL, 0)),
+                                    sizeof(array) };
+
+            if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) ==
+                (ssize_t)sizeof(array)) {
+                char message[128];
+                int length = snprintf(message, sizeof(message),
+                                      "vita2native: array[sp+%s] = %08" PRIx32 "\n",
+                                      array_slot, array);
+
+                if (length > 0)
+                    write(STDERR_FILENO, message, (size_t)length);
+                dump_guest_words(array, 16);
+
+                {
+                    uint32_t klass = 0;
+                    uint32_t count = 0;
+                    char name[64];
+                    struct iovec ln = { name, sizeof(name) - 1 };
+                    struct iovec rn;
+
+                    local.iov_base = &klass;
+                    remote.iov_base = (void *)(uintptr_t)array;
+                    if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) ==
+                        (ssize_t)sizeof(klass)) {
+                        uint32_t name_ptr = 0;
+
+                        local.iov_base = &name_ptr;
+                        remote.iov_base = (void *)((uintptr_t)klass + 8);
+                        if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) ==
+                            (ssize_t)sizeof(name_ptr)) {
+                            rn.iov_base = (void *)(uintptr_t)name_ptr;
+                            rn.iov_len = sizeof(name) - 1;
+                            if (process_vm_readv(getpid(), &ln, 1, &rn, 1, 0) > 0) {
+                                name[sizeof(name) - 1] = '\0';
+                                length = snprintf(message, sizeof(message),
+                                                  "vita2native: array class %s\n", name);
+                                if (length > 0)
+                                    write(STDERR_FILENO, message, (size_t)length);
+                            }
+                        }
+                    }
+
+                    local.iov_base = &count;
+                    remote.iov_base = (void *)((uintptr_t)array + 12);
+                    if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) !=
+                        (ssize_t)sizeof(count))
+                        count = 0;
+
+                    if (count > 32)
+                        count = 32;
+
+                    for (uint32_t i = 0; i < count; i++) {
+                        uint32_t element = 0;
+                        uint32_t field8 = 0;
+                        uint32_t field0 = 0;
+                        struct iovec le = { &element, sizeof(element) };
+                        struct iovec re = { (void *)((uintptr_t)array + 16 + i * 4),
+                                            sizeof(element) };
+
+                        if (process_vm_readv(getpid(), &le, 1, &re, 1, 0) !=
+                            (ssize_t)sizeof(element))
+                            break;
+
+                        if (element >= 0x1000) {
+                            local.iov_base = &field8;
+                            remote.iov_base = (void *)((uintptr_t)element + 8);
+                            if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) !=
+                                (ssize_t)sizeof(field8))
+                                field8 = 0;
+
+                            local.iov_base = &field0;
+                            remote.iov_base = (void *)(uintptr_t)element;
+                            if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) !=
+                                (ssize_t)sizeof(field0))
+                                field0 = 0;
+                        }
+
+                        length = snprintf(message, sizeof(message),
+                                          "vita2native:   [%u] = %08" PRIx32
+                                          " [0]=%08" PRIx32 " [+8]=%08" PRIx32 "\n",
+                                          i, element, field0, field8);
+                        if (length > 0)
+                            write(STDERR_FILENO, message, (size_t)length);
+                    }
+                }
+            }
+        }
+    }
+
+    {
+        /*
+         * VITA2NATIVE_CRASH_DUMP_VEC=<offset from sp> dumps a growable pointer
+         * vector whose {begin} lives at sp+offset. The image used by the
+         * IL2CPP reflection code keeps {begin, end, capacity} at +4/+8/+0xc,
+         * so the begin offset is the one to pass.
+         */
+        const char *vector_slot = getenv("VITA2NATIVE_CRASH_DUMP_VEC");
+
+        if (vector_slot) {
+            unsigned long base = (unsigned long)uc->uc_mcontext.arm_sp +
+                                 strtoul(vector_slot, NULL, 0);
+            uint32_t begin = 0;
+            uint32_t end = 0;
+
+            if (read_guest_u32(base, &begin) && read_guest_u32(base + 4, &end)) {
+                char message[192];
+                uint32_t count = end > begin ? (end - begin) / 4 : 0;
+                int length = snprintf(message, sizeof(message),
+                                      "vita2native: vec[sp+%s] %08" PRIx32
+                                      "..%08" PRIx32 " count=%" PRIu32 "\n",
+                                      vector_slot, begin, end, count);
+
+                if (length > 0)
+                    write(STDERR_FILENO, message, (size_t)length);
+
+                if (count > 48)
+                    count = 48;
+
+                for (uint32_t i = 0; i < count; i++) {
+                    uint32_t element = 0;
+
+                    if (!read_guest_u32((unsigned long)begin + i * 4, &element))
+                        break;
+
+                    length = snprintf(message, sizeof(message),
+                                      "vita2native:   v[%" PRIu32 "] = %08" PRIx32 "\n", i,
+                                      element);
+                    if (length > 0)
+                        write(STDERR_FILENO, message, (size_t)length);
+
+                    if (element >= 0x1000)
+                        dump_guest_words(element, 8);
+                }
+            }
         }
     }
 
