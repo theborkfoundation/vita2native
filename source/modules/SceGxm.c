@@ -162,6 +162,8 @@ typedef struct {
     uint32_t hash;
     uint64_t hash_frame;
     uint64_t last_used;
+    uint32_t param_key;
+    bool params_valid;
     bool valid;
 } GxmTextureCache;
 
@@ -573,6 +575,10 @@ static GxmCachedShader g_cached_shaders[GXM_MAX_CACHED_SHADERS];
 static unsigned int g_cached_shader_count;
 static SceGxmContext *g_current_context;
 static GLuint g_bound_texture[2 * SCE_GXM_MAX_TEXTURE_UNITS];
+static SceGxmTextureInner g_unit_texture[2 * SCE_GXM_MAX_TEXTURE_UNITS];
+static uint64_t g_unit_texture_frame[2 * SCE_GXM_MAX_TEXTURE_UNITS];
+static bool g_unit_texture_ok[2 * SCE_GXM_MAX_TEXTURE_UNITS];
+static bool g_unit_texture_valid[2 * SCE_GXM_MAX_TEXTURE_UNITS];
 static unsigned int g_active_texture_unit = UINT_MAX;
 static GLuint g_bound_uniform_block[2];
 static GLuint g_bound_render_ubo[2];
@@ -1310,6 +1316,39 @@ static void gxm_texture_params(const SceGxmTextureInner *texture, GLenum target,
                           (float)(texture->lod_min0 | (texture->lod_min1 << 2)));
 }
 
+/*
+ * Sampler state lives on the GL texture object, and most draws rebind the same
+ * descriptor, so applying it on every bind is pure overhead. Entries remember
+ * the state they were last given.
+ */
+static uint32_t gxm_texture_param_key(const SceGxmTextureInner *texture, uint32_t mip_count)
+{
+    uint32_t key = mip_count;
+
+    key = key * 31u + (uint32_t)texture->min_filter;
+    key = key * 31u + (uint32_t)texture->mag_filter;
+    key = key * 31u + (uint32_t)texture->mip_filter;
+    key = key * 31u + (uint32_t)texture->uaddr_mode;
+    key = key * 31u + (uint32_t)texture->vaddr_mode;
+    key = key * 31u + (uint32_t)texture->gamma_mode;
+    key = key * 31u + (uint32_t)texture->lod_min0;
+    key = key * 31u + (uint32_t)texture->lod_min1;
+    return key ? key : 1u;
+}
+
+static void gxm_apply_texture_params(GxmTextureCache *cache, const SceGxmTextureInner *texture,
+                                     GLenum target, uint32_t mip_count)
+{
+    uint32_t key = gxm_texture_param_key(texture, mip_count);
+
+    if (cache->params_valid && cache->param_key == key)
+        return;
+
+    gxm_texture_params(texture, target, mip_count);
+    cache->param_key = key;
+    cache->params_valid = true;
+}
+
 static GxmTextureCache *gxm_texture_cache_find(const SceGxmTextureInner *texture,
                                                const void *data, GLenum target)
 {
@@ -1363,8 +1402,10 @@ static GxmTextureCache *gxm_texture_cache_alloc(void)
 static void gxm_forget_texture(GLuint tex)
 {
     for (unsigned int i = 0; i < ARRAY_SIZE(g_bound_texture); i++) {
-        if (g_bound_texture[i] == tex)
+        if (g_bound_texture[i] == tex) {
             g_bound_texture[i] = 0;
+            g_unit_texture_valid[i] = false;
+        }
     }
 }
 
@@ -1376,12 +1417,13 @@ static void gxm_texture_cache_flush(void)
         memset(&g_texture_cache[i], 0, sizeof(g_texture_cache[i]));
     }
     memset(g_bound_texture, 0, sizeof(g_bound_texture));
+    memset(g_unit_texture_valid, 0, sizeof(g_unit_texture_valid));
     g_active_texture_unit = UINT_MAX;
     g_texture_clock = 0;
     g_gxm_frame = 0;
 }
 
-static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int unit)
+static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned int unit)
 {
     SceGxmTextureType type = (SceGxmTextureType)gxm_texture_get_type(texture);
     bool cube = type == SCE_GXM_TEXTURE_CUBE || type == SCE_GXM_TEXTURE_CUBE_ARBITRARY;
@@ -1440,7 +1482,7 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
             g_gl->glBindTexture(target, cache->tex);
             g_bound_texture[unit] = cache->tex;
         }
-        gxm_texture_params(texture, target, mip_count);
+        gxm_apply_texture_params(cache, texture, target, mip_count);
         cache->last_used = ++g_texture_clock;
         return true;
     }
@@ -1453,7 +1495,7 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
             g_gl->glBindTexture(target, cache->tex);
             g_bound_texture[unit] = cache->tex;
         }
-        gxm_texture_params(texture, target, mip_count);
+        gxm_apply_texture_params(cache, texture, target, mip_count);
         cache->last_used = ++g_texture_clock;
         return true;
     }
@@ -1692,6 +1734,8 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
     }
 
     gxm_texture_params(texture, target, mip_count);
+    cache->param_key = gxm_texture_param_key(texture, mip_count);
+    cache->params_valid = true;
 
     cache->data = data;
     cache->palette = palette;
@@ -1706,6 +1750,27 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
     cache->valid = true;
 
     return true;
+}
+
+static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int unit)
+{
+    bool ok;
+
+    if (unit >= ARRAY_SIZE(g_unit_texture))
+        return false;
+
+    /* A flush binds the same descriptors over and over; the texture object is
+       already set up, so only a changed descriptor needs work. */
+    if (g_unit_texture_valid[unit] && g_unit_texture_frame[unit] == g_gxm_frame &&
+        memcmp(&g_unit_texture[unit], texture, sizeof(*texture)) == 0)
+        return g_unit_texture_ok[unit];
+
+    ok = gxm_upload_texture_inner(texture, unit);
+    g_unit_texture[unit] = *texture;
+    g_unit_texture_frame[unit] = g_gxm_frame;
+    g_unit_texture_ok[unit] = ok;
+    g_unit_texture_valid[unit] = true;
+    return ok;
 }
 
 static void gxm_upload_textures(SceGxmContext *context)
@@ -1919,12 +1984,13 @@ static void gxm_upload_uniforms(SceGxmContext *context, const SceGxmRegisteredPr
     }
 
     g_gl->glBindBuffer(GL_UNIFORM_BUFFER, buffer);
-    if (context->uniform_block_capacity[index] < total) {
-        g_gl->glBufferData(GL_UNIFORM_BUFFER, (GLsizeiptr)total, data, GL_STREAM_DRAW);
-        context->uniform_block_capacity[index] = total;
-    } else {
-        g_gl->glBufferSubData(GL_UNIFORM_BUFFER, 0, (GLsizeiptr)total, data);
-    }
+    /*
+     * Orphan before filling: re-writing a buffer the queued draws still read
+     * forces Panfrost to copy or stall, and this runs once per batch.
+     */
+    g_gl->glBufferData(GL_UNIFORM_BUFFER, (GLsizeiptr)total, NULL, GL_STREAM_DRAW);
+    g_gl->glBufferSubData(GL_UNIFORM_BUFFER, 0, (GLsizeiptr)total, data);
+    context->uniform_block_capacity[index] = total;
 
     if (g_bound_uniform_block[index] != buffer) {
         g_gl->glBindBufferBase(GL_UNIFORM_BUFFER, index, buffer);
@@ -4649,6 +4715,16 @@ static int gxm_state_trace(void)
     return enabled;
 }
 
+/* Diagnostic: measure the frame with the colour-surface readback removed. */
+static int gxm_skip_readback(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_SKIP_READBACK") != NULL;
+    return enabled;
+}
+
 EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
        const SceGxmNotification *vertexNotification, const SceGxmNotification *fragmentNotification)
 {
@@ -4736,6 +4812,12 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
             scale = 2;
             width = target->params.width;
             height = target->params.height;
+        }
+
+        if (gxm_skip_readback()) {
+            t2 = gxm_time_ns();
+            gxm_profile_frame(t_resolve, t1 - t0, t2 - t1, gxm_time_ns() - t2);
+            goto convert_done;
         }
 
         rgba = malloc((size_t)width * height * 4);
