@@ -39,6 +39,33 @@ bool convert_gxp_to_glsl_c(char **glsl, const SceGxmProgram *program, const char
                            bool (*dumper)(const char *ext, const char *dump));
 
 /*
+ * Same as above, but the shader sees the texture formats bound at draw time.
+ * The recompiler derives each fetch's component count/type from them, so a
+ * single-channel depth mask must not be described as RGBA.
+ */
+bool convert_gxp_to_spirv_c_hinted(uint32_t **spirv, uint32_t *num_instr,
+                                   const SceGxmProgram *program, const char *shader_name,
+                                   bool support_shader_interlock, bool support_texture_barrier,
+                                   bool direct_fragcolor, bool spirv_shader,
+                                   const SceGxmVertexAttribute *hint_attributes,
+                                   uint32_t num_hint_attributes, const uint32_t *fragment_formats,
+                                   const uint32_t *vertex_formats, uint32_t color_format,
+                                   bool maskupdate, bool force_shader_debug,
+                                   bool (*dumper)(const char *ext, const char *dump));
+
+bool convert_gxp_to_glsl_c_hinted(char **glsl, const SceGxmProgram *program, const char *shader_name,
+                                  bool support_shader_interlock, bool support_texture_barrier,
+                                  bool direct_fragcolor, bool spirv_shader,
+                                  const SceGxmVertexAttribute *hint_attributes,
+                                  uint32_t num_hint_attributes, const uint32_t *fragment_formats,
+                                  const uint32_t *vertex_formats, uint32_t color_format,
+                                  bool maskupdate, bool force_shader_debug,
+                                  bool (*dumper)(const char *ext, const char *dump));
+
+/* Component count/type the recompiler infers from a texture format. */
+uint32_t vita3k_gxm_texture_hint_key(uint32_t format);
+
+/*
  * Returns the storage-buffer layout Vita3K's SPIR-V recompiler uses for the
  * program's uniform buffers (default uniforms and named buffers share one
  * container per stage). Returns the total container size in bytes and fills up

@@ -769,19 +769,26 @@ static int decode_texel_prepared(uint8_t out[4], const uint8_t *data, uint32_t i
         uint8_t value = component_to_u8((uint32_t)(word & mask), info->width[0], info->kind[0]);
         static int replicate = -1;
 
-        if (replicate < 0)
-            replicate = getenv("VITA2NATIVE_MASK_REPLICATE") != NULL;
+        if (replicate < 0) {
+            const char *mode = getenv("VITA2NATIVE_MASK_REPLICATE");
+
+            replicate = mode ? atoi(mode) : 0;
+        }
 
         switch (swizzle) {
         case 0: /* R */
             out[0] = value;
-            /* Diagnostic: a mask texture sampled as RRR1 instead of R001. */
+            /* Diagnostic: mask textures sampled as RRR1 or RRRR instead of
+               R001. Unity's shadow compare reads gathered .z, so a depth map
+               must be replicated. */
             if (replicate && (base == SCE_GXM_TEXTURE_BASE_FORMAT_F32M ||
-                              base == SCE_GXM_TEXTURE_BASE_FORMAT_F32))
+                              base == SCE_GXM_TEXTURE_BASE_FORMAT_F32)) {
                 out[1] = out[2] = value;
-            else
+                out[3] = replicate >= 2 ? value : 255;
+            } else {
                 out[1] = out[2] = 0;
-            out[3] = 255;
+                out[3] = 255;
+            }
             break;
         case 1: /* 000R */
             out[0] = value;

@@ -373,6 +373,7 @@ typedef struct SceGxmVertexProgram {
     unsigned int streamCount;
     GLuint shader;
     uint32_t shader_hash;
+    uint32_t hint_signature;
     int refcount;
 } SceGxmVertexProgram;
 
@@ -383,6 +384,7 @@ typedef struct SceGxmFragmentProgram {
     SceGxmBlendInfo blendInfo;
     GLuint shader;
     uint32_t shader_hash;
+    uint32_t hint_signature;
     bool mask_update;
     int refcount;
 } SceGxmFragmentProgram;
@@ -660,7 +662,8 @@ static void gxm_compile_shader(GLuint shader, const char *source, const char *na
 static uint32_t gxm_hash_bytes(uint32_t hash, const void *data, size_t size);
 
 static uint32_t gxm_shader_cache_hash(const SceGxmProgram *program, GLenum stage,
-                                      const SceGxmVertexAttribute *attributes, unsigned int count)
+                                      const SceGxmVertexAttribute *attributes, unsigned int count,
+                                      uint32_t hint_signature)
 {
     uint32_t hash = 2166136261u;
     uint32_t version = GXM_SHADER_CACHE_VERSION;
@@ -674,8 +677,36 @@ static uint32_t gxm_shader_cache_hash(const SceGxmProgram *program, GLenum stage
     hash = gxm_hash_bytes(hash, &stage_byte, sizeof(stage_byte));
     hash = gxm_hash_bytes(hash, &size, sizeof(size));
     hash = gxm_hash_bytes(hash, program, size);
+    hash = gxm_hash_bytes(hash, &hint_signature, sizeof(hint_signature));
     if (attributes && count)
         hash = gxm_hash_bytes(hash, attributes, count * sizeof(*attributes));
+
+    return hash;
+}
+
+static uint32_t gxm_texture_hint_format(const SceGxmTextureInner *texture)
+{
+    if (!texture || !gxm_texture_get_data(texture))
+        return (uint32_t)SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR;
+    return (uint32_t)gxm_texture_get_format(texture);
+}
+
+static void gxm_texture_hint_formats(const SceGxmTextureInner *textures, uint32_t *out)
+{
+    for (unsigned int i = 0; i < SCE_GXM_MAX_TEXTURE_UNITS; i++)
+        out[i] = gxm_texture_hint_format(textures ? &textures[i] : NULL);
+}
+
+static uint32_t gxm_hint_signature(const uint32_t *formats, uint32_t color_format)
+{
+    uint32_t hash = 2166136261u;
+
+    for (unsigned int i = 0; i < SCE_GXM_MAX_TEXTURE_UNITS; i++) {
+        uint32_t key = vita3k_gxm_texture_hint_key(formats[i]);
+
+        hash = gxm_hash_bytes(hash, &key, sizeof(key));
+    }
+    hash = gxm_hash_bytes(hash, &color_format, sizeof(color_format));
 
     return hash;
 }
@@ -889,9 +920,14 @@ static char *gxm_patch_program_color(char *glsl, uint32_t hash)
 
 static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, const char *name,
                                    const SceGxmVertexAttribute *attributes, unsigned int count,
-                                   uint32_t *hash_out)
+                                   const uint32_t *fragment_formats, const uint32_t *vertex_formats,
+                                   uint32_t color_format, uint32_t *hash_out)
 {
-    uint32_t cache_hash = gxm_shader_cache_hash(program, stage, attributes, count);
+    uint32_t hint_signature =
+        gxm_hint_signature(stage == GL_VERTEX_SHADER ? vertex_formats : fragment_formats,
+                           color_format);
+    uint32_t cache_hash =
+        gxm_shader_cache_hash(program, stage, attributes, count, hint_signature);
     bool debug_colors = gxm_debug_program_colors();
     char *glsl = NULL;
     bool compiled = false;
@@ -930,9 +966,10 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
         g_shader_dump_hash = cache_hash;
         g_shader_dump_dir = dump_dir ? dump_dir : NULL;
 
-        if (!convert_gxp_to_spirv_c(&spirv, &num_instr, program, name, false, false, false, false,
-                                    attributes, count, false, false,
-                                    g_shader_dump_dir ? gxm_shader_dump : NULL)) {
+        if (!convert_gxp_to_spirv_c_hinted(&spirv, &num_instr, program, name, false, false, false,
+                                           false, attributes, count, fragment_formats,
+                                           vertex_formats, color_format, false, false,
+                                           g_shader_dump_dir ? gxm_shader_dump : NULL)) {
             g_shader_dump_dir = NULL;
             LOG("SceGxm: GXP -> SPIR-V failed for %s", name);
             return 0;
@@ -2424,20 +2461,16 @@ EXPORT(SceGxm, 0xB7BBA6D5, int, sceGxmShaderPatcherCreateVertexProgram,
     vp->streams = calloc(streamCount, sizeof(*streams));
     memcpy(vp->streams, streams, streamCount * sizeof(*streams));
 
-    if (g_gl)
-        vp->shader = gxm_translate_shader(programId->programHeader, GL_VERTEX_SHADER, "vert",
-                                          attributes, attributeCount, &vp->shader_hash);
-    if (g_gl && !vp->shader) {
-        free(vp->attributes);
-        free(vp->streams);
-        free(vp);
-        return SCE_GXM_ERROR_INVALID_VALUE;
-    }
+    /* Shaders are translated on the first draw, when the guest has bound the
+       textures whose formats the recompiler needs as hints. */
+    vp->shader = 0;
+    vp->shader_hash = 0;
+    vp->hint_signature = 0;
 
     *vertexProgram = vp;
 
     if (gxm_program_trace())
-        LOG("SceGxm: create vp %p shader %u program %p", (void *)vp, vp->shader,
+        LOG("SceGxm: create vp %p program %p (shader deferred)", (void *)vp,
             (const void *)programId->programHeader);
 
     return 0;
@@ -2488,18 +2521,14 @@ EXPORT(SceGxm, 0x4ED2E49D, int, sceGxmShaderPatcherCreateFragmentProgram,
         };
     }
 
-    if (g_gl)
-        fp->shader = gxm_translate_shader(programId->programHeader, GL_FRAGMENT_SHADER, "frag",
-                                          NULL, 0, &fp->shader_hash);
-    if (g_gl && !fp->shader) {
-        free(fp);
-        return SCE_GXM_ERROR_INVALID_VALUE;
-    }
+    fp->shader = 0;
+    fp->shader_hash = 0;
+    fp->hint_signature = 0;
 
     *fragmentProgram = fp;
 
     if (gxm_program_trace())
-        LOG("SceGxm: create fp %p shader %u program %p", (void *)fp, fp->shader,
+        LOG("SceGxm: create fp %p program %p (shader deferred)", (void *)fp,
             (const void *)programId->programHeader);
 
     return 0;
@@ -6728,6 +6757,51 @@ static void gxm_uniform_trace(SceGxmContext *context, unsigned int indexCount)
         vwords > 34 && vu ? vu[34] : 0, vwords > 35 && vu ? vu[35] : 0);
 }
 
+/*
+ * Compiles (or re-compiles) the guest programs with the texture formats the
+ * draw actually binds. The recompiler derives each fetch's component count
+ * from those formats, so a one-channel depth mask must not be described as
+ * RGBA: that changes the shape of the generated shadow lookup.
+ */
+static void gxm_ensure_shaders(SceGxmContext *context)
+{
+    uint32_t fragment_formats[SCE_GXM_MAX_TEXTURE_UNITS];
+    uint32_t vertex_formats[SCE_GXM_MAX_TEXTURE_UNITS];
+    uint32_t color_format = context->color_surface
+                                ? (uint32_t)context->color_surface->colorFormat
+                                : (uint32_t)SCE_GXM_COLOR_FORMAT_U8U8U8U8_ABGR;
+    uint32_t vs_signature;
+    uint32_t fs_signature;
+
+    gxm_texture_hint_formats(context->fragment_textures, fragment_formats);
+    gxm_texture_hint_formats(context->vertex_textures, vertex_formats);
+    vs_signature = gxm_hint_signature(vertex_formats, color_format);
+    fs_signature = gxm_hint_signature(fragment_formats, color_format);
+
+    if (context->vertex_program) {
+        SceGxmVertexProgram *vp = (SceGxmVertexProgram *)context->vertex_program;
+
+        if (vp->programId && (!vp->shader || vp->hint_signature != vs_signature)) {
+            vp->shader = gxm_translate_shader(vp->programId->programHeader, GL_VERTEX_SHADER, "vert",
+                                              vp->attributes, vp->attributeCount, fragment_formats,
+                                              vertex_formats, color_format, &vp->shader_hash);
+            vp->hint_signature = vs_signature;
+        }
+    }
+
+    if (context->fragment_program) {
+        SceGxmFragmentProgram *fp = (SceGxmFragmentProgram *)context->fragment_program;
+
+        /* The mask-update program is precompiled and has no GXP header. */
+        if (fp->programId && (!fp->shader || fp->hint_signature != fs_signature)) {
+            fp->shader = gxm_translate_shader(fp->programId->programHeader, GL_FRAGMENT_SHADER,
+                                              "frag", NULL, 0, fragment_formats, vertex_formats,
+                                              color_format, &fp->shader_hash);
+            fp->hint_signature = fs_signature;
+        }
+    }
+}
+
 static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
                            SceGxmIndexFormat indexType, const void *indexData,
                            unsigned int indexCount, unsigned int instances)
@@ -6788,6 +6862,8 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
         return SCE_GXM_ERROR_INVALID_VALUE;
     if (!g_gl)
         return 0;
+
+    gxm_ensure_shaders(context);
 
     program = gxm_get_linked_program(context->vertex_program, context->fragment_program, &linked);
     if (!program) {
