@@ -418,6 +418,13 @@ typedef struct SceGxmRenderTarget {
     uint32_t ds_format;
     bool ds_gl_valid;
     bool ds_sampled;
+    bool ds_cpu_read;
+
+    /* Depth exported to a sampleable R32F texture instead of guest memory. */
+    GLuint ds_copy_tex;
+    GLuint ds_copy_fbo;
+    uint32_t ds_copy_width;
+    uint32_t ds_copy_height;
 } SceGxmRenderTarget;
 
 #define GXM_MAX_RENDER_TARGETS 8
@@ -468,9 +475,44 @@ static void gxm_ds_note_read(const void *address)
     for (unsigned int i = 0; i < GXM_MAX_RENDER_TARGETS; i++) {
         SceGxmRenderTarget *rt = g_render_targets[i];
 
-        if (rt && (address == rt->ds_depth_data || address == rt->ds_stencil_data))
+        if (rt && (address == rt->ds_depth_data || address == rt->ds_stencil_data)) {
             rt->ds_sampled = true;
+            rt->ds_cpu_read = true;
+        }
     }
+}
+
+/*
+ * Guests only see the depth attachment through the guest surface memory. When
+ * that memory is sampled as a float texture we can skip the round trip: render
+ * the depth attachment into an R32F texture once per scene and sample that.
+ */
+static int gxm_depth_alias_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        const char *value = getenv("VITA2NATIVE_DEPTH_ALIAS");
+
+        enabled = value ? atoi(value) != 0 : 1;
+    }
+    return enabled;
+}
+
+static SceGxmRenderTarget *gxm_ds_alias_find(const void *data, uint32_t width, uint32_t height)
+{
+    if (!data)
+        return NULL;
+
+    for (unsigned int i = 0; i < GXM_MAX_RENDER_TARGETS; i++) {
+        SceGxmRenderTarget *rt = g_render_targets[i];
+
+        if (rt && rt->ds_copy_tex && rt->ds_depth_data == data && rt->ds_copy_width == width &&
+            rt->ds_copy_height == height)
+            return rt;
+    }
+
+    return NULL;
 }
 
 /* A guest transfer writing the depth memory makes the GL attachment stale. */
@@ -1466,6 +1508,25 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
             g_bound_texture[unit] = 0;
         }
         return false;
+    }
+
+    if (gxm_depth_alias_enabled() && target == GL_TEXTURE_2D && mip_count <= 1 &&
+        texture->gamma_mode == 0 &&
+        (gxm_texture_get_format(texture) & SCE_GXM_TEXTURE_BASE_FORMAT_MASK) ==
+            SCE_GXM_TEXTURE_BASE_FORMAT_F32M) {
+        SceGxmRenderTarget *depth_rt = gxm_ds_alias_find(data, width, height);
+
+        if (depth_rt) {
+            if (g_active_texture_unit != unit) {
+                g_gl->glActiveTexture(GL_TEXTURE0 + unit);
+                g_active_texture_unit = unit;
+            }
+            if (g_bound_texture[unit] != depth_rt->ds_copy_tex) {
+                g_gl->glBindTexture(GL_TEXTURE_2D, depth_rt->ds_copy_tex);
+                g_bound_texture[unit] = depth_rt->ds_copy_tex;
+            }
+            return true;
+        }
     }
 
     gxm_ds_note_texture(data);
@@ -2869,6 +2930,10 @@ EXPORT(SceGxm, 0x0B94C50A, int, sceGxmDestroyRenderTarget, SceGxmRenderTarget *r
             g_gl->glDeleteRenderbuffers(1, &renderTarget->msaa_color);
         if (renderTarget->msaa_depth)
             g_gl->glDeleteRenderbuffers(1, &renderTarget->msaa_depth);
+        if (renderTarget->ds_copy_fbo)
+            g_gl->glDeleteFramebuffers(1, &renderTarget->ds_copy_fbo);
+        if (renderTarget->ds_copy_tex)
+            g_gl->glDeleteTextures(1, &renderTarget->ds_copy_tex);
     }
     free(renderTarget);
     return 0;
@@ -3937,6 +4002,150 @@ static bool gxm_depth_export_read(GLuint depth_texture, uint32_t width, uint32_t
     return ok;
 }
 
+/*
+ * Exports the depth attachment into a sampleable R32F texture. Guest textures
+ * are uploaded top-row-first, which puts guest row 0 at GL v=0, so the export
+ * samples with a flipped v to land in the same orientation.
+ */
+static GLuint g_depth_copy_program;
+static GLint g_depth_copy_uniform;
+static bool g_depth_copy_unavailable;
+
+static bool gxm_depth_copy_program_ensure(void)
+{
+    static const char *const vert_src =
+        "#version 300 es\n"
+        "out vec2 v_uv;\n"
+        "void main() {\n"
+        "  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n"
+        "  v_uv = p;\n"
+        "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+        "}\n";
+    static const char *const frag_src =
+        "#version 300 es\n"
+        "precision highp float;\n"
+        "uniform sampler2D u_depth;\n"
+        "in vec2 v_uv;\n"
+        "out vec4 o_color;\n"
+        "void main() {\n"
+        "  o_color = vec4(texture(u_depth, vec2(v_uv.x, 1.0 - v_uv.y)).r);\n"
+        "}\n";
+    GLuint vs = 0, fs = 0;
+    GLint ok = 0;
+    char log[512];
+
+    if (g_depth_copy_program)
+        return true;
+    if (g_depth_copy_unavailable)
+        return false;
+
+    vs = g_gl->glCreateShader(GL_VERTEX_SHADER);
+    fs = g_gl->glCreateShader(GL_FRAGMENT_SHADER);
+    g_gl->glShaderSource(vs, 1, &vert_src, NULL);
+    g_gl->glCompileShader(vs);
+    g_gl->glGetShaderiv(vs, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        g_gl->glGetShaderInfoLog(vs, sizeof(log), NULL, log);
+        LOG("SceGxm: depth copy vertex shader failed: %s", log);
+        goto fail;
+    }
+    g_gl->glShaderSource(fs, 1, &frag_src, NULL);
+    g_gl->glCompileShader(fs);
+    g_gl->glGetShaderiv(fs, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        g_gl->glGetShaderInfoLog(fs, sizeof(log), NULL, log);
+        LOG("SceGxm: depth copy fragment shader failed: %s", log);
+        goto fail;
+    }
+
+    g_depth_copy_program = g_gl->glCreateProgram();
+    g_gl->glAttachShader(g_depth_copy_program, vs);
+    g_gl->glAttachShader(g_depth_copy_program, fs);
+    g_gl->glLinkProgram(g_depth_copy_program);
+    g_gl->glDeleteShader(vs);
+    g_gl->glDeleteShader(fs);
+    vs = fs = 0;
+    g_gl->glGetProgramiv(g_depth_copy_program, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        g_gl->glGetProgramInfoLog(g_depth_copy_program, sizeof(log), NULL, log);
+        LOG("SceGxm: depth copy link failed: %s", log);
+        g_gl->glDeleteProgram(g_depth_copy_program);
+        g_depth_copy_program = 0;
+        goto fail;
+    }
+    g_depth_copy_uniform = g_gl->glGetUniformLocation(g_depth_copy_program, "u_depth");
+    return true;
+
+fail:
+    if (vs)
+        g_gl->glDeleteShader(vs);
+    if (fs)
+        g_gl->glDeleteShader(fs);
+    g_depth_copy_unavailable = true;
+    return false;
+}
+
+static bool gxm_render_target_depth_copy(SceGxmRenderTarget *rt, uint32_t width, uint32_t height)
+{
+    uint64_t started;
+
+    if (!rt->depth_is_texture || !rt->depth || !gxm_depth_copy_program_ensure())
+        return false;
+
+    if (!rt->ds_copy_tex || rt->ds_copy_width != width || rt->ds_copy_height != height) {
+        if (!rt->ds_copy_tex)
+            g_gl->glGenTextures(1, &rt->ds_copy_tex);
+        g_gl->glBindTexture(GL_TEXTURE_2D, rt->ds_copy_tex);
+        g_gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, (GLsizei)width, (GLsizei)height, 0, GL_RED,
+                           GL_FLOAT, NULL);
+        g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        if (!rt->ds_copy_fbo)
+            g_gl->glGenFramebuffers(1, &rt->ds_copy_fbo);
+        g_gl->glBindFramebuffer(GL_FRAMEBUFFER, rt->ds_copy_fbo);
+        g_gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                                     rt->ds_copy_tex, 0);
+        if (g_gl->glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            LOG("SceGxm: depth copy framebuffer incomplete");
+            g_gl->glBindFramebuffer(GL_FRAMEBUFFER, rt->fbo);
+            return false;
+        }
+        rt->ds_copy_width = width;
+        rt->ds_copy_height = height;
+    }
+
+    g_gl->glBindFramebuffer(GL_FRAMEBUFFER, rt->ds_copy_fbo);
+    g_gl->glViewport(0, 0, (GLsizei)width, (GLsizei)height);
+    g_gl->glDisable(GL_DEPTH_TEST);
+    g_gl->glDisable(GL_STENCIL_TEST);
+    g_gl->glDisable(GL_BLEND);
+    g_gl->glDisable(GL_SCISSOR_TEST);
+    g_gl->glDisable(GL_CULL_FACE);
+    g_gl->glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    started = gxm_time_ns();
+    g_gl->glUseProgram(g_depth_copy_program);
+    g_gl->glActiveTexture(GL_TEXTURE0 + 7);
+    g_gl->glBindTexture(GL_TEXTURE_2D, rt->depth);
+    g_gl->glUniform1i(g_depth_copy_uniform, 7);
+    g_gl->glDrawArrays(GL_TRIANGLES, 0, 3);
+    if (getenv("VITA2NATIVE_DS_DEBUG")) {
+        g_gl->glFinish();
+        LOG("SceGxm: depth copy %ux%u took %.1f ms", width, height,
+            (double)(gxm_time_ns() - started) / 1e6);
+    }
+    g_gl->glUseProgram(0);
+    g_gl->glBindTexture(GL_TEXTURE_2D, 0);
+    g_gl->glBindFramebuffer(GL_FRAMEBUFFER, rt->fbo);
+
+    /* Unit 7 was bound behind the texture cache's back. */
+    memset(g_bound_texture, 0, sizeof(g_bound_texture));
+    memset(g_unit_texture_valid, 0, sizeof(g_unit_texture_valid));
+    g_active_texture_unit = UINT_MAX;
+    return true;
+}
+
 static bool gxm_stencil_export_ensure(uint32_t width, uint32_t height)
 {
     static const char *const vert_src =
@@ -4923,10 +5132,19 @@ convert_done:
 
         /* The readback only serves guests that sample the depth surface as a
            texture; otherwise it is a full-surface glReadPixels per scene. */
-        if (rt->ds_sampled)
-            gxm_ds_store_surface(rt, context->ds_store_surface);
-        else if (getenv("VITA2NATIVE_DS_DEBUG"))
-            LOG("SceGxm: depth store skipped: surface is never sampled");
+        {
+            GxmDsLayout layout = gxm_ds_layout((SceGxmDepthStencilFormat)rt->ds_format);
+            bool alias = gxm_depth_alias_enabled() && !rt->ds_cpu_read && rt->ds_sampled &&
+                         layout.depth_bits == 32 && !layout.has_stencil && !layout.packed;
+
+            if (alias && gxm_render_target_depth_copy(rt, rt->params.width, rt->params.height)) {
+                /* The guest samples the exported texture; guest memory stays stale. */
+            } else if (rt->ds_sampled) {
+                gxm_ds_store_surface(rt, context->ds_store_surface);
+            } else if (getenv("VITA2NATIVE_DS_DEBUG")) {
+                LOG("SceGxm: depth store skipped: surface is never sampled");
+            }
+        }
         g_profile_ds_ns += gxm_time_ns() - ds_started;
     }
 
