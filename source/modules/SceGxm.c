@@ -2141,8 +2141,31 @@ static void gxm_apply_region_clip(SceGxmContext *context)
     g_gl->glScissor(x, y, w, h);
 }
 
+static int gxm_no_cull(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_NO_CULL") != NULL;
+    return enabled;
+}
+
+static int gxm_no_depth_test(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_NO_DEPTH") != NULL;
+    return enabled;
+}
+
 static void gxm_apply_cull(SceGxmContext *context)
 {
+    if (gxm_no_cull()) {
+        g_gl->glDisable(GL_CULL_FACE);
+        return;
+    }
+
     switch (context->cull_mode) {
     case SCE_GXM_CULL_CW:
         g_gl->glEnable(GL_CULL_FACE);
@@ -2317,6 +2340,10 @@ static void gxm_flush_state(SceGxmContext *context, const GxmLinkedProgram *link
             g_gl->glDepthFunc(gxm_depth_func_to_gl(context->depth_func));
             g_gl->glDepthMask(context->depth_write == SCE_GXM_DEPTH_WRITE_ENABLED ? GL_TRUE
                                                                                   : GL_FALSE);
+            if (gxm_no_depth_test()) {
+                g_gl->glDisable(GL_DEPTH_TEST);
+                g_gl->glDepthMask(GL_FALSE);
+            }
         } else {
             g_gl->glDisable(GL_DEPTH_TEST);
             g_gl->glDepthMask(GL_FALSE);
