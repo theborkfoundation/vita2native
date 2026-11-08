@@ -2,6 +2,8 @@
 #include <psp2/kernel/error.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include "arm-encode.h"
 #include "host.h"
@@ -58,10 +60,14 @@ typedef struct {
 static int load_vpk(Jit *jit, const void *data, uint32_t size, void **entry,
                     LoadedModuleInfo *info);
 static int load_executable(Jit *jit, const uint8_t *data, void **entry, LoadedModuleInfo *info);
+
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0x100000
+#endif
 static int load_elf(Jit *jit, const void *data, void **entry, LoadedModuleInfo *info);
 static int load_self(Jit *jit, const void *data, void **entry, LoadedModuleInfo *info);
 static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_info_t *segments,
-                         int num_segments, LoadedModuleInfo *info);
+                         int num_segments, LoadedModuleInfo *info, bool fixed);
 static int resolve_imports(uintptr_t rx_base, uintptr_t rw_base, sce_module_imports_u_t *import,
                            void *importer);
 static int relocate(const void *reloc, uint32_t size, segment_info_t *segs, int num_segments);
@@ -405,7 +411,8 @@ static int load_self(Jit *jit, const void *data, void **entry, LoadedModuleInfo 
         }
     }
 
-    ret = load_segments(jit, entry, elf_hdr->e_entry, segments, elf_hdr->e_phnum, info);
+    ret = load_segments(jit, entry, elf_hdr->e_entry, segments, elf_hdr->e_phnum, info,
+                        elf_hdr->e_type == ET_SCE_EXEC);
 
 done:
     for (Elf32_Half i = 0; i < elf_hdr->e_phnum; i++) {
@@ -452,15 +459,31 @@ static int load_elf(Jit *jit, const void *data, void **entry, LoadedModuleInfo *
         segments[i].p_align = prog_hdrs[i].p_align;
     }
 
-    ret = load_segments(jit, entry, elf_hdr->e_entry, segments, elf_hdr->e_phnum, info);
+    ret = load_segments(jit, entry, elf_hdr->e_entry, segments, elf_hdr->e_phnum, info,
+                        elf_hdr->e_type == ET_SCE_EXEC);
 
     free(segments);
 
     return ret;
 }
 
+static void unmap_fixed_segments(segment_info_t *segments, int count, size_t page)
+{
+    for (int i = 0; i < count; i++) {
+        uintptr_t base, end;
+
+        if (segments[i].p_type != PT_LOAD || !segments[i].rw_addr)
+            continue;
+
+        base = segments[i].p_vaddr & ~(uintptr_t)(page - 1);
+        end = (segments[i].p_vaddr + segments[i].p_memsz + page - 1) & ~(uintptr_t)(page - 1);
+        munmap((void *)base, (size_t)(end - base));
+        segments[i].rw_addr = segments[i].rx_addr = 0;
+    }
+}
+
 static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_info_t *segments,
-                         int num_segments, LoadedModuleInfo *info)
+                         int num_segments, LoadedModuleInfo *info, bool fixed)
 {
     uint32_t code_size = 0, data_size = 0;
     uint32_t code_offset = 0, data_offset = 0;
@@ -473,6 +496,7 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
     int mod_info_idx;
     bool module_entry_is_thumb;
     Result res;
+    size_t page = 0;
 
     if (info) {
         memset(info, 0, sizeof(*info));
@@ -492,6 +516,59 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
 
     LOG("Total needed code size: 0x%" PRIx32, code_size);
     LOG("Total needed data size: 0x%" PRIx32, data_size);
+
+    page = (size_t)sysconf(_SC_PAGESIZE);
+    if (page == 0)
+        page = 4096;
+
+    /*
+     * ET_SCE_EXEC executables are linked at a fixed base and carry no
+     * relocation table, so every pointer inside them is a guest address
+     * (0x81000000 and up). They only work if the segments live at those
+     * addresses; the JIT path below rebases everything to host addresses.
+     */
+    if (fixed) {
+        memset(jit, 0, sizeof(*jit));
+        jit->fd = -1;
+
+        for (int i = 0; i < num_segments; i++) {
+            uintptr_t base, end;
+            size_t len;
+            void *mapped;
+
+            if (segments[i].p_type != PT_LOAD || !segments[i].p_memsz)
+                continue;
+
+            base = segments[i].p_vaddr & ~(uintptr_t)(page - 1);
+            end = (segments[i].p_vaddr + segments[i].p_memsz + page - 1) &
+                  ~(uintptr_t)(page - 1);
+            len = (size_t)(end - base);
+
+            mapped = mmap((void *)base, len, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+            if (mapped != (void *)base) {
+                LOG("Could not map segment %d at %p (got %p)", i, (void *)base, mapped);
+                if (mapped != MAP_FAILED)
+                    munmap(mapped, len);
+                unmap_fixed_segments(segments, i, page);
+                return -1;
+            }
+
+            segments[i].rx_addr = segments[i].rw_addr = segments[i].p_vaddr;
+
+            if (segments[i].p_filesz)
+                memcpy((void *)segments[i].rw_addr, segments[i].src_data, segments[i].p_filesz);
+            if (segments[i].p_memsz > segments[i].p_filesz)
+                memset((void *)(segments[i].rw_addr + segments[i].p_filesz), 0,
+                       segments[i].p_memsz - segments[i].p_filesz);
+
+            LOG("Segment %d mapped at %p (%zu bytes)", i, (void *)segments[i].p_vaddr, len);
+        }
+
+        data_addr = 0;
+        code_rw_addr = code_rx_addr = segments[0].p_vaddr;
+        goto segments_ready;
+    }
 
     res = jitCreate(jit, code_size + 0x1000);
     if (R_FAILED(res)) {
@@ -570,12 +647,19 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
         }
     }
 
+segments_ready:
     /* Get module info */
     LOG("Getting module info.");
     if ((mod_info_idx = elf_get_sce_module_info(e_entry, segments, &mod_info)) < 0) {
         LOG("Cannot find module info section.");
         goto err_free_data;
     }
+
+    if (fixed) {
+        /* Identity mapping: the module already lives at its guest addresses. */
+        code_rx_addr = code_rw_addr = segments[mod_info_idx].p_vaddr;
+    }
+
     LOG("Module name: %s", mod_info->name);
 
     {
@@ -660,6 +744,20 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
 
     /* Find the entry point (address belonging to the RX JIT area) */
     *entry = (char *)segments[mod_info_idx].rx_addr + mod_info->module_start;
+
+    if (fixed && !module_entry_is_thumb) {
+        const uint16_t *insn = (const uint16_t *)*entry;
+        uint16_t first = insn[0];
+
+        /*
+         * A fixed executable has no relocations, so module_is_thumb() has
+         * nothing to inspect. Entry points start with either an ARM push or a
+         * Thumb push/Thumb-2 branch, which is enough to tell them apart.
+         */
+        if ((first & 0xF800) == 0xF000 || (first & 0xFE00) == 0xB400)
+            module_entry_is_thumb = true;
+    }
+
     if (module_entry_is_thumb && *entry)
         *entry = (void *)((uintptr_t)*entry | 1);
     if (*entry == NULL) {
@@ -667,10 +765,35 @@ static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_inf
         goto err_free_data;
     }
 
-    res = jitTransitionToExecutable(jit);
-    if (R_FAILED(res)) {
-        LOG("Could not transition JIT to executable: 0x%" PRIx32, res);
-        goto err_free_data;
+    if (fixed) {
+        for (int i = 0; i < num_segments; i++) {
+            uintptr_t base, end;
+
+            if (segments[i].p_type != PT_LOAD || !(segments[i].p_flags & PF_X))
+                continue;
+
+            base = segments[i].p_vaddr & ~(uintptr_t)(page - 1);
+            end = (segments[i].p_vaddr + segments[i].p_memsz + page - 1) &
+                  ~(uintptr_t)(page - 1);
+            __builtin___clear_cache((char *)segments[i].p_vaddr,
+                                    (char *)(segments[i].p_vaddr + segments[i].p_memsz));
+            /*
+             * Keep the code writable: import stubs are re-patched whenever a
+             * module the guest imports from is loaded, and the patching writes
+             * MOVW/MOVT/BX sequences into the code segment.
+             */
+            if (mprotect((void *)base, (size_t)(end - base),
+                         PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+                LOG("Could not make segment %d executable", i);
+                goto err_free_data;
+            }
+        }
+    } else {
+        res = jitTransitionToExecutable(jit);
+        if (R_FAILED(res)) {
+            LOG("Could not transition JIT to executable: 0x%" PRIx32, res);
+            goto err_free_data;
+        }
     }
 
     if (info) {
@@ -687,6 +810,8 @@ err_free_data:
         module_unregister_guest_libraries(info->module_info);
     }
     free((void *)data_addr);
+    if (fixed && page)
+        unmap_fixed_segments(segments, num_segments, page);
 err_jit_close:
     jitClose(jit);
 
