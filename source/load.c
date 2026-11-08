@@ -170,8 +170,8 @@ int elf_check_vita_header(const Elf32_Ehdr *hdr)
         return -1;
     }
 
-    if (hdr->e_type != ET_SCE_RELEXEC) {
-        LOG("Only ET_SCE_RELEXEC files are supported.");
+    if (hdr->e_type != ET_SCE_RELEXEC && hdr->e_type != ET_SCE_EXEC) {
+        LOG("Unsupported ELF type 0x%x.", (unsigned)hdr->e_type);
         return -1;
     }
 
