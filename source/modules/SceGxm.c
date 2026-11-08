@@ -323,6 +323,8 @@ typedef struct SceGxmContext {
     uint32_t ubo_capacity[2];
     GLuint uniform_block[2];
     uint32_t uniform_block_capacity[2];
+    uint8_t *uniform_shadow[2];
+    uint32_t uniform_shadow_size[2];
     struct GXMRenderVertUniformBlock last_vert_info;
     struct GXMRenderFragUniformBlock last_frag_info;
     bool vert_info_valid;
@@ -513,6 +515,16 @@ static SceGxmRenderTarget *gxm_ds_alias_find(const void *data, uint32_t width, u
     }
 
     return NULL;
+}
+
+/* Diagnostic: render without multisampling to size up its GPU cost. */
+static int gxm_no_msaa(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_NO_MSAA") != NULL;
+    return enabled;
 }
 
 /* A guest transfer writing the depth memory makes the GL attachment stale. */
@@ -2045,13 +2057,26 @@ static void gxm_upload_uniforms(SceGxmContext *context, const SceGxmRegisteredPr
     }
 
     g_gl->glBindBuffer(GL_UNIFORM_BUFFER, buffer);
-    /*
-     * Orphan before filling: re-writing a buffer the queued draws still read
-     * forces Panfrost to copy or stall, and this runs once per batch.
-     */
-    g_gl->glBufferData(GL_UNIFORM_BUFFER, (GLsizeiptr)total, NULL, GL_STREAM_DRAW);
-    g_gl->glBufferSubData(GL_UNIFORM_BUFFER, 0, (GLsizeiptr)total, data);
-    context->uniform_block_capacity[index] = total;
+    if (!(context->uniform_shadow[index] && context->uniform_shadow_size[index] == total &&
+          memcmp(context->uniform_shadow[index], data, total) == 0)) {
+        if (context->uniform_shadow_size[index] != total) {
+            uint8_t *grown = realloc(context->uniform_shadow[index], total);
+
+            if (grown) {
+                context->uniform_shadow[index] = grown;
+                context->uniform_shadow_size[index] = total;
+            }
+        }
+        /*
+         * Orphan before filling: re-writing a buffer the queued draws still
+         * read forces Panfrost to copy or stall, and this runs per batch.
+         */
+        g_gl->glBufferData(GL_UNIFORM_BUFFER, (GLsizeiptr)total, NULL, GL_STREAM_DRAW);
+        g_gl->glBufferSubData(GL_UNIFORM_BUFFER, 0, (GLsizeiptr)total, data);
+        context->uniform_block_capacity[index] = total;
+        if (context->uniform_shadow[index] && context->uniform_shadow_size[index] == total)
+            memcpy(context->uniform_shadow[index], data, total);
+    }
 
     if (g_bound_uniform_block[index] != buffer) {
         g_gl->glBindBufferBase(GL_UNIFORM_BUFFER, index, buffer);
@@ -2595,6 +2620,8 @@ EXPORT(SceGxm, 0xEDDC5FB2, int, sceGxmDestroyContext, SceGxmContext *context)
     free(context->fragment_block_data);
     free(context->vertex_uniform_arena);
     free(context->fragment_uniform_arena);
+    free(context->uniform_shadow[0]);
+    free(context->uniform_shadow[1]);
     gxm_command_free(context->cmd_head);
     context->cmd_head = NULL;
     context->cmd_tail = NULL;
@@ -2872,7 +2899,7 @@ EXPORT(SceGxm, 0x207AF96B, int, sceGxmCreateRenderTarget, const SceGxmRenderTarg
         rt->samples = params->multisampleMode == SCE_GXM_MULTISAMPLE_4X   ? 4
                       : params->multisampleMode == SCE_GXM_MULTISAMPLE_2X ? 2
                                                                           : 0;
-        if (rt->samples && g_gl->glRenderbufferStorageMultisample) {
+        if (rt->samples && !gxm_no_msaa() && g_gl->glRenderbufferStorageMultisample) {
             rt->samples = rt->samples > 4 ? 4 : rt->samples;
             g_gl->glGenRenderbuffers(1, &rt->msaa_color);
             g_gl->glBindRenderbuffer(GL_RENDERBUFFER, rt->msaa_color);
@@ -8182,8 +8209,12 @@ EXPORT(SceGxm, 0xD6A2FF2F, int, sceGxmDestroyDeferredContext, SceGxmContext *con
     context->cmd_tail = NULL;
     free(context->vertex_uniform_arena);
     free(context->fragment_uniform_arena);
+    free(context->uniform_shadow[0]);
+    free(context->uniform_shadow[1]);
     context->vertex_uniform_arena = NULL;
     context->fragment_uniform_arena = NULL;
+    context->uniform_shadow[0] = NULL;
+    context->uniform_shadow[1] = NULL;
     context->deferred = false;
     if (g_current_context == context)
         g_current_context = NULL;
