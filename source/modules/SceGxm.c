@@ -404,7 +404,86 @@ typedef struct SceGxmRenderTarget {
     GLuint msaa_color;
     GLuint msaa_depth;
     uint32_t samples;
+
+    /*
+     * Depth/stencil bookkeeping. The GL attachment is persistent, and the
+     * guest only needs the contents written back when it samples the surface
+     * as a texture; otherwise the readback (a glReadPixels of the whole
+     * surface) is pure overhead.
+     */
+    const void *ds_depth_data;
+    const void *ds_stencil_data;
+    uint32_t ds_format;
+    bool ds_gl_valid;
+    bool ds_sampled;
 } SceGxmRenderTarget;
+
+#define GXM_MAX_RENDER_TARGETS 8
+static SceGxmRenderTarget *g_render_targets[GXM_MAX_RENDER_TARGETS];
+
+static void gxm_render_target_register(SceGxmRenderTarget *rt)
+{
+    for (unsigned int i = 0; i < GXM_MAX_RENDER_TARGETS; i++) {
+        if (!g_render_targets[i]) {
+            g_render_targets[i] = rt;
+            return;
+        }
+    }
+}
+
+static void gxm_render_target_unregister(SceGxmRenderTarget *rt)
+{
+    for (unsigned int i = 0; i < GXM_MAX_RENDER_TARGETS; i++) {
+        if (g_render_targets[i] == rt)
+            g_render_targets[i] = NULL;
+    }
+}
+
+/*
+ * Called for each uploaded texture: when a texture points at a render
+ * target's depth surface, the guest samples that surface, so its contents
+ * have to be written back to guest memory.
+ */
+static void gxm_ds_note_texture(const void *data)
+{
+    if (!data)
+        return;
+
+    for (unsigned int i = 0; i < GXM_MAX_RENDER_TARGETS; i++) {
+        SceGxmRenderTarget *rt = g_render_targets[i];
+
+        if (rt && (data == rt->ds_depth_data || data == rt->ds_stencil_data))
+            rt->ds_sampled = true;
+    }
+}
+
+/* A guest transfer reading the depth memory expects it to be current. */
+static void gxm_ds_note_read(const void *address)
+{
+    if (!address)
+        return;
+
+    for (unsigned int i = 0; i < GXM_MAX_RENDER_TARGETS; i++) {
+        SceGxmRenderTarget *rt = g_render_targets[i];
+
+        if (rt && (address == rt->ds_depth_data || address == rt->ds_stencil_data))
+            rt->ds_sampled = true;
+    }
+}
+
+/* A guest transfer writing the depth memory makes the GL attachment stale. */
+static void gxm_ds_note_write(const void *address)
+{
+    if (!address)
+        return;
+
+    for (unsigned int i = 0; i < GXM_MAX_RENDER_TARGETS; i++) {
+        SceGxmRenderTarget *rt = g_render_targets[i];
+
+        if (rt && (address == rt->ds_depth_data || address == rt->ds_stencil_data))
+            rt->ds_gl_valid = false;
+    }
+}
 
 typedef struct {
     uint32_t vs_hash;
@@ -1346,6 +1425,8 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
         }
         return false;
     }
+
+    gxm_ds_note_texture(data);
 
     cache = gxm_texture_cache_find(texture, data, target);
 
@@ -2700,11 +2781,13 @@ EXPORT(SceGxm, 0x207AF96B, int, sceGxmCreateRenderTarget, const SceGxmRenderTarg
     }
 
     *renderTarget = rt;
+    gxm_render_target_register(rt);
     return 0;
 }
 
 EXPORT(SceGxm, 0x0B94C50A, int, sceGxmDestroyRenderTarget, SceGxmRenderTarget *renderTarget)
 {
+    gxm_render_target_unregister(renderTarget);
     if (g_gl) {
         if (renderTarget->fbo)
             g_gl->glDeleteFramebuffers(1, &renderTarget->fbo);
@@ -3496,6 +3579,21 @@ static bool gxm_ds_load_surface(SceGxmRenderTarget *rt,
         return false;
     if (!(surface->zlsControl & SCE_GXM_DEPTH_STENCIL_ZLS_CTRL_FORCE_LOAD_BIT))
         return false;
+
+    /*
+     * The GL attachment is persistent. If this exact surface is the one the
+     * render target last rendered into, it already holds the contents; a
+     * reload from guest memory (and the clear that follows a false return)
+     * would be a no-op. This is only valid for depth textures, where the
+     * attachment survives between scenes.
+     */
+    if (rt->depth_is_texture && rt->ds_gl_valid && rt->ds_depth_data == surface->depthData &&
+        rt->ds_stencil_data == surface->stencilData &&
+        rt->ds_format == (uint32_t)gxm_ds_surface_get_format(surface)) {
+        if (getenv("VITA2NATIVE_DS_DEBUG"))
+            LOG("SceGxm: depth load skipped: attachment already current");
+        return true;
+    }
     if (!surface->depthData && !surface->stencilData)
         return false;
     if (!rt->depth_is_texture) {
@@ -3905,6 +4003,7 @@ static void gxm_ds_store_surface(SceGxmRenderTarget *rt,
     uint8_t *stencil_read = NULL;
     bool have_stencil = false;
     bool have_depth = false;
+    uint64_t read_started, read_ns, write_started;
     bool debug = getenv("VITA2NATIVE_DS_DEBUG") != NULL;
 
     if (debug)
@@ -3954,6 +4053,8 @@ static void gxm_ds_store_surface(SceGxmRenderTarget *rt,
 
     while (g_gl->glGetError() != GL_NO_ERROR) {
     }
+
+    read_started = gxm_time_ns();
 
     /*
      * Read the depth/stencil attachment. GLES 3.0 offers packed
@@ -4047,8 +4148,8 @@ static void gxm_ds_store_surface(SceGxmRenderTarget *rt,
         }
 
         if (debug)
-            LOG("SceGxm: depth store %ux%u packed=%d depth=%d stencil=%d", width, height,
-                packed_valid, have_depth, have_stencil);
+            LOG("SceGxm: depth store %ux%u stride=%u packed=%d layout_packed=%d depth=%d stencil=%d",
+                width, height, stride, packed_valid, layout.packed, have_depth, have_stencil);
 
         if (!have_depth && !have_stencil) {
             free(packed_values);
@@ -4057,47 +4158,64 @@ static void gxm_ds_store_surface(SceGxmRenderTarget *rt,
             return;
         }
 
-        for (uint32_t y = 0; y < height; y++) {
-            uint32_t src_y = height - 1 - y;
+        read_ns = gxm_time_ns() - read_started;
+        write_started = gxm_time_ns();
 
-            for (uint32_t x = 0; x < width; x++) {
-                size_t src = (size_t)src_y * width + x;
-                size_t depth_offset = gxm_ds_element_offset(surface, x, y, stride, 4);
-                size_t depth16_offset = gxm_ds_element_offset(surface, x, y, stride, 2);
-                size_t stencil_offset = gxm_ds_element_offset(surface, x, y, stride, 1);
-                float depth = 1.0f;
-                uint32_t d24;
-                uint8_t s8 = (uint8_t)(surface->backgroundControl &
-                                       SCE_GXM_DEPTH_STENCIL_BG_CTRL_STENCIL_MASK);
+        /* A linear packed S8D24 surface is word-identical to the GL readback,
+           so the common Unity case is a row copy with the Y flip. The
+           per-pixel path below handles every other layout. */
+        if (packed_valid && layout.packed && stride == width) {
+            for (uint32_t row = 0; row < height; row++)
+                memcpy(depth_data + (size_t)row * width * 4,
+                       packed_values + (size_t)(height - 1 - row) * width,
+                       (size_t)width * 4);
+        } else {
+            for (uint32_t y = 0; y < height; y++) {
+                uint32_t src_y = height - 1 - y;
 
-                if (packed_valid) {
-                    d24 = packed_values[src] >> 8;
-                    s8 = (uint8_t)(packed_values[src] & 0xFFu);
-                    depth = (float)d24 / 16777215.0f;
-                } else {
-                    if (depth_values)
-                        depth = depth_values[src];
-                    d24 = gxm_depth_to_u24(depth);
-                    if (stencil_read)
-                        s8 = stencil_read[src];
-                }
+                for (uint32_t x = 0; x < width; x++) {
+                    size_t src = (size_t)src_y * width + x;
+                    size_t depth_offset = gxm_ds_element_offset(surface, x, y, stride, 4);
+                    size_t depth16_offset = gxm_ds_element_offset(surface, x, y, stride, 2);
+                    size_t stencil_offset = gxm_ds_element_offset(surface, x, y, stride, 1);
+                    float depth = 1.0f;
+                    uint32_t d24;
+                    uint8_t s8 = (uint8_t)(surface->backgroundControl &
+                                           SCE_GXM_DEPTH_STENCIL_BG_CTRL_STENCIL_MASK);
 
-                if (layout.packed) {
-                    *(uint32_t *)(depth_data + depth_offset) = (d24 << 8) | s8;
-                } else {
-                    if (depth_data && have_depth) {
-                        if (layout.depth_bits == 32)
-                            *(float *)(depth_data + depth_offset) = depth;
-                        else if (layout.depth_bits == 16)
-                            *(uint16_t *)(depth_data + depth16_offset) =
-                                (uint16_t)(depth * 65535.0f + 0.5f);
+                    if (packed_valid) {
+                        d24 = packed_values[src] >> 8;
+                        s8 = (uint8_t)(packed_values[src] & 0xFFu);
+                        depth = (float)d24 / 16777215.0f;
+                    } else {
+                        if (depth_values)
+                            depth = depth_values[src];
+                        d24 = gxm_depth_to_u24(depth);
+                        if (stencil_read)
+                            s8 = stencil_read[src];
                     }
-                    if (stencil_data && have_stencil && layout.has_stencil)
-                        stencil_data[stencil_offset] = s8;
+
+                    if (layout.packed) {
+                        *(uint32_t *)(depth_data + depth_offset) = (d24 << 8) | s8;
+                    } else {
+                        if (depth_data && have_depth) {
+                            if (layout.depth_bits == 32)
+                                *(float *)(depth_data + depth_offset) = depth;
+                            else if (layout.depth_bits == 16)
+                                *(uint16_t *)(depth_data + depth16_offset) =
+                                    (uint16_t)(depth * 65535.0f + 0.5f);
+                        }
+                        if (stencil_data && have_stencil && layout.has_stencil)
+                            stencil_data[stencil_offset] = s8;
+                    }
                 }
             }
         }
     }
+
+    if (debug)
+        LOG("SceGxm: depth store timing: read %.1f ms write %.1f ms", (double)read_ns / 1e6,
+            (double)(gxm_time_ns() - write_started) / 1e6);
 
     free(packed_values);
     free(depth_values);
@@ -4714,9 +4832,19 @@ convert_done:
 
     if (context->ds_store_surface) {
         uint64_t ds_started = gxm_time_ns();
+        SceGxmRenderTarget *rt = (SceGxmRenderTarget *)context->render_target;
 
-        gxm_ds_store_surface((SceGxmRenderTarget *)context->render_target,
-                             context->ds_store_surface);
+        rt->ds_depth_data = context->ds_store_surface->depthData;
+        rt->ds_stencil_data = context->ds_store_surface->stencilData;
+        rt->ds_format = (uint32_t)gxm_ds_surface_get_format(context->ds_store_surface);
+        rt->ds_gl_valid = true;
+
+        /* The readback only serves guests that sample the depth surface as a
+           texture; otherwise it is a full-surface glReadPixels per scene. */
+        if (rt->ds_sampled)
+            gxm_ds_store_surface(rt, context->ds_store_surface);
+        else if (getenv("VITA2NATIVE_DS_DEBUG"))
+            LOG("SceGxm: depth store skipped: surface is never sampled");
         g_profile_ds_ns += gxm_time_ns() - ds_started;
     }
 
@@ -7569,6 +7697,8 @@ EXPORT(SceGxm, 0x69DDFF5E, int, sceGxmTransferFill, uint32_t color,
     if (!destAddress || !destWidth || !destHeight || destStride <= 0)
         return SCE_GXM_ERROR_INVALID_POINTER;
 
+    gxm_ds_note_write(destAddress);
+
     if (g_current_context)
         gxm_batch_flush(g_current_context);
 
@@ -7621,6 +7751,9 @@ EXPORT(SceGxm, 0x62312BF8, int, sceGxmTransferCopy, uint32_t width, uint32_t hei
 
     if (!srcAddress || !destAddress || !width || !height)
         return SCE_GXM_ERROR_INVALID_POINTER;
+
+    gxm_ds_note_read(srcAddress);
+    gxm_ds_note_write(destAddress);
 
     if (g_current_context)
         gxm_batch_flush(g_current_context);
