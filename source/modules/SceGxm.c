@@ -180,6 +180,8 @@ static uint64_t g_gxm_frame;
 static unsigned int g_profile_draws;
 static unsigned int g_profile_vertices;
 static unsigned int g_profile_uploads;
+static unsigned int g_f32m_uploads_frame;
+static uint64_t g_f32m_upload_ns_frame;
 static uint64_t g_profile_upload_bytes;
 static uint64_t g_profile_draw_ns;
 static uint64_t g_profile_flush_ns;
@@ -1203,8 +1205,8 @@ static void gxm_texture_params(const SceGxmTextureInner *texture, GLenum target,
 
     if (float_textures < 0)
         float_textures = getenv("VITA2NATIVE_FLOAT_TEXTURES") != NULL;
-    float_format = float_textures && (base == SCE_GXM_TEXTURE_BASE_FORMAT_F32 ||
-                                      base == SCE_GXM_TEXTURE_BASE_FORMAT_F32M);
+    float_format = base == SCE_GXM_TEXTURE_BASE_FORMAT_F32M ||
+                   (float_textures && base == SCE_GXM_TEXTURE_BASE_FORMAT_F32);
 
     /* GLES 3.0 does not make float textures filterable, so a LINEAR sampler on
        them leaves the texture incomplete on several drivers. Depth-like
@@ -1326,7 +1328,10 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
     uint8_t *rgba = NULL;
     float *f32 = NULL;
     bool float_upload;
+    bool depth_texture;
     uint64_t started;
+    uint64_t decode_ns = 0;
+    uint64_t upload_ns = 0;
 
     if (g_active_texture_unit != unit) {
         g_gl->glActiveTexture(GL_TEXTURE0 + unit);
@@ -1395,8 +1400,12 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
 
         if (float_textures < 0)
             float_textures = getenv("VITA2NATIVE_FLOAT_TEXTURES") != NULL;
-        float_upload = float_textures && (base == SCE_GXM_TEXTURE_BASE_FORMAT_F32 ||
-                                          base == SCE_GXM_TEXTURE_BASE_FORMAT_F32M);
+        depth_texture = base == SCE_GXM_TEXTURE_BASE_FORMAT_F32M;
+        /* A mask texture is a depth-like single float. Uploading it as R32F
+           keeps full precision and decodes ~5x faster than RGBA8. F32 (not
+           M) is only included when the diagnostic asks for it. */
+        float_upload = depth_texture ||
+                       (float_textures && base == SCE_GXM_TEXTURE_BASE_FORMAT_F32);
     }
 
     rgba = float_upload ? NULL : malloc((size_t)width * height * 4);
@@ -1422,6 +1431,7 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
         for (uint32_t level = 0; level < mip_count; level++) {
             GxmTextureLevel info;
             GLenum upload_target = target;
+            uint64_t level_started;
 
             if (gxm_texture_get_level(texture, face, level, &info) != 0)
                 continue;
@@ -1429,6 +1439,8 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
             /* Depth-like textures keep full float precision: quantising a
                shadow map to RGBA8 loses the comparisons Unity relies on. */
             if (float_upload) {
+                uint64_t level_started = gxm_time_ns();
+
                 if (gxm_texture_decode_level_f32(f32, texture, data, face, level) != 0) {
                     LOG("SceGxm: float texture decode failed: fmt=0x%08x %ux%u",
                         (unsigned)gxm_texture_get_format(texture), (unsigned)info.width,
@@ -1451,11 +1463,15 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
 
                 if (cube)
                     upload_target = GL_TEXTURE_CUBE_MAP_POSITIVE_X + face;
+                decode_ns += gxm_time_ns() - level_started;
+                level_started = gxm_time_ns();
                 g_gl->glTexImage2D(upload_target, (GLint)level, GL_R32F, (GLsizei)info.width,
                                    (GLsizei)info.height, 0, GL_RED, GL_FLOAT, f32);
+                upload_ns += gxm_time_ns() - level_started;
                 continue;
             }
 
+            level_started = gxm_time_ns();
             if (gxm_texture_decode_level_at(rgba, texture, data, face, level) != 0) {
                 static uint32_t warned_formats[8];
                 uint32_t format = (uint32_t)gxm_texture_get_format(texture);
@@ -1485,6 +1501,7 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
                 g_gl->glBindTexture(target, 0);
                 return false;
             }
+            decode_ns += gxm_time_ns() - level_started;
 
             if (force_lit_shadow && (uint32_t)gxm_texture_get_format(texture) == 0x13000000u &&
                 info.width == 512 && info.height == 512)
@@ -1547,8 +1564,10 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
                 }
             }
 
+            level_started = gxm_time_ns();
             g_gl->glTexImage2D(upload_target, (GLint)level, GL_RGBA8, (GLsizei)info.width,
                                (GLsizei)info.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+            upload_ns += gxm_time_ns() - level_started;
         }
     }
 
@@ -1556,10 +1575,17 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
     free(f32);
 
     if (getenv("VITA2NATIVE_TRACE_TEXTURES") || gxm_time_ns() - started >= 50000000ull) {
-        LOG("SceGxm: texture upload unit %u %ux%u fmt=0x%08x type=%d mips=%u data=%p "
-            "hash=%08x took %.1f ms",
-            unit, width, height, (uint32_t)gxm_texture_get_format(texture), (int)type, mip_count,
-            data, hash, (double)(gxm_time_ns() - started) / 1e6);
+        LOG("SceGxm: texture upload frame %llu unit %u %ux%u fmt=0x%08x type=%d mips=%u data=%p "
+            "hash=%08x decode %.1f ms upload %.1f ms total %.1f ms",
+            (unsigned long long)g_gxm_frame, unit, width, height,
+            (uint32_t)gxm_texture_get_format(texture), (int)type, mip_count, data, hash,
+            (double)decode_ns / 1e6, (double)upload_ns / 1e6,
+            (double)(gxm_time_ns() - started) / 1e6);
+    }
+
+    if (depth_texture) {
+        g_f32m_uploads_frame++;
+        g_f32m_upload_ns_frame += gxm_time_ns() - started;
     }
 
     {
@@ -1573,10 +1599,12 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
             if (traced < 12) {
                 const uint32_t *words = (const uint32_t *)data;
 
-                LOG("SceGxm: F32M sample %ux%u gamma=%u mips=%u data=%p words %08x %08x %08x %08x",
+                LOG("SceGxm: F32M sample %ux%u gamma=%u mips=%u data=%p words %08x %08x %08x %08x "
+                    "decode %.1f ms upload %.1f ms",
                     (unsigned)width, (unsigned)height, (unsigned)texture->gamma_mode,
                     (unsigned)mip_count, data, words ? words[0] : 0, words ? words[1] : 0,
-                    words ? words[2] : 0, words ? words[3] : 0);
+                    words ? words[2] : 0, words ? words[3] : 0, (double)decode_ns / 1e6,
+                    (double)upload_ns / 1e6);
                 traced++;
             }
         }
@@ -4524,6 +4552,20 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
         return SCE_GXM_ERROR_NOT_WITHIN_SCENE;
 
     context->in_scene = false;
+
+    if (g_f32m_uploads_frame) {
+        static int trace_f32m = -1;
+
+        if (trace_f32m < 0)
+            trace_f32m = getenv("VITA2NATIVE_TRACE_F32M") != NULL;
+        if (trace_f32m) {
+            LOG("SceGxm frame %llu: F32M uploads %u took %.1f ms", (unsigned long long)g_gxm_frame,
+                g_f32m_uploads_frame, (double)g_f32m_upload_ns_frame / 1e6);
+        }
+        g_f32m_uploads_frame = 0;
+        g_f32m_upload_ns_frame = 0;
+    }
+
     g_gxm_frame++;
 
     gxm_batch_flush(context);
