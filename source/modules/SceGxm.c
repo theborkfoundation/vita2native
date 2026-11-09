@@ -405,6 +405,8 @@ typedef struct SceGxmFragmentProgram {
 
 typedef struct SceGxmRenderTarget {
     SceGxmRenderTargetParams params;
+    uint32_t render_width;
+    uint32_t render_height;
     GLuint fbo;
     GLuint color;
     GLuint depth;
@@ -2448,24 +2450,58 @@ static void gxm_upload_uniforms(SceGxmContext *context, const SceGxmRegisteredPr
     }
 }
 
+/*
+ * Sub-native rendering: the Vita renders at 960x544, but the handheld panel is
+ * smaller and the GPU is fill-bound. VITA2NATIVE_RENDER_SCALE=0.6667 draws the
+ * 3D scene at 640x362 and lets the present pass upscale it.
+ */
+static float gxm_render_scale(void)
+{
+    static int loaded;
+    static float scale = 1.0f;
+
+    if (!loaded) {
+        const char *env = getenv("VITA2NATIVE_RENDER_SCALE");
+
+        loaded = 1;
+        if (env) {
+            float value = (float)atof(env);
+
+            if (value >= 0.25f && value <= 1.0f)
+                scale = value;
+        }
+        if (scale < 1.0f)
+            LOG("SceGxm: rendering at %.0f%% resolution", (double)(scale * 100.0f));
+    }
+
+    return scale;
+}
+
 static void gxm_apply_viewport(SceGxmContext *context)
 {
-    uint32_t width = context->render_target ? context->render_target->params.width : 960;
-    uint32_t height = context->render_target ? context->render_target->params.height : 544;
+    const SceGxmRenderTarget *rt = context->render_target;
+    uint32_t width = rt ? rt->render_width : 960;
+    uint32_t height = rt ? rt->render_height : 544;
+    float sx = rt ? (float)rt->render_width / (float)rt->params.width : 1.0f;
+    float sy = rt ? (float)rt->render_height / (float)rt->params.height : 1.0f;
 
     if (context->viewport_enable == SCE_GXM_VIEWPORT_ENABLED) {
         float ymin = context->viewport_y_offset + context->viewport_y_scale;
         float ymax = context->viewport_y_offset - context->viewport_y_scale - 1.0f;
-        int x = (int)(context->viewport_x_offset - fabsf(context->viewport_x_scale));
-        int y = (int)(ymin < ymax ? ymin : ymax);
-        int w = (int)fabsf(2.0f * context->viewport_x_scale);
-        int h = (int)fabsf(2.0f * context->viewport_y_scale);
+        float x = (context->viewport_x_offset - fabsf(context->viewport_x_scale)) * sx;
+        float y = (ymin < ymax ? ymin : ymax) * sy;
+        float w = fabsf(2.0f * context->viewport_x_scale) * sx;
+        float h = fabsf(2.0f * context->viewport_y_scale) * sy;
+        int ix = (int)(x + (x < 0.0f ? -0.5f : 0.5f));
+        int iy = (int)(y + (y < 0.0f ? -0.5f : 0.5f));
+        int iw = (int)(w + 0.5f);
+        int ih = (int)(h + 0.5f);
 
-        if (w < 1)
-            w = 1;
-        if (h < 1)
-            h = 1;
-        g_gl->glViewport(x, y, w, h);
+        if (iw < 1)
+            iw = 1;
+        if (ih < 1)
+            ih = 1;
+        g_gl->glViewport(ix, iy, iw, ih);
     } else {
         g_gl->glViewport(0, 0, (GLsizei)width, (GLsizei)height);
     }
@@ -2473,7 +2509,9 @@ static void gxm_apply_viewport(SceGxmContext *context)
 
 static void gxm_apply_region_clip(SceGxmContext *context)
 {
-    uint32_t height = context->render_target ? context->render_target->params.height : 544;
+    const SceGxmRenderTarget *rt = context->render_target;
+    float sx = rt ? (float)rt->render_width / (float)rt->params.width : 1.0f;
+    float sy = rt ? (float)rt->render_height / (float)rt->params.height : 1.0f;
     int x, y, w, h;
 
     switch (context->region_clip_mode) {
@@ -2491,10 +2529,13 @@ static void gxm_apply_region_clip(SceGxmContext *context)
         return;
     }
 
-    x = (int)context->region_clip_xmin;
-    y = (int)(height - context->region_clip_ymax - 1);
-    w = (int)(context->region_clip_xmax - context->region_clip_xmin + 1);
-    h = (int)(context->region_clip_ymax - context->region_clip_ymin + 1);
+    x = (int)(context->region_clip_xmin * sx + 0.5f);
+    y = (int)((rt ? (float)rt->params.height - 1.0f - context->region_clip_ymax :
+               543.0f - context->region_clip_ymax) *
+                  sy +
+              0.5f);
+    w = (int)((context->region_clip_xmax - context->region_clip_xmin + 1) * sx + 0.5f);
+    h = (int)((context->region_clip_ymax - context->region_clip_ymin + 1) * sy + 0.5f);
 
     if (w < 0)
         w = 0;
@@ -3274,13 +3315,23 @@ EXPORT(SceGxm, 0x207AF96B, int, sceGxmCreateRenderTarget, const SceGxmRenderTarg
         return SCE_KERNEL_ERROR_NO_MEMORY;
 
     rt->params = *params;
-    LOG("SceGxm: render target %ux%u multisampleMode=%u", params->width, params->height,
-        params->multisampleMode);
+    {
+        float scale = gxm_render_scale();
+
+        rt->render_width = (uint32_t)((float)params->width * scale + 0.5f);
+        rt->render_height = (uint32_t)((float)params->height * scale + 0.5f);
+        if (rt->render_width < 1)
+            rt->render_width = 1;
+        if (rt->render_height < 1)
+            rt->render_height = 1;
+    }
+    LOG("SceGxm: render target %ux%u (draw %ux%u) multisampleMode=%u", params->width,
+        params->height, rt->render_width, rt->render_height, params->multisampleMode);
     if (g_gl) {
         g_gl->glGenTextures(1, &rt->color);
         g_gl->glBindTexture(GL_TEXTURE_2D, rt->color);
-        g_gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, params->width, params->height, 0, GL_RGBA,
-                           GL_UNSIGNED_BYTE, NULL);
+        g_gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)rt->render_width,
+                           (GLsizei)rt->render_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
         g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
@@ -3299,8 +3350,9 @@ EXPORT(SceGxm, 0x207AF96B, int, sceGxmCreateRenderTarget, const SceGxmRenderTarg
         }
         g_gl->glGenTextures(1, &rt->depth);
         g_gl->glBindTexture(GL_TEXTURE_2D, rt->depth);
-        g_gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, params->width, params->height, 0,
-                           GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, NULL);
+        g_gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, (GLsizei)rt->render_width,
+                           (GLsizei)rt->render_height, 0, GL_DEPTH_STENCIL,
+                           GL_UNSIGNED_INT_24_8, NULL);
         g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         g_gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D,
@@ -3316,8 +3368,8 @@ EXPORT(SceGxm, 0x207AF96B, int, sceGxmCreateRenderTarget, const SceGxmRenderTarg
 
             g_gl->glGenRenderbuffers(1, &rt->depth_rb);
             g_gl->glBindRenderbuffer(GL_RENDERBUFFER, rt->depth_rb);
-            g_gl->glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, params->width,
-                                        params->height);
+            g_gl->glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8,
+                                        (GLsizei)rt->render_width, (GLsizei)rt->render_height);
             g_gl->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
                                             GL_RENDERBUFFER, rt->depth_rb);
             if (g_gl->glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
@@ -3333,12 +3385,13 @@ EXPORT(SceGxm, 0x207AF96B, int, sceGxmCreateRenderTarget, const SceGxmRenderTarg
             g_gl->glGenRenderbuffers(1, &rt->msaa_color);
             g_gl->glBindRenderbuffer(GL_RENDERBUFFER, rt->msaa_color);
             g_gl->glRenderbufferStorageMultisample(GL_RENDERBUFFER, (GLsizei)rt->samples, GL_RGBA8,
-                                                   params->width, params->height);
+                                                   (GLsizei)rt->render_width,
+                                                   (GLsizei)rt->render_height);
             g_gl->glGenRenderbuffers(1, &rt->msaa_depth);
             g_gl->glBindRenderbuffer(GL_RENDERBUFFER, rt->msaa_depth);
             g_gl->glRenderbufferStorageMultisample(GL_RENDERBUFFER, (GLsizei)rt->samples,
-                                                   GL_DEPTH24_STENCIL8, params->width,
-                                                   params->height);
+                                                   GL_DEPTH24_STENCIL8, (GLsizei)rt->render_width,
+                                                   (GLsizei)rt->render_height);
             g_gl->glGenFramebuffers(1, &rt->msaa_fbo);
             g_gl->glBindFramebuffer(GL_FRAMEBUFFER, rt->msaa_fbo);
             g_gl->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER,
@@ -4154,6 +4207,7 @@ static bool gxm_ds_load_surface(SceGxmRenderTarget *rt,
     GxmDsLayout layout;
     SceGxmDepthStencilFormat format;
     uint32_t stride, width, height, bg_stencil;
+    uint32_t rwidth, rheight;
     uint32_t ds_type;
     bool tiled;
     const uint8_t *depth_data;
@@ -4197,6 +4251,8 @@ static bool gxm_ds_load_surface(SceGxmRenderTarget *rt,
 
     width = (uint32_t)rt->params.width;
     height = (uint32_t)rt->params.height;
+    rwidth = rt->render_width;
+    rheight = rt->render_height;
     stride = gxm_ds_surface_get_stride_in_samples(surface);
     if (stride < width)
         stride = width;
@@ -4214,7 +4270,7 @@ static bool gxm_ds_load_surface(SceGxmRenderTarget *rt,
     {
         static uint32_t *packed_buffer;
         static size_t packed_capacity;
-        size_t needed = (size_t)width * height * sizeof(uint32_t);
+        size_t needed = (size_t)rwidth * rheight * sizeof(uint32_t);
 
         if (packed_capacity < needed) {
             uint32_t *grown = realloc(packed_buffer, needed);
@@ -4230,41 +4286,45 @@ static bool gxm_ds_load_surface(SceGxmRenderTarget *rt,
     /* A linear, packed S8D24 surface converts to the GL depth-stencil layout
        word for word, so it is a strided copy. Unity keeps depth surfaces in
        this layout and force-loads them whenever a pass samples depth. */
-    if (layout.packed && !tiled) {
+    if (layout.packed && !tiled && rwidth == width && rheight == height) {
         size_t row_bytes = (size_t)width * sizeof(uint32_t);
 
         for (uint32_t y = 0; y < height; y++)
             memcpy(packed + (size_t)y * width,
                    depth_data + (size_t)y * stride * sizeof(uint32_t), row_bytes);
     } else {
-        for (uint32_t y = 0; y < height; y++) {
-            for (uint32_t x = 0; x < width; x++) {
+        for (uint32_t y = 0; y < rheight; y++) {
+            uint32_t source_y = (uint32_t)((uint64_t)y * height / rheight);
+
+            for (uint32_t x = 0; x < rwidth; x++) {
+                uint32_t source_x = (uint32_t)((uint64_t)x * width / rwidth);
                 uint32_t d24 = 0xFFFFFFu;
                 uint32_t s8 = bg_stencil;
 
                 if (layout.packed) {
                     uint32_t value = *(const uint32_t *)(depth_data +
-                                                         gxm_ds_element_offset(surface, x, y,
-                                                                               stride, 4));
+                                                         gxm_ds_element_offset(surface, source_x,
+                                                                               source_y, stride, 4));
                     d24 = value >> 8;
                     s8 = value & 0xFFu;
                 } else {
                     if (layout.depth_bits == 32 && depth_data) {
                         float value = *(const float *)(depth_data +
-                                                       gxm_ds_element_offset(surface, x, y,
-                                                                             stride, 4));
+                                                       gxm_ds_element_offset(surface, source_x,
+                                                                             source_y, stride, 4));
                         d24 = gxm_depth_to_u24(value);
                     } else if (layout.depth_bits == 16 && depth_data) {
                         uint32_t value = *(const uint16_t *)(depth_data +
-                                                             gxm_ds_element_offset(surface, x, y,
-                                                                                   stride, 2));
+                                                             gxm_ds_element_offset(surface, source_x,
+                                                                                   source_y, stride, 2));
                         d24 = (uint32_t)(((uint64_t)value * 0xFFFFFFu + 0x7FFFu) / 0xFFFFu);
                     }
                     if (layout.has_stencil && stencil_data)
-                        s8 = stencil_data[gxm_ds_element_offset(surface, x, y, stride, 1)];
+                        s8 = stencil_data[gxm_ds_element_offset(surface, source_x, source_y, stride,
+                                                                1)];
                 }
 
-                packed[(size_t)y * width + x] = (d24 << 8) | s8;
+                packed[(size_t)y * rwidth + x] = (d24 << 8) | s8;
             }
         }
     }
@@ -4272,8 +4332,8 @@ static bool gxm_ds_load_surface(SceGxmRenderTarget *rt,
     while (g_gl->glGetError() != GL_NO_ERROR) {
     }
     g_gl->glBindTexture(GL_TEXTURE_2D, rt->depth);
-    g_gl->glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)width, (GLsizei)height, GL_DEPTH_STENCIL,
-                          GL_UNSIGNED_INT_24_8, packed);
+    g_gl->glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)rwidth, (GLsizei)rheight,
+                          GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, packed);
     loaded = g_gl->glGetError() == GL_NO_ERROR;
     if (!loaded)
         LOG("SceGxm: depth/stencil upload failed");
@@ -4727,6 +4787,7 @@ static void gxm_ds_store_surface(SceGxmRenderTarget *rt,
     GxmDsLayout layout;
     SceGxmDepthStencilFormat format;
     uint32_t stride, width, height;
+    uint32_t rwidth, rheight;
     uint8_t *depth_data;
     uint8_t *stencil_data;
     uint32_t *packed_values = NULL;
@@ -4770,6 +4831,8 @@ static void gxm_ds_store_surface(SceGxmRenderTarget *rt,
 
     width = (uint32_t)rt->params.width;
     height = (uint32_t)rt->params.height;
+    rwidth = rt->render_width;
+    rheight = rt->render_height;
     stride = gxm_ds_surface_get_stride_in_samples(surface);
     if (stride < width)
         stride = width;
@@ -4778,7 +4841,7 @@ static void gxm_ds_store_surface(SceGxmRenderTarget *rt,
                                            : surface->depthData);
     stencil_data = (uint8_t *)surface->stencilData;
 
-    packed_values = malloc((size_t)width * height * sizeof(uint32_t));
+    packed_values = malloc((size_t)rwidth * rheight * sizeof(uint32_t));
     if (!packed_values)
         return;
 
@@ -4798,7 +4861,7 @@ static void gxm_ds_store_surface(SceGxmRenderTarget *rt,
         GLenum packed_error;
 
         g_gl->glPixelStorei(GL_PACK_ALIGNMENT, 4);
-        g_gl->glReadPixels(0, 0, (GLsizei)width, (GLsizei)height, GL_DEPTH_STENCIL,
+        g_gl->glReadPixels(0, 0, (GLsizei)rwidth, (GLsizei)rheight, GL_DEPTH_STENCIL,
                            GL_UNSIGNED_INT_24_8, packed_values);
         packed_error = g_gl->glGetError();
         if (packed_error == GL_NO_ERROR) {
@@ -4808,17 +4871,17 @@ static void gxm_ds_store_surface(SceGxmRenderTarget *rt,
         }
 
         if (!have_depth) {
-            uint32_t *depth_bits = malloc((size_t)width * height * sizeof(uint32_t));
+            uint32_t *depth_bits = malloc((size_t)rwidth * rheight * sizeof(uint32_t));
             GLenum error = GL_NO_ERROR;
 
             if (depth_bits) {
-                g_gl->glReadPixels(0, 0, (GLsizei)width, (GLsizei)height, GL_DEPTH_COMPONENT,
+                g_gl->glReadPixels(0, 0, (GLsizei)rwidth, (GLsizei)rheight, GL_DEPTH_COMPONENT,
                                    GL_UNSIGNED_INT, depth_bits);
                 error = g_gl->glGetError();
                 if (error == GL_NO_ERROR) {
-                    depth_values = malloc((size_t)width * height * sizeof(float));
+                    depth_values = malloc((size_t)rwidth * rheight * sizeof(float));
                     if (depth_values) {
-                        for (size_t i = 0; i < (size_t)width * height; i++)
+                        for (size_t i = 0; i < (size_t)rwidth * rheight; i++)
                             depth_values[i] = (float)((double)depth_bits[i] / 4294967295.0);
                         have_depth = true;
                     }
@@ -4832,9 +4895,9 @@ static void gxm_ds_store_surface(SceGxmRenderTarget *rt,
         if (!have_depth) {
             GLenum error = GL_NO_ERROR;
 
-            depth_values = malloc((size_t)width * height * sizeof(float));
+            depth_values = malloc((size_t)rwidth * rheight * sizeof(float));
             if (depth_values) {
-                g_gl->glReadPixels(0, 0, (GLsizei)width, (GLsizei)height, GL_DEPTH_COMPONENT,
+                g_gl->glReadPixels(0, 0, (GLsizei)rwidth, (GLsizei)rheight, GL_DEPTH_COMPONENT,
                                    GL_FLOAT, depth_values);
                 error = g_gl->glGetError();
                 have_depth = error == GL_NO_ERROR;
@@ -4844,16 +4907,16 @@ static void gxm_ds_store_surface(SceGxmRenderTarget *rt,
         }
 
         if (!have_depth && rt->depth_is_texture && rt->depth && depth_values) {
-            have_depth = gxm_depth_export_read(rt->depth, width, height, depth_values);
+            have_depth = gxm_depth_export_read(rt->depth, rwidth, rheight, depth_values);
             g_gl->glBindFramebuffer(GL_FRAMEBUFFER, rt->fbo);
             if (debug)
                 LOG("SceGxm: depth export fallback %s", have_depth ? "ok" : "failed");
         }
 
         if (!have_stencil) {
-            stencil_read = malloc((size_t)width * height);
+            stencil_read = malloc((size_t)rwidth * rheight);
             if (stencil_read) {
-                g_gl->glReadPixels(0, 0, (GLsizei)width, (GLsizei)height, GL_STENCIL_INDEX,
+                g_gl->glReadPixels(0, 0, (GLsizei)rwidth, (GLsizei)rheight, GL_STENCIL_INDEX,
                                    GL_UNSIGNED_BYTE, stencil_read);
                 if (g_gl->glGetError() != GL_NO_ERROR) {
                     free(stencil_read);
@@ -4865,9 +4928,9 @@ static void gxm_ds_store_surface(SceGxmRenderTarget *rt,
         }
 
         if (!have_stencil && rt->depth_is_texture && rt->depth) {
-            stencil_read = malloc((size_t)width * height);
+            stencil_read = malloc((size_t)rwidth * rheight);
             if (stencil_read) {
-                have_stencil = gxm_stencil_export_read(rt->depth, width, height, stencil_read);
+                have_stencil = gxm_stencil_export_read(rt->depth, rwidth, rheight, stencil_read);
                 g_gl->glBindFramebuffer(GL_FRAMEBUFFER, rt->fbo);
                 if (!have_stencil) {
                     free(stencil_read);
@@ -4895,17 +4958,20 @@ static void gxm_ds_store_surface(SceGxmRenderTarget *rt,
         /* A linear packed S8D24 surface is word-identical to the GL readback,
            so the common Unity case is a row copy with the Y flip. The
            per-pixel path below handles every other layout. */
-        if (packed_valid && layout.packed && stride == width) {
+        if (packed_valid && layout.packed && stride == width && rwidth == width &&
+            rheight == height) {
             for (uint32_t row = 0; row < height; row++)
                 memcpy(depth_data + (size_t)row * width * 4,
                        packed_values + (size_t)(height - 1 - row) * width,
                        (size_t)width * 4);
         } else {
             for (uint32_t y = 0; y < height; y++) {
-                uint32_t src_y = height - 1 - y;
+                uint32_t scaled_y = (uint32_t)((uint64_t)y * rheight / height);
+                uint32_t src_y = rheight - 1 - scaled_y;
 
                 for (uint32_t x = 0; x < width; x++) {
-                    size_t src = (size_t)src_y * width + x;
+                    uint32_t scaled_x = (uint32_t)((uint64_t)x * rwidth / width);
+                    size_t src = (size_t)src_y * rwidth + scaled_x;
                     size_t depth_offset = gxm_ds_element_offset(surface, x, y, stride, 4);
                     size_t depth16_offset = gxm_ds_element_offset(surface, x, y, stride, 2);
                     size_t stencil_offset = gxm_ds_element_offset(surface, x, y, stride, 1);
@@ -4960,8 +5026,8 @@ static void gxm_resolve_render_target(SceGxmRenderTarget *rt)
 
     g_gl->glBindFramebuffer(GL_READ_FRAMEBUFFER, rt->msaa_fbo);
     g_gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, rt->fbo);
-    g_gl->glBlitFramebuffer(0, 0, (GLint)rt->params.width, (GLint)rt->params.height, 0, 0,
-                            (GLint)rt->params.width, (GLint)rt->params.height,
+    g_gl->glBlitFramebuffer(0, 0, (GLint)rt->render_width, (GLint)rt->render_height, 0, 0,
+                            (GLint)rt->render_width, (GLint)rt->render_height,
                             GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT,
                             GL_NEAREST);
     g_gl->glBindFramebuffer(GL_FRAMEBUFFER, rt->fbo);
@@ -4974,8 +5040,8 @@ static void gxm_blit_depth_stencil_to_msaa(SceGxmRenderTarget *rt)
 
     g_gl->glBindFramebuffer(GL_READ_FRAMEBUFFER, rt->fbo);
     g_gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, rt->msaa_fbo);
-    g_gl->glBlitFramebuffer(0, 0, (GLint)rt->params.width, (GLint)rt->params.height, 0, 0,
-                            (GLint)rt->params.width, (GLint)rt->params.height,
+    g_gl->glBlitFramebuffer(0, 0, (GLint)rt->render_width, (GLint)rt->render_height, 0, 0,
+                            (GLint)rt->render_width, (GLint)rt->render_height,
                             GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, GL_NEAREST);
     g_gl->glBindFramebuffer(GL_FRAMEBUFFER, rt->msaa_fbo);
 }
@@ -5029,7 +5095,8 @@ EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsign
         context->batch.active = false;
 
         g_gl->glBindFramebuffer(GL_FRAMEBUFFER, draw_fbo);
-        g_gl->glViewport(0, 0, renderTarget->params.width, renderTarget->params.height);
+        g_gl->glViewport(0, 0, (GLsizei)renderTarget->render_width,
+                         (GLsizei)renderTarget->render_height);
         g_gl->glDisable(GL_SCISSOR_TEST);
 
         {
