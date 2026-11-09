@@ -1,3 +1,4 @@
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -208,10 +209,76 @@ void lower_texture_query_lod(std::string &glsl)
     glsl.insert(insert_at, helpers);
 }
 
+/*
+ * GL_ARM_shader_framebuffer_fetch has no "inout" fragment outputs; the previous
+ * colour is the read-only built-in gl_LastFragColorARM. Rewrite the EXT-style
+ * output into a plain out and prime it at the start of main. SPIRV-Cross emits
+ * a copy of that output into the subpass input at the same point, so the
+ * shader body still reads the framebuffer contents it expects.
+ */
+void rewrite_arm_framebuffer_fetch(std::string &glsl)
+{
+    static const std::string ext_name = "GL_EXT_shader_framebuffer_fetch";
+    static const std::string arm_name = "GL_ARM_shader_framebuffer_fetch";
+    std::string output_name;
+    size_t position = 0;
+
+    while ((position = glsl.find(ext_name, position)) != std::string::npos) {
+        const size_t after = position + ext_name.size();
+
+        /* Leave GL_EXT_shader_framebuffer_fetch_non_coherent alone. */
+        if (after < glsl.size() && glsl[after] == '_') {
+            position = after;
+            continue;
+        }
+        glsl.replace(position, ext_name.size(), arm_name);
+        position += arm_name.size();
+    }
+
+    size_t line_start = 0;
+
+    while (line_start < glsl.size()) {
+        const size_t newline = glsl.find('\n', line_start);
+        const size_t line_end = newline == std::string::npos ? glsl.size() : newline + 1;
+        std::string line = glsl.substr(line_start, line_end - line_start);
+        const size_t inout_pos = line.find("inout ");
+        const size_t semicolon = line.rfind(';');
+
+        if (inout_pos != std::string::npos && semicolon != std::string::npos &&
+            line.find("layout(location") != std::string::npos) {
+            size_t name_end = semicolon;
+            size_t name_start;
+
+            while (name_end > 0 && std::isspace(static_cast<unsigned char>(line[name_end - 1])))
+                name_end--;
+            name_start = name_end;
+            while (name_start > 0 && !std::isspace(static_cast<unsigned char>(line[name_start - 1])))
+                name_start--;
+            output_name = line.substr(name_start, name_end - name_start);
+            line.replace(inout_pos, 6, "out    ");
+            glsl.replace(line_start, line_end - line_start, line);
+            break;
+        }
+
+        line_start = line_end;
+    }
+
+    if (output_name.empty())
+        return;
+
+    const size_t main_pos = glsl.find("void main()");
+    const size_t brace = main_pos == std::string::npos ? std::string::npos : glsl.find('{', main_pos);
+
+    if (brace == std::string::npos)
+        return;
+
+    glsl.insert(brace + 1, "\n    " + output_name + " = gl_LastFragColorARM;");
+}
+
 } // namespace
 
 extern "C" int spirv_to_glsl_es(const uint32_t *spirv, size_t num_words, bool framebuffer_fetch,
-                               char **glsl_out)
+                                bool arm_framebuffer_fetch, char **glsl_out)
 {
     if (!spirv || num_words == 0 || !glsl_out)
         return -1;
@@ -238,6 +305,8 @@ extern "C" int spirv_to_glsl_es(const uint32_t *spirv, size_t num_words, bool fr
 
         std::string glsl = compiler.compile();
         lower_texture_query_lod(glsl);
+        if (framebuffer_fetch && arm_framebuffer_fetch)
+            rewrite_arm_framebuffer_fetch(glsl);
 
         char *copy = static_cast<char *>(malloc(glsl.size() + 1));
         if (!copy)

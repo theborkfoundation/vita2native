@@ -1110,11 +1110,49 @@ static char *gxm_patch_program_color(char *glsl, uint32_t hash)
  * GXM fragment programs read the destination colour and blend in-shader; the
  * guest normally enables no GL blending at all. GLES exposes that through
  * GL_EXT_shader_framebuffer_fetch, where the fragment output is declared
- * "inout" and starts with the current pixel. Drivers without the extension
- * fall back to writing the shader result directly (which loses the compositing
- * the shader expects).
+ * "inout" and starts with the current pixel. Mali's proprietary driver only
+ * ships the ARM variant, which reads gl_LastFragColorARM instead. Drivers with
+ * neither extension fall back to writing the shader result directly (which
+ * loses the compositing the shader expects).
  */
+#define GXM_FETCH_NONE 0
+#define GXM_FETCH_EXT  1
+#define GXM_FETCH_ARM  2
+
 static int g_framebuffer_fetch_state;
+
+static bool gxm_extension_present(const char *extensions, const char *name)
+{
+    const size_t length = strlen(name);
+    const char *match = extensions;
+
+    while ((match = strstr(match, name))) {
+        if (match[length] == ' ' || match[length] == '\0')
+            return true;
+        match += length;
+    }
+
+    return false;
+}
+
+static int gxm_framebuffer_fetch_kind(void)
+{
+    static int kind = -1;
+
+    if (kind < 0) {
+        const char *extensions = g_gl ? (const char *)g_gl->glGetString(GL_EXTENSIONS) : NULL;
+
+        if (extensions && gxm_extension_present(extensions, "GL_EXT_shader_framebuffer_fetch"))
+            kind = GXM_FETCH_EXT;
+        else if (extensions &&
+                 gxm_extension_present(extensions, "GL_ARM_shader_framebuffer_fetch"))
+            kind = GXM_FETCH_ARM;
+        else
+            kind = GXM_FETCH_NONE;
+    }
+
+    return kind;
+}
 
 static bool gxm_framebuffer_fetch_enabled(void)
 {
@@ -1123,7 +1161,7 @@ static bool gxm_framebuffer_fetch_enabled(void)
     if (forced < 0)
         forced = getenv("VITA2NATIVE_NO_FB_FETCH") ? 0 : 1;
 
-    return forced && g_framebuffer_fetch_state >= 0;
+    return forced && g_framebuffer_fetch_state >= 0 && gxm_framebuffer_fetch_kind() != GXM_FETCH_NONE;
 }
 
 static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, const char *name,
@@ -1192,7 +1230,9 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
 
             g_shader_dump_dir = NULL;
 
-            if (spirv_to_glsl_es(spirv, num_instr, fetch, &glsl) != 0) {
+            if (spirv_to_glsl_es(spirv, num_instr, fetch,
+                                 fetch && gxm_framebuffer_fetch_kind() == GXM_FETCH_ARM, &glsl) !=
+                0) {
                 free(spirv);
                 LOG("SceGxm: SPIR-V -> GLSL ES failed for %s", name);
                 return 0;

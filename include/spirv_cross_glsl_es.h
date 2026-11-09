@@ -14,13 +14,14 @@ extern "C" {
  * Returns 0 on success and stores a malloc()ed NUL-terminated string in
  * *glsl_out (caller frees it). Returns -1 on failure.
  *
- * With framebuffer_fetch the shader reads its own colour attachment through
- * GL_EXT_shader_framebuffer_fetch, which is how GXM expresses in-shader
- * blending: the fragment output is turned into an "inout" variable whose
- * initial value is the destination pixel.
+ * With framebuffer_fetch the shader reads its own colour attachment, which is
+ * how GXM expresses in-shader blending: the fragment output is turned into an
+ * "inout" variable whose initial value is the destination pixel. With
+ * arm_framebuffer_fetch the ARM variant is emitted instead, since some Mali
+ * drivers only expose GL_ARM_shader_framebuffer_fetch (gl_LastFragColorARM).
  */
 int spirv_to_glsl_es(const uint32_t *spirv, size_t num_words, bool framebuffer_fetch,
-                     char **glsl_out);
+                     bool arm_framebuffer_fetch, char **glsl_out);
 
 #ifdef __cplusplus
 }
