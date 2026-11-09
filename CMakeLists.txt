@@ -70,6 +70,7 @@ add_executable(vita2native
     source/stb_image_impl.c
     source/stb_image_write_impl.c
     external/Vita3K/vita3k/renderer/src/texture/pvrt-dec.cpp
+    source/frame_profile.c
     source/load.c
     source/log.c
     source/main.c
@@ -361,6 +362,7 @@ if(BUILD_TESTING)
 
     add_executable(gfx_smoke
         tests/gfx_smoke.c
+        source/frame_profile.c
         source/host/host_gfx.c
         source/host/host_gfx_gl.c
         source/host/host_gfx_null.c
@@ -372,6 +374,7 @@ if(BUILD_TESTING)
 
     add_executable(gpu_bench
         tests/gpu_bench.c
+        source/frame_profile.c
         source/host/host_gfx.c
         source/host/host_gfx_gl.c
         source/host/host_gfx_null.c
@@ -382,6 +385,7 @@ if(BUILD_TESTING)
 
     add_executable(gl_thread_smoke
         tests/gl_thread_smoke.c
+        source/frame_profile.c
         source/host/host_gfx.c
         source/host/host_gfx_gl.c
         source/host/host_gfx_null.c
@@ -678,6 +682,7 @@ if(BUILD_TESTING)
 
     add_executable(egl_window_smoke
         tests/egl_window_smoke.c
+        source/frame_profile.c
         source/host/host_gfx.c
         source/host/host_gfx_gl.c
         source/host/host_gfx_null.c
@@ -691,6 +696,7 @@ if(BUILD_TESTING)
         add_executable(display_egl_smoke
             tests/display_egl_smoke.c
             source/modules/SceDisplay_linux.c
+            source/frame_profile.c
             source/host/host_gfx.c
             source/host/host_gfx_gl.c
             source/host/host_gfx_null.c
@@ -763,6 +769,7 @@ if(BUILD_TESTING)
 
     add_executable(gxm_draw_smoke
         tests/gxm_draw_smoke.c
+        source/frame_profile.c
         source/host/host_gfx.c
         source/host/host_gfx_gl.c
         source/host/host_gfx_null.c

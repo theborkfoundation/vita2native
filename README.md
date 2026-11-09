@@ -117,13 +117,19 @@ Panfrost's tiled/AFBC layouts make `glReadPixels` about twice as slow, and the
 port reads the whole frame back every frame for `sceDisplaySetFrameBuf`.
 
 Performance on that board: VitaShell runs at ~4.8 fps. Consecutive GXM draws
-that share program, textures, uniforms and render state are merged into one GL
-draw (847 guest draws become ~119 GL draws per frame); triangle strips are
-expanded to triangle lists when merging, because concatenating two strips would
-add bridging triangles. `VITA2NATIVE_PROFILE=1` prints the frame breakdown,
-`VITA2NATIVE_FPS=1` prints the frame rate, `VITA2NATIVE_TRACE_TEXTURES=1`
-logs texture uploads, `VITA2NATIVE_NO_BATCH=1` disables draw batching and
-`tests/gpu_bench.c` measures the driver in isolation.
+that share program, textures and render state are merged into one GL draw
+(847 guest draws become ~119 GL draws per frame); triangle strips are expanded
+to triangle lists when merging, because concatenating two strips would add
+bridging triangles. Draws with different vertex uniforms merge as well: each
+one appends its uniform container to a flat uniform buffer and the shader
+indexes it through a per-vertex draw slot. `VITA2NATIVE_PROFILE=1` prints the
+GXM breakdown, `VITA2NATIVE_PROFILE_FRAME=1` prints the whole-frame split
+(present, vblank, GXM and guest time), `VITA2NATIVE_FPS=1` prints the frame
+rate, `VITA2NATIVE_TRACE_TEXTURES=1` logs texture uploads,
+`VITA2NATIVE_NO_BATCH=1` disables draw batching, and `tests/gpu_bench.c`
+measures the driver in isolation. `VITA2NATIVE_NO_DRAW_UNIFORMS=1` and
+`VITA2NATIVE_NO_PRESENT_OVERLAP=1` disable the per-draw uniform and direct
+present overlap paths for A/B measurements.
 
 The same ARM32 build also runs on an R36S handheld (Rockchip RK3326, Mali-G31
 through the proprietary Bifrost blob, 640x480 DSI panel). Output goes through

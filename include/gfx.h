@@ -60,6 +60,17 @@ void host_gpu_finish(HostGpuDevice device);
 void host_gpu_thread_enter(HostGpuDevice device);
 
 /*
+ * The direct-present path needs to know whether the frame being presented was
+ * rendered on the calling thread. When it was, the blit is ordered after the
+ * scene draws in the same GL context and the frame does not need a full
+ * pipeline drain before it. host_gpu_note_render_thread() is called at
+ * sceGxmEndScene, host_gpu_last_present_is_current_thread() returns true when
+ * the last direct presentation ran on the calling thread.
+ */
+void host_gpu_note_render_thread(HostGpuDevice device);
+bool host_gpu_last_present_is_current_thread(HostGpuDevice device);
+
+/*
  * Presentation.
  *
  * attach_window() takes a native window handle (an X11 Window, or a Wayland

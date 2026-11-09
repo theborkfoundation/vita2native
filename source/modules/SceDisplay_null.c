@@ -4,6 +4,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "frame_profile.h"
 #include "host.h"
 #include "log.h"
 #include "module.h"
@@ -224,6 +225,8 @@ static void display_log_fps(void)
 EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayFrameBuf *pParam,
        SceDisplaySetBufSync sync)
 {
+    uint64_t present_started = frame_profile_enabled() ? frame_profile_now_ns() : 0;
+
     (void)sync;
 
     if (pParam)
@@ -263,6 +266,12 @@ EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayF
                                    (int)pParam->pitch);
         }
     }
+    if (present_started) {
+        uint64_t now = frame_profile_now_ns();
+
+        frame_profile_present(now - present_started, now);
+    }
+
     g_frame_count++;
     display_log_fps();
 
@@ -282,8 +291,12 @@ EXPORT(SceDisplayUser, 0x42AE6BBC, int, sceDisplayGetFrameBuf, SceDisplayFrameBu
 
 EXPORT(SceDisplay, 0x5795E898, int, sceDisplayWaitVblankStart, void)
 {
+    uint64_t started = frame_profile_enabled() ? frame_profile_now_ns() : 0;
+
     host_sleep_ns(16666667ull);
     __sync_fetch_and_add(&g_vcount, 1);
+    if (started)
+        frame_profile_add_vblank_wait(frame_profile_now_ns() - started);
     return 0;
 }
 
@@ -329,10 +342,14 @@ EXPORT(SceDisplay, 0xB6FDE0BA, int, sceDisplayGetVcount, void)
 
 static int display_wait_vblanks(unsigned int count)
 {
+    uint64_t started = frame_profile_enabled() ? frame_profile_now_ns() : 0;
+
     while (count--) {
         host_sleep_ns(16666667ull);
         __sync_fetch_and_add(&g_vcount, 1);
     }
+    if (started)
+        frame_profile_add_vblank_wait(frame_profile_now_ns() - started);
     return 0;
 }
 

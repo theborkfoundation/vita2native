@@ -18,6 +18,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "frame_profile.h"
 #include "host_gfx_gl.h"
 #include "host_gfx_internal.h"
 
@@ -1213,9 +1214,15 @@ static void gles_kms_recycle(HostGles *g)
     if (!k)
         return;
 
-    if (k->flip_pending && gles_kms_wait_flip(g, k) != 0) {
-        fprintf(stderr, "vita2native: KMS: page flip wait failed\n");
-        k->flip_pending = false;
+    if (k->flip_pending) {
+        uint64_t started = frame_profile_enabled() ? frame_profile_now_ns() : 0;
+
+        if (gles_kms_wait_flip(g, k) != 0) {
+            fprintf(stderr, "vita2native: KMS: page flip wait failed\n");
+            k->flip_pending = false;
+        }
+        if (started)
+            frame_profile_add_flip_wait(frame_profile_now_ns() - started);
     }
 
     /* The previous front buffer is no longer scanned out and can go back to
@@ -1406,6 +1413,25 @@ int host_gfx_gl_attach_window(HostGpuDevice device, void *native_window)
     return 0;
 }
 
+void host_gfx_gl_note_render_thread(HostGpuDevice device)
+{
+    HostGles *g = device ? device->impl : NULL;
+
+    if (!g)
+        return;
+
+    g->render_thread = pthread_self();
+    g->render_thread_valid = true;
+}
+
+bool host_gfx_gl_last_present_is_current_thread(HostGpuDevice device)
+{
+    HostGles *g = device ? device->impl : NULL;
+
+    return g && g->present_thread_valid &&
+           pthread_equal(pthread_self(), g->present_thread);
+}
+
 void host_gfx_gl_thread_enter(HostGpuDevice device)
 {
     HostGles *g = device ? device->impl : NULL;
@@ -1572,6 +1598,15 @@ void host_gfx_gl_set_overlay(HostGpuDevice device, const void *rgba, int width, 
     g->overlay_height = height;
 }
 
+static bool gles_present_overlap_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_NO_PRESENT_OVERLAP") == NULL;
+    return enabled != 0;
+}
+
 void host_gfx_gl_present_texture(HostGpuDevice device, unsigned int texture, int width, int height)
 {
     HostGles *g = device->impl;
@@ -1603,6 +1638,11 @@ void host_gfx_gl_present_texture(HostGpuDevice device, unsigned int texture, int
 
     if (!g->present_program && !gles_create_present_program(g))
         return;
+
+    /* The frame is about to be presented: remember which thread did it so
+       sceGxmEndScene can tell whether a pipeline drain is actually needed. */
+    g->present_thread = pthread_self();
+    g->present_thread_valid = true;
 
     if (kms)
         gles_kms_recycle(g);
@@ -1689,10 +1729,26 @@ void host_gfx_gl_present_texture(HostGpuDevice device, unsigned int texture, int
         }
     }
 
-    /* The presenting context is not the rendering one: finish the blit before
-       the guest is allowed to overwrite the source texture. */
-    if (kms)
-        g->glFinish();
+    /*
+     * The presenting context is not the rendering one: finish the blit before
+     * the guest is allowed to overwrite the source texture. When the same
+     * thread renders and presents, both use one EGL context and GL command
+     * order already guarantees the blit reads this frame's contents, so skip
+     * the drain and let the CPU run ahead.
+     */
+    if (kms) {
+        bool same_thread = gles_present_overlap_enabled() && g->render_thread_valid &&
+                           pthread_equal(pthread_self(), g->render_thread);
+
+        if (!same_thread)
+            g->glFinish();
+        else if (getenv("VITA2NATIVE_DIRECT_PRESENT_DEBUG")) {
+            static unsigned int logged;
+
+            if (logged++ < 20)
+                fprintf(stderr, "SceGxm present: same thread, skipping finish\n");
+        }
+    }
 
     if (!g->eglSwapBuffers(g->display, surface)) {
         fprintf(stderr, "vita2native: eglSwapBuffers failed: 0x%x\n", g->eglGetError());

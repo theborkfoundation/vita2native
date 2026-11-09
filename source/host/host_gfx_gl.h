@@ -3,6 +3,8 @@
 
 #define EGL_NO_PLATFORM_SPECIFIC_TYPES 1
 
+#include <pthread.h>
+
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
@@ -175,6 +177,12 @@ typedef struct HostGles {
     EGLContext *thread_contexts;
     EGLSurface *thread_surfaces;
     unsigned int thread_context_count;
+
+    /* Threads involved in direct presentation, see host_gpu_note_render_thread. */
+    pthread_t render_thread;
+    bool render_thread_valid;
+    pthread_t present_thread;
+    bool present_thread_valid;
 } HostGles;
 
 /* Returns the GLES implementation, or NULL when the null backend is active. */

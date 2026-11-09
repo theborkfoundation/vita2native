@@ -124,6 +124,22 @@ void host_gpu_thread_enter(HostGpuDevice device)
     host_gfx_gl_thread_enter(device);
 }
 
+void host_gpu_note_render_thread(HostGpuDevice device)
+{
+    if (!device || device->backend != HOST_GPU_BACKEND_GLES)
+        return;
+
+    host_gfx_gl_note_render_thread(device);
+}
+
+bool host_gpu_last_present_is_current_thread(HostGpuDevice device)
+{
+    if (!device || device->backend != HOST_GPU_BACKEND_GLES)
+        return false;
+
+    return host_gfx_gl_last_present_is_current_thread(device);
+}
+
 int host_gpu_attach_window(HostGpuDevice device, void *native_window)
 {
     if (!device || device->backend != HOST_GPU_BACKEND_GLES)

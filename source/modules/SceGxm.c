@@ -23,6 +23,7 @@
 #include <time.h>
 
 #include "config.h"
+#include "frame_profile.h"
 #include "fs.h"
 #include "gfx.h"
 #include "gxm/texture.h"
@@ -5567,6 +5568,16 @@ static int gxm_direct_present_enabled(void)
     return enabled;
 }
 
+/* Lets the same-thread present overlap be disabled for A/B comparisons. */
+static int gxm_present_overlap_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_NO_PRESENT_OVERLAP") == NULL;
+    return enabled;
+}
+
 EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
        const SceGxmNotification *vertexNotification, const SceGxmNotification *fragmentNotification)
 {
@@ -5618,9 +5629,38 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
     }
     g_gl->glBindFramebuffer(GL_FRAMEBUFFER, context->render_target->fbo);
     t0 = gxm_time_ns();
-    if (!gxm_skip_finish() || gxm_direct_present_enabled())
-        g_gl->glFinish();
+    host_gpu_note_render_thread(g_device);
+    {
+        bool finish = !gxm_skip_finish();
+
+        /*
+         * With direct presentation the blit reads the render target texture.
+         * When the last frame was presented on this same thread, that blit was
+         * recorded after these draws and the next scene's draws are recorded
+         * after it, so GL ordering already guarantees the right contents and
+         * draining here only serialises the CPU behind the GPU. If presentation
+         * runs on another thread, keep the drain: the presenting context cannot
+         * wait for this one's commands.
+         */
+        if (gxm_direct_present_enabled()) {
+            finish = gxm_present_overlap_enabled()
+                         ? !host_gpu_last_present_is_current_thread(g_device)
+                         : true;
+        }
+        if (getenv("VITA2NATIVE_DIRECT_PRESENT_DEBUG")) {
+            static unsigned int logged;
+
+            if (logged++ < 20)
+                LOG("SceGxm endScene %llu: direct=%d overlap=%d same_thread=%d finish=%d",
+                    (unsigned long long)g_gxm_frame, gxm_direct_present_enabled(),
+                    gxm_present_overlap_enabled(),
+                    host_gpu_last_present_is_current_thread(g_device), finish);
+        }
+        if (finish)
+            g_gl->glFinish();
+    }
     t1 = gxm_time_ns();
+    frame_profile_add_scene(t_resolve + (t1 - t0));
 
     if (gxm_probe_frame_end()) {
         uint32_t pw = context->batch.state.surface_width;
@@ -8781,8 +8821,13 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
         }
     }
 
+    {
+        uint64_t draw_ns = gxm_time_ns() - draw_started;
+
+        g_profile_draw_ns += draw_ns;
+        frame_profile_add_draw(draw_ns);
+    }
     gxm_gl_check("draw");
-    g_profile_draw_ns += gxm_time_ns() - draw_started;
 
     return 0;
 }
