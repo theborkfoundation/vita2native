@@ -1739,7 +1739,7 @@ static bool gxm_skip_finish(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_NO_FINISH") != NULL;
+        enabled = getenv("VITA2NATIVE_FINISH_PER_FRAME") == NULL;
     return enabled;
 }
 
