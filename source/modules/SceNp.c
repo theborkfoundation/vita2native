@@ -115,7 +115,6 @@ EXPORT(SceNpManager, 0x54060DF6, int, sceNpGetServiceState, uint32_t *state)
 
 EXPORT(SceNpManager, 0x3B0AE9A9, int, sceNpCheckCallback, void)
 {
-    NP_LOG("sceNpCheckCallback");
     uint32_t state = np_service_state();
 
     for (unsigned int i = 0; i < NP_MAX_SERVICE_CALLBACKS; i++) {
