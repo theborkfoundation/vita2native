@@ -135,6 +135,28 @@ static void *open_first(const char *const *names)
     return NULL;
 }
 
+/*
+ * SDL and the handheld launchers select the vendor EGL with
+ * SDL_VIDEO_EGL_DRIVER (ArkOS sets it to the Mali blob). Honor the same hint so
+ * our EGL and GLES libraries come from the same vendor; mixing Mesa EGL with a
+ * vendor GLES library yields a context glGetString() cannot query.
+ */
+static void *open_egl(const char *const *names)
+{
+    const char *forced = getenv("SDL_VIDEO_EGL_DRIVER");
+
+    if (forced && forced[0]) {
+        void *handle = dlopen(forced, RTLD_NOW | RTLD_LOCAL);
+
+        if (handle)
+            return handle;
+        fprintf(stderr, "vita2native: cannot load SDL_VIDEO_EGL_DRIVER='%s': %s\n", forced,
+                dlerror());
+    }
+
+    return open_first(names);
+}
+
 #define LOAD_EGL(g, name)                                                                          \
     do {                                                                                           \
         *(void **)(&(g)->name) = dlsym((g)->egl_lib, #name);                                       \
@@ -309,7 +331,7 @@ HostGpuDevice host_gfx_gl_create(const HostGpuConfig *config)
     g->height = config->height > 0 ? config->height : 1;
     g->drm_fd = -1;
 
-    g->egl_lib = open_first(egl_names);
+    g->egl_lib = open_egl(egl_names);
     if (!g->egl_lib)
         goto fail;
 
