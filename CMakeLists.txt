@@ -27,14 +27,16 @@ option(VITA2NATIVE_HEADLESS
 if(VITA2NATIVE_HEADLESS)
     set(VITA2NATIVE_DISPLAY_SOURCE source/modules/SceDisplay_null.c)
     set(VITA2NATIVE_CTRL_SOURCE source/modules/SceCtrl_null.c)
-    set(VITA2NATIVE_AUDIO_SOURCE source/modules/SceAudio_null.c)
 else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(SDL2 REQUIRED sdl2)
     set(VITA2NATIVE_DISPLAY_SOURCE source/modules/SceDisplay_linux.c)
     set(VITA2NATIVE_CTRL_SOURCE source/modules/SceCtrl_linux.c)
-    set(VITA2NATIVE_AUDIO_SOURCE source/modules/SceAudio_sdl.c)
 endif()
+
+# The SDL audio backend dlopens SDL, so it works for both builds: the ARM
+# headless build has no SDL at link time but the target has it at runtime.
+set(VITA2NATIVE_AUDIO_SOURCE source/modules/SceAudio_sdl.c)
 
 option(VITA2NATIVE_ALLOW_64BIT
     "Allow 64-bit builds for syntax checks (cannot execute Vita code)" OFF)
