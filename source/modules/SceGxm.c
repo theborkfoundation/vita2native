@@ -201,6 +201,8 @@ static unsigned int g_profile_ds_load_calls;
 static uint64_t g_profile_uniform_ns;
 static uint64_t g_profile_state_ns;
 static uint64_t g_profile_texture_ns;
+static uint64_t g_profile_hash_ns;
+static unsigned int g_profile_hash_calls;
 static uint64_t g_profile_attrib_ns;
 /* Why the previous batch could not absorb the next draw. */
 static unsigned int g_batch_break_state;
@@ -1400,14 +1402,49 @@ static uint32_t gxm_hash_bytes(uint32_t hash, const void *data, size_t size)
 
         memcpy(&word, bytes + i, sizeof(word));
         hash = (hash ^ word) * 16777619u;
-        hash ^= hash >> 13;
     }
-    for (; i < size; i++) {
-        hash ^= bytes[i];
-        hash *= 16777619u;
-    }
+    for (; i < size; i++)
+        hash = (hash ^ bytes[i]) * 16777619u;
 
     return hash;
+}
+
+/*
+ * Texture content hash. Large level textures are re-validated periodically,
+ * so this runs over many megabytes; four independent FNV lanes keep the
+ * multiply chain from serialising. Not used for on-disk shader cache keys.
+ */
+static uint32_t gxm_hash_bytes_fast(uint32_t hash, const void *data, size_t size)
+{
+    const uint8_t *bytes = data;
+    uint32_t h0 = hash;
+    uint32_t h1 = hash ^ 0x9e3779b9u;
+    uint32_t h2 = hash ^ 0x85ebca6bu;
+    uint32_t h3 = hash ^ 0xc2b2ae35u;
+    size_t i = 0;
+
+    for (; i + 16 <= size; i += 16) {
+        uint32_t a, b, c, d;
+
+        memcpy(&a, bytes + i + 0, sizeof(a));
+        memcpy(&b, bytes + i + 4, sizeof(b));
+        memcpy(&c, bytes + i + 8, sizeof(c));
+        memcpy(&d, bytes + i + 12, sizeof(d));
+        h0 = (h0 ^ a) * 16777619u;
+        h1 = (h1 ^ b) * 16777619u;
+        h2 = (h2 ^ c) * 16777619u;
+        h3 = (h3 ^ d) * 16777619u;
+    }
+    for (; i + 4 <= size; i += 4) {
+        uint32_t word;
+
+        memcpy(&word, bytes + i, sizeof(word));
+        h0 = (h0 ^ word) * 16777619u;
+    }
+    for (; i < size; i++)
+        h0 = (h0 ^ bytes[i]) * 16777619u;
+
+    return (h0 * 16777619u) ^ (h1 * 16777619u) ^ (h2 * 16777619u) ^ (h3 * 16777619u);
 }
 
 static uint32_t gxm_texture_hash(const SceGxmTextureInner *texture, const void *data)
@@ -1428,7 +1465,7 @@ static uint32_t gxm_texture_hash(const SceGxmTextureInner *texture, const void *
 
             if (gxm_texture_get_level(texture, face, level, &info) != 0)
                 break;
-            hash = gxm_hash_bytes(hash, (const uint8_t *)data + info.offset, info.size);
+            hash = gxm_hash_bytes_fast(hash, (const uint8_t *)data + info.offset, info.size);
         }
     }
 
@@ -1438,7 +1475,7 @@ static uint32_t gxm_texture_hash(const SceGxmTextureInner *texture, const void *
 
         if (!palette)
             return 0;
-        hash = gxm_hash_bytes(hash, palette, entries * sizeof(uint32_t));
+        hash = gxm_hash_bytes_fast(hash, palette, entries * sizeof(uint32_t));
     }
 
     return hash;
@@ -1741,8 +1778,19 @@ static int gxm_texture_hash_interval(const GxmTextureCache *cache)
         return forced;
     if (!cache)
         return 1;
-    return cache->stable_checks >= GXM_STABLE_TEXTURE_CHECKS ? GXM_STABLE_TEXTURE_HASH_INTERVAL
-                                                            : 1;
+    if (cache->stable_checks < GXM_STABLE_TEXTURE_CHECKS)
+        return 1;
+
+    /* Re-validating a large stable texture costs proportionally more; stretch
+       the interval so a scene full of atlases does not spend milliseconds per
+       frame proving that nothing changed. */
+    {
+        uint64_t interval = GXM_STABLE_TEXTURE_HASH_INTERVAL + cache->bytes / (512u * 1024u);
+
+        if (interval > 120)
+            interval = 120;
+        return (int)interval;
+    }
 }
 
 static bool gxm_skip_finish(void)
@@ -1859,7 +1907,13 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
         }
     }
 
-    hash = gxm_texture_hash(texture, data);
+    {
+        uint64_t hash_started = gxm_time_ns();
+
+        hash = gxm_texture_hash(texture, data);
+        g_profile_hash_ns += gxm_time_ns() - hash_started;
+        g_profile_hash_calls++;
+    }
 
     if (cache && cache->hash == hash) {
         cache->hash_frame = g_gxm_frame;
@@ -5253,7 +5307,8 @@ static void gxm_profile_frame(uint64_t resolve_ns, uint64_t finish_ns, uint64_t 
         return;
 
     LOG("SceGxm: %u frames in %.1f s: draw %.1f (flush %.1f [commit %.1f gldraw %.1f], uniform "
-        "%.1f state %.1f tex %.1f attrib %.1f) resolve %.1f finish %.1f read %.1f convert "
+        "%.1f state %.1f tex %.1f (hash %.1f/%.1f) attrib %.1f) resolve %.1f finish %.1f read "
+        "%.1f convert "
         "%.1f ds %.1f ms/frame (%u gl draws, %u vertices, %u uploads/%llu KiB per frame, "
         "dsload %.1f ms (%u calls), "
         "breaks %u/%u/%u/%u [prog%u prim%u dfunc%u dwrite%u dbias%u stencil%u])",
@@ -5261,6 +5316,7 @@ static void gxm_profile_frame(uint64_t resolve_ns, uint64_t finish_ns, uint64_t 
         (double)g_profile_flush_ns / frames / 1e6, (double)g_profile_commit_ns / frames / 1e6,
         (double)g_profile_gldraw_ns / frames / 1e6, (double)g_profile_uniform_ns / frames / 1e6,
         (double)g_profile_state_ns / frames / 1e6, (double)g_profile_texture_ns / frames / 1e6,
+        (double)g_profile_hash_ns / frames / 1e6, (double)g_profile_hash_calls / frames,
         (double)g_profile_attrib_ns / frames / 1e6, (double)resolve_total / frames / 1e6,
         (double)finish_total / frames / 1e6, (double)read_total / frames / 1e6,
         (double)convert_total / frames / 1e6, (double)g_profile_ds_ns / frames / 1e6,
@@ -5287,6 +5343,8 @@ static void gxm_profile_frame(uint64_t resolve_ns, uint64_t finish_ns, uint64_t 
     g_profile_uniform_ns = 0;
     g_profile_state_ns = 0;
     g_profile_texture_ns = 0;
+    g_profile_hash_ns = 0;
+    g_profile_hash_calls = 0;
     g_profile_attrib_ns = 0;
     g_batch_break_state = 0;
     g_batch_break_program = 0;
@@ -7356,6 +7414,16 @@ static void gxm_trace_batch(SceGxmContext *context, const GxmDrawBatch *batch)
     }
 }
 
+static bool gxm_sync_draws(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_SYNC_DRAWS") != NULL;
+
+    return enabled != 0;
+}
+
 static void gxm_batch_flush(SceGxmContext *context)
 {
     GxmDrawBatch *batch = &context->batch;
@@ -7492,6 +7560,39 @@ static void gxm_batch_flush(SceGxmContext *context)
         g_profile_draws++;
         g_profile_vertices += batch->index_count;
         g_profile_gldraw_ns += gxm_time_ns() - commit_started;
+
+        /* Diagnostic: drain after every draw to attribute GPU time to a single
+           program/coverage. This serialises the pipeline, so it is opt-in. */
+        if (gxm_sync_draws()) {
+            static unsigned int logged;
+            uint64_t gpu_started = gxm_time_ns();
+            uint64_t gpu_ns;
+
+            g_gl->glFinish();
+            gpu_ns = gxm_time_ns() - gpu_started;
+            if (gpu_ns >= 1000000ull && logged < 64) {
+                const SceGxmFragmentProgram *fp = context->fragment_program;
+
+                LOG("SceGxm: slow draw %u prog=%u vs=%08x fs=%08x idx=%u inst=%u gpu=%.2f ms "
+                    "surf=%ux%u vp=%.0f,%.0f %.0fx%.0f clip=%u,%u..%u,%u depth=%d/%d "
+                    "stencil=%d blend=%d/%d/%d/%d",
+                    logged, batch->state.program,
+                    batch->vertex_program ? batch->vertex_program->shader_hash : 0,
+                    batch->fragment_program ? batch->fragment_program->shader_hash : 0,
+                    batch->index_count, batch->state.instances, (double)gpu_ns / 1e6,
+                    batch->state.surface_width, batch->state.surface_height,
+                    batch->state.viewport_x_offset, batch->state.viewport_y_offset,
+                    batch->state.viewport_x_scale, batch->state.viewport_y_scale,
+                    batch->state.region_clip_xmin, batch->state.region_clip_ymin,
+                    batch->state.region_clip_xmax, batch->state.region_clip_ymax,
+                    (int)batch->state.depth_func, (int)batch->state.depth_write,
+                    (int)batch->state.front_stencil_func,
+                    fp ? (int)fp->blendInfo.colorFunc : -1,
+                    fp ? (int)fp->blendInfo.colorSrc : -1, fp ? (int)fp->blendInfo.colorDst : -1,
+                    fp ? (int)fp->blendInfo.colorMask : -1);
+                logged++;
+            }
+        }
     }
 
     g_profile_flush_ns += gxm_time_ns() - started;
