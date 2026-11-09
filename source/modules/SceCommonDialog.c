@@ -383,15 +383,137 @@ static int dialog_init_unsupported(void)
     return SCE_COMMON_DIALOG_ERROR_NOT_SUPPORTED;
 }
 
-/* Save-data dialogs are probed by titles that prefer the system UI; log them
-   separately so a title stuck on "Saving..." can be diagnosed. */
-static int dialog_savedata_init(void)
+/*
+ * Save-data dialogs. The game uses these as the UI around its own save/load
+ * job: the dialog params carry the slot id and the message, while the actual
+ * file I/O goes through SceAppUtil/ sceIo. We accept the dialog and report it
+ * finished immediately so the save job can proceed. For the "Failed to load"
+ * user message we answer "No" (overwrite), otherwise the game retries a
+ * non-existent save forever.
+ */
+#define SAVEDATA_DIALOG_MODE_FIXED 1
+#define SAVEDATA_DIALOG_MODE_LIST 2
+#define SAVEDATA_DIALOG_MODE_USER_MSG 3
+#define SAVEDATA_DIALOG_MODE_SYSTEM_MSG 4
+
+static bool g_savedata_dialog_active;
+static int g_savedata_dialog_mode;
+static int g_savedata_dialog_disp;
+static uint32_t g_savedata_dialog_slot;
+static uint32_t g_savedata_dialog_userdata;
+static const char *g_savedata_dialog_message;
+
+static bool savedata_debug(void)
 {
-    if (getenv("VITA2NATIVE_INPUT_DEBUG")) {
-        fprintf(stderr, "vita2native: SaveDataDialogInit -> not supported\n");
+    return getenv("VITA2NATIVE_INPUT_DEBUG") != NULL;
+}
+
+static int dialog_savedata_init(const void *param_ptr)
+{
+    const uint8_t *p = param_ptr;
+    uint32_t fixed_param, user_param, sys_param;
+
+    if (!p)
+        return SCE_COMMON_DIALOG_ERROR_NULL;
+
+    g_savedata_dialog_mode = *(const int32_t *)(p + 0x50);
+    g_savedata_dialog_disp = *(const int32_t *)(p + 0x54);
+    fixed_param = *(const uint32_t *)(p + 0x58);
+    user_param = *(const uint32_t *)(p + 0x60);
+    sys_param = *(const uint32_t *)(p + 0x64);
+    g_savedata_dialog_userdata = *(const uint32_t *)(p + 0x78);
+    g_savedata_dialog_slot = 0;
+    g_savedata_dialog_message = NULL;
+
+    if (g_savedata_dialog_mode == SAVEDATA_DIALOG_MODE_FIXED && fixed_param) {
+        g_savedata_dialog_slot = *(const uint32_t *)fixed_param;
+    } else if (g_savedata_dialog_mode == SAVEDATA_DIALOG_MODE_USER_MSG && user_param) {
+        const uint8_t *msg = (const uint8_t *)user_param;
+
+        g_savedata_dialog_slot = *(const uint32_t *)(msg + 8);
+        g_savedata_dialog_message = *(const char *const *)(msg + 4);
+    } else if (g_savedata_dialog_mode == SAVEDATA_DIALOG_MODE_SYSTEM_MSG && sys_param) {
+        g_savedata_dialog_slot = *(const uint32_t *)((const uint8_t *)sys_param + 8);
+    }
+
+    g_savedata_dialog_active = true;
+    if (savedata_debug()) {
+        fprintf(stderr,
+                "vita2native: SaveDataDialog init mode=%d disp=%d slot=%u msg=%s\n",
+                g_savedata_dialog_mode, g_savedata_dialog_disp, g_savedata_dialog_slot,
+                g_savedata_dialog_message ? g_savedata_dialog_message : "(none)");
         fflush(stderr);
     }
-    return SCE_COMMON_DIALOG_ERROR_NOT_SUPPORTED;
+    return 0;
+}
+
+static int dialog_savedata_get_status(void)
+{
+    return g_savedata_dialog_active ? SCE_COMMON_DIALOG_STATUS_FINISHED
+                                    : SCE_COMMON_DIALOG_STATUS_NONE;
+}
+
+static int dialog_savedata_get_substatus(void)
+{
+    return g_savedata_dialog_active ? SCE_COMMON_DIALOG_STATUS_FINISHED
+                                    : SCE_COMMON_DIALOG_STATUS_NONE;
+}
+
+static int dialog_savedata_get_result(void *result_ptr)
+{
+    struct {
+        int32_t mode;
+        int32_t result;
+        int32_t button_id;
+        int32_t slot_id;
+        uint32_t slot_info;
+        uint32_t userdata;
+        uint8_t reserved[32];
+    } *result = result_ptr;
+    int32_t button_id = SCE_MSG_DIALOG_BUTTON_ID_YES;
+
+    if (!result)
+        return SCE_COMMON_DIALOG_ERROR_NULL;
+
+    if (g_savedata_dialog_mode == SAVEDATA_DIALOG_MODE_USER_MSG &&
+        g_savedata_dialog_message && strstr(g_savedata_dialog_message, "Failed to load"))
+        button_id = SCE_MSG_DIALOG_BUTTON_ID_NO;
+
+    memset(result, 0, sizeof(*result));
+    result->mode = g_savedata_dialog_mode;
+    result->result = SCE_COMMON_DIALOG_RESULT_OK;
+    result->button_id = button_id;
+    result->slot_id = (int32_t)g_savedata_dialog_slot;
+    result->userdata = g_savedata_dialog_userdata;
+
+    if (savedata_debug()) {
+        fprintf(stderr, "vita2native: SaveDataDialog get_result mode=%d button=%d slot=%u\n",
+                g_savedata_dialog_mode, button_id, g_savedata_dialog_slot);
+        fflush(stderr);
+    }
+    return 0;
+}
+
+static int dialog_savedata_finish(void)
+{
+    return 0;
+}
+
+static int dialog_savedata_continue(void)
+{
+    return 0;
+}
+
+static int dialog_savedata_term(void)
+{
+    g_savedata_dialog_active = false;
+    return 0;
+}
+
+static int dialog_savedata_abort(void)
+{
+    g_savedata_dialog_active = false;
+    return 0;
 }
 
 static int dialog_status_none(void)

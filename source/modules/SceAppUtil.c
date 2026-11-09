@@ -153,6 +153,9 @@ EXPORT(SceAppUtil, 0x7E8FE96A, int, sceAppUtilSaveDataSlotCreate, unsigned int s
 
     (void)mount_point;
 
+    if (save_debug())
+        fprintf(stderr, "vita2native: SaveDataSlotCreate slot=%u param=%p\n", slot_id, (void *)param);
+
     if (slot_param_path(slot_id, path, sizeof(path)) != 0)
         return SCE_APPUTIL_ERROR_PARAMETER;
     if (stat(path, &st) == 0)
@@ -174,6 +177,9 @@ EXPORT(SceAppUtil, 0x266A7646, int, sceAppUtilSaveDataSlotDelete, unsigned int s
 
     (void)mount_point;
 
+    if (save_debug())
+        fprintf(stderr, "vita2native: SaveDataSlotDelete slot=%u\n", slot_id);
+
     if (slot_param_path(slot_id, path, sizeof(path)) != 0)
         return SCE_APPUTIL_ERROR_PARAMETER;
     if (stat(path, &st) != 0)
@@ -187,6 +193,10 @@ EXPORT(SceAppUtil, 0x98630136, int, sceAppUtilSaveDataSlotSetParam, unsigned int
        SceAppUtilSaveDataSlotParam *param, SceAppUtilSaveDataMountPoint *mount_point)
 {
     (void)mount_point;
+
+    if (save_debug())
+        fprintf(stderr, "vita2native: SaveDataSlotSetParam slot=%u param=%p\n", slot_id,
+                (void *)param);
 
     return write_slot_param(slot_id, param);
 }
@@ -314,6 +324,10 @@ EXPORT(SceAppUtil, 0xD1C6AB8E, int, sceAppUtilSaveDataDataRemove, SceAppUtilSave
 {
     (void)mount_point;
 
+    if (save_debug())
+        fprintf(stderr, "vita2native: SaveDataDataRemove slot=%u files=%u\n",
+                slot ? slot->id : 0u, file_num);
+
     if (!files && file_num)
         return SCE_APPUTIL_ERROR_PARAMETER;
 
@@ -343,6 +357,9 @@ EXPORT(SceAppUtil, 0xC560E716, int, sceAppUtilSaveDataGetQuota, SceSize *quota_s
 {
     (void)mount_point;
 
+    if (save_debug())
+        fprintf(stderr, "vita2native: SaveDataGetQuota\n");
+
     if (!quota_size_kb || !used_size_kb)
         return SCE_APPUTIL_ERROR_PARAMETER;
 
@@ -355,11 +372,15 @@ EXPORT(SceAppUtil, 0xC560E716, int, sceAppUtilSaveDataGetQuota, SceSize *quota_s
 
 EXPORT(SceAppUtil, 0xE61453B0, int, sceAppUtilSaveDataMount, void)
 {
+    if (save_debug())
+        fprintf(stderr, "vita2native: SaveDataMount\n");
     return 0;
 }
 
 EXPORT(SceAppUtil, 0xEB720402, int, sceAppUtilSaveDataUmount, void)
 {
+    if (save_debug())
+        fprintf(stderr, "vita2native: SaveDataUmount\n");
     return 0;
 }
 
@@ -616,6 +637,9 @@ EXPORT(SceAppUtil, 0xE6057A85, int, sceAppUtilSaveDataSlotSearch, void *work_buf
     (void)cond;
     (void)result;
     (void)mount_point;
+
+    if (save_debug())
+        fprintf(stderr, "vita2native: SaveDataSlotSearch (unsupported)\n");
 
     /* Slots can be read individually with SlotGetParam; enumeration needs the
        search condition/result layouts, which are not in the public headers. */
