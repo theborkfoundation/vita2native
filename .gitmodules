@@ -1,6 +1,6 @@
 [submodule "Vita3K"]
 	path = external/Vita3K
-	url = https://github.com/Vita3K/Vita3K.git
+	url = https://github.com/theborkfoundation/Vita3K.git
 	shallow = true
 [submodule "vita-headers"]
 	path = external/vita-headers
