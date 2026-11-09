@@ -561,15 +561,22 @@ static const uint8_t one_channel_maps[8][4] = {
     { 4, 4, 4, 0 }, /* R111 */
 };
 
+/*
+ * The fast path reads texel bytes back-to-front (values[0] is the most
+ * significant byte, matching unpack_lettered), so the two-channel table is
+ * indexed against that reversed order: source channel 0 lives in values[1].
+ * Getting this backwards turns the alpha byte of a U8U8 luminance/alpha
+ * texture (used for font atlases) into 255 and paints opaque boxes.
+ */
 static const uint8_t two_channel_maps[8][4] = {
-    { 0, 1, 5, 4 }, /* GR */
-    { 0, 1, 5, 5 }, /* 00GR */
-    { 0, 0, 0, 1 }, /* GRRR */
-    { 1, 1, 1, 0 }, /* RGGG */
-    { 0, 1, 0, 1 }, /* GRGR */
-    { 1, 0, 5, 5 }, /* 00RG */
-    { 0, 1, 5, 4 },
-    { 0, 1, 5, 4 },
+    { 1, 0, 5, 4 }, /* GR */
+    { 1, 0, 5, 5 }, /* 00GR */
+    { 1, 1, 1, 0 }, /* GRRR */
+    { 0, 0, 0, 1 }, /* RGGG */
+    { 1, 0, 1, 0 }, /* GRGR */
+    { 0, 1, 5, 5 }, /* 00RG */
+    { 1, 0, 5, 4 },
+    { 1, 0, 5, 4 },
 };
 
 static uint8_t letter_map_index(const char *letters, uint32_t count, char channel)
