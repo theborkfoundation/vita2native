@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -12,8 +13,14 @@ extern "C" {
  * Translate SPIR-V (as emitted by Vita3K's GXP recompiler) to GLSL ES 3.10.
  * Returns 0 on success and stores a malloc()ed NUL-terminated string in
  * *glsl_out (caller frees it). Returns -1 on failure.
+ *
+ * With framebuffer_fetch the shader reads its own colour attachment through
+ * GL_EXT_shader_framebuffer_fetch, which is how GXM expresses in-shader
+ * blending: the fragment output is turned into an "inout" variable whose
+ * initial value is the destination pixel.
  */
-int spirv_to_glsl_es(const uint32_t *spirv, size_t num_words, char **glsl_out);
+int spirv_to_glsl_es(const uint32_t *spirv, size_t num_words, bool framebuffer_fetch,
+                     char **glsl_out);
 
 #ifdef __cplusplus
 }

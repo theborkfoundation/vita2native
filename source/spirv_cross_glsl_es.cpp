@@ -210,7 +210,8 @@ void lower_texture_query_lod(std::string &glsl)
 
 } // namespace
 
-extern "C" int spirv_to_glsl_es(const uint32_t *spirv, size_t num_words, char **glsl_out)
+extern "C" int spirv_to_glsl_es(const uint32_t *spirv, size_t num_words, bool framebuffer_fetch,
+                               char **glsl_out)
 {
     if (!spirv || num_words == 0 || !glsl_out)
         return -1;
@@ -228,6 +229,12 @@ extern "C" int spirv_to_glsl_es(const uint32_t *spirv, size_t num_words, char **
         options.version = 310;
         options.enable_420pack_extension = false;
         compiler.set_common_options(options);
+
+        /* The recompiler declares the destination colour as a subpass input at
+           attachment 0; GLES exposes the same thing as an inout fragment output
+           initialised with the framebuffer contents. */
+        if (framebuffer_fetch)
+            compiler.remap_ext_framebuffer_fetch(0, 0, true);
 
         std::string glsl = compiler.compile();
         lower_texture_query_lod(glsl);

@@ -91,7 +91,7 @@ int main(int argc, char **argv)
 
     printf("SPIR-V words: %u\n", num_instr);
 
-    if (spirv_to_glsl_es(spirv, num_instr, &glsl) != 0) {
+    if (spirv_to_glsl_es(spirv, num_instr, false, &glsl) != 0) {
         fprintf(stderr, "SPIR-V -> GLSL ES failed\n");
         free(spirv);
         return 1;

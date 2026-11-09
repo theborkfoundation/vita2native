@@ -19,6 +19,9 @@
     X(PFNGLGETSTRINGPROC, glGetString)                                                             \
     X(PFNGLGETINTEGERVPROC, glGetIntegerv)                                                         \
     X(PFNGLGETERRORPROC, glGetError)                                                               \
+    X(PFNGLISENABLEDPROC, glIsEnabled)                                                             \
+    X(PFNGLGETACTIVEUNIFORMPROC, glGetActiveUniform)                                               \
+    X(PFNGLGETUNIFORMIVPROC, glGetUniformiv)                                                       \
     X(PFNGLCLEARCOLORPROC, glClearColor)                                                           \
     X(PFNGLCLEARPROC, glClear)                                                                     \
     X(PFNGLREADPIXELSPROC, glReadPixels)                                                           \
