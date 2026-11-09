@@ -28,5 +28,6 @@ void host_gfx_gl_detach_window(HostGpuDevice device);
 void host_gfx_gl_present_framebuffer(HostGpuDevice device, const void *rgba, int width, int height,
                                      int stride_in_pixels);
 void host_gfx_gl_present_texture(HostGpuDevice device, unsigned int texture, int width, int height);
+void host_gfx_gl_set_overlay(HostGpuDevice device, const void *rgba, int width, int height);
 
 #endif

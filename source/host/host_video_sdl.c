@@ -259,6 +259,11 @@ struct HostVideo {
     bool kms_present;
     bool egl_attached;
     unsigned long x11_window;
+
+    /* Debug overlay drawn by the direct-present GPU pass. */
+    const void *overlay_pixels;
+    int overlay_width;
+    int overlay_height;
 };
 
 static HostVideo *g_active_video;
@@ -1255,8 +1260,20 @@ bool host_video_present_texture(HostVideo *video, unsigned int texture, int widt
         video->egl_attached = true;
     }
 
+    host_gpu_set_overlay(device, video->overlay_pixels, video->overlay_width,
+                         video->overlay_height);
     host_gpu_present_texture(device, texture, width, height);
     return true;
+}
+
+void host_video_set_overlay(HostVideo *video, const void *rgba, int width, int height)
+{
+    if (!video)
+        return;
+
+    video->overlay_pixels = rgba;
+    video->overlay_width = rgba ? width : 0;
+    video->overlay_height = rgba ? height : 0;
 }
 
 /*
@@ -1291,6 +1308,15 @@ __attribute__((weak)) void host_gpu_present_texture(HostGpuDevice device, unsign
 {
     (void)device;
     (void)texture;
+    (void)width;
+    (void)height;
+}
+
+__attribute__((weak)) void host_gpu_set_overlay(HostGpuDevice device, const void *rgba, int width,
+                                                int height)
+{
+    (void)device;
+    (void)rgba;
     (void)width;
     (void)height;
 }

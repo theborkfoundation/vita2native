@@ -241,3 +241,22 @@ void fps_overlay_render(uint32_t *pixels, int width, int height, int pitch)
         fill_rect(pixels, width, height, pitch, x, y, 2, 2, 88, 166, 255, 255);
     }
 }
+
+const uint32_t *fps_overlay_image(int *width, int *height)
+{
+    static uint32_t image[PANEL_WIDTH * PANEL_HEIGHT];
+
+    if (!fps_overlay_enabled())
+        return NULL;
+
+    /* The pane is opaque after compositing onto a black canvas; render into a
+       standalone image so GPU presentation can draw it over the game. */
+    memset(image, 0, sizeof(image));
+    fps_overlay_render(image, PANEL_WIDTH, PANEL_HEIGHT, PANEL_WIDTH);
+
+    if (width)
+        *width = PANEL_WIDTH;
+    if (height)
+        *height = PANEL_HEIGHT;
+    return image;
+}

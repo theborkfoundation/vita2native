@@ -233,13 +233,20 @@ EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayF
         unsigned int present_texture;
         int present_width, present_height;
         HostVideo *video = display_video();
+        bool presented = false;
 
         if (video &&
             SceGxm_get_present_frame(pParam->base, &present_texture, &present_width,
-                                     &present_height) &&
-            host_video_present_texture(video, present_texture, present_width, present_height)) {
-            /* Already presented from the GPU; no readback or CPU upload. */
-        } else {
+                                     &present_height)) {
+            int overlay_width = 0, overlay_height = 0;
+            const uint32_t *fps_image = fps_overlay_image(&overlay_width, &overlay_height);
+
+            host_video_set_overlay(video, fps_image, overlay_width, overlay_height);
+            presented = host_video_present_texture(video, present_texture, present_width,
+                                                   present_height);
+        }
+
+        if (!presented) {
             CommonDialogOverlay overlay;
 
             if (SceCommonDialog_getOverlay(&overlay)) {

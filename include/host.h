@@ -119,6 +119,12 @@ void host_video_present(HostVideo *video, const void *rgba, int width, int heigh
 bool host_video_present_texture(HostVideo *video, unsigned int texture, int width, int height);
 
 /*
+ * Sets the RGBA8 debug overlay drawn over directly presented frames. Pass NULL
+ * to clear it. The pixels must stay valid until the next direct present.
+ */
+void host_video_set_overlay(HostVideo *video, const void *rgba, int width, int height);
+
+/*
  * Pad state sampled by the video layer from SDL (keyboard and game
  * controllers). Buttons use the SCE_CTRL_* encoding and axes are 0..255 with
  * 128 centred. `pressed` holds the button edges accumulated since the previous

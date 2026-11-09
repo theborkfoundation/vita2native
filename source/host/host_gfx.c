@@ -168,6 +168,15 @@ void host_gpu_present_texture(HostGpuDevice device, unsigned int texture, int wi
         host_gfx_gl_present_texture(device, texture, width, height);
 }
 
+void host_gpu_set_overlay(HostGpuDevice device, const void *rgba, int width, int height)
+{
+    if (!device)
+        return;
+
+    if (device->backend == HOST_GPU_BACKEND_GLES)
+        host_gfx_gl_set_overlay(device, rgba, width, height);
+}
+
 HostGpuMemBlock host_gpu_memblock_create(void *cpu_addr, size_t size)
 {
     HostGpuMemBlock block = malloc(sizeof(*block));

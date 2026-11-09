@@ -156,10 +156,13 @@ typedef struct HostGles {
     void *kms_state;
     GLuint present_program;
     GLuint present_texture;
+    GLuint overlay_texture;
     GLuint present_vao;
     GLint present_flip_uniform;
     int present_tex_width;
     int present_tex_height;
+    int overlay_width;
+    int overlay_height;
 
 #define HOST_GL_FIELD(type, name) type name;
     HOST_GL_FUNCTIONS(HOST_GL_FIELD)

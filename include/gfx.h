@@ -93,6 +93,13 @@ void host_gpu_present_framebuffer(HostGpuDevice device, const void *rgba, int wi
  */
 void host_gpu_present_texture(HostGpuDevice device, unsigned int texture, int width, int height);
 
+/*
+ * Sets an RGBA8 debug overlay drawn on top of the next directly presented
+ * frames. Pass NULL to clear it. The caller keeps ownership of the pixels; the
+ * buffer must stay valid until the next present.
+ */
+void host_gpu_set_overlay(HostGpuDevice device, const void *rgba, int width, int height);
+
 HostGpuMemBlock host_gpu_memblock_create(void *cpu_addr, size_t size);
 void host_gpu_memblock_destroy(HostGpuMemBlock block);
 

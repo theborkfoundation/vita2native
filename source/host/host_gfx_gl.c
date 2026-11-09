@@ -726,6 +726,7 @@ static void gles_destroy_impl(HostGles *g)
         if (g->glDeleteTextures) {
             g->glDeleteTextures(1, &g->color_texture);
             g->glDeleteTextures(1, &g->present_texture);
+            g->glDeleteTextures(1, &g->overlay_texture);
         }
         if (g->glDeleteProgram)
             g->glDeleteProgram(g->present_program);
@@ -1532,6 +1533,45 @@ void host_gfx_gl_present_framebuffer(HostGpuDevice device, const void *rgba, int
     g->eglSwapBuffers(g->display, g->window_surface);
 }
 
+void host_gfx_gl_set_overlay(HostGpuDevice device, const void *rgba, int width, int height)
+{
+    HostGles *g = device->impl;
+
+    if (!g)
+        return;
+
+    if (!rgba || width <= 0 || height <= 0) {
+        g->overlay_width = 0;
+        g->overlay_height = 0;
+        return;
+    }
+
+    while (g->glGetError() != GL_NO_ERROR) {
+    }
+
+    g->glActiveTexture(GL_TEXTURE0);
+    if (!g->overlay_texture)
+        g->glGenTextures(1, &g->overlay_texture);
+    g->glBindTexture(GL_TEXTURE_2D, g->overlay_texture);
+    g->glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    g->glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+
+    if (g->overlay_width != width || g->overlay_height != height) {
+        g->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                        rgba);
+        g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    } else {
+        g->glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    }
+
+    g->glBindTexture(GL_TEXTURE_2D, 0);
+    g->overlay_width = width;
+    g->overlay_height = height;
+}
+
 void host_gfx_gl_present_texture(HostGpuDevice device, unsigned int texture, int width, int height)
 {
     HostGles *g = device->impl;
@@ -1595,6 +1635,42 @@ void host_gfx_gl_present_texture(HostGpuDevice device, unsigned int texture, int
         g->glUniform1f(g->present_flip_uniform, 0.0f);
         g->glActiveTexture(GL_TEXTURE0);
         g->glBindTexture(GL_TEXTURE_2D, texture);
+        g->glBindVertexArray(g->present_vao);
+        g->glDrawArrays(GL_TRIANGLES, 0, 3);
+        g->glBindVertexArray(0);
+        g->glBindTexture(GL_TEXTURE_2D, 0);
+        g->glUseProgram(0);
+    }
+
+    if (g->overlay_texture && g->overlay_width > 0 && g->overlay_height > 0) {
+        double scale_x = (double)window_width / width;
+        double scale_y = (double)window_height / height;
+        double scale = scale_x < scale_y ? scale_x : scale_y;
+        int viewport_width = (int)(width * scale + 0.5);
+        int viewport_height = (int)(height * scale + 0.5);
+        int viewport_x = (window_width - viewport_width) / 2;
+        int viewport_y = (window_height - viewport_height) / 2;
+        int margin = (int)(8.0 * scale + 0.5);
+        int overlay_width = (int)(g->overlay_width * scale + 0.5);
+        int overlay_height = (int)(g->overlay_height * scale + 0.5);
+        int overlay_x;
+        int overlay_y;
+
+        if (margin < 2)
+            margin = 2;
+        overlay_x = viewport_x + viewport_width - overlay_width - margin;
+        overlay_y = viewport_y + viewport_height - overlay_height - margin;
+
+        if (overlay_x < viewport_x)
+            overlay_x = viewport_x;
+        if (overlay_y < viewport_y)
+            overlay_y = viewport_y;
+
+        g->glViewport(overlay_x, overlay_y, overlay_width, overlay_height);
+        g->glUseProgram(g->present_program);
+        g->glUniform1f(g->present_flip_uniform, 1.0f);
+        g->glActiveTexture(GL_TEXTURE0);
+        g->glBindTexture(GL_TEXTURE_2D, g->overlay_texture);
         g->glBindVertexArray(g->present_vao);
         g->glDrawArrays(GL_TRIANGLES, 0, 3);
         g->glBindVertexArray(0);
