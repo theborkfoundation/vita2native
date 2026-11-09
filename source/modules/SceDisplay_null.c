@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <psp2/display.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,8 +16,19 @@
 #include "util.h"
 
 static SceDisplayFrameBuf g_vita_conf_fb;
-static int g_vcount;
 static unsigned int g_frame_count;
+
+/*
+ * Vblank clock. Sleeping a fresh 16.67 ms per wait restarts from the wakeup
+ * time, so scheduler overshoot accumulates and the game is always charged a
+ * full period even when it is already late relative to the display. Keep an
+ * absolute 60 Hz grid instead: a wait sleeps until the next boundary on that
+ * grid, which both avoids drift and lets a late game wait less (or not at
+ * all) instead of paying a full extra period every frame.
+ */
+#define VBLANK_PERIOD_NS 16666667ull
+
+static uint64_t g_vblank_epoch_ns;
 static HostVideo *g_video;
 static bool g_video_checked;
 
@@ -289,14 +301,37 @@ EXPORT(SceDisplayUser, 0x42AE6BBC, int, sceDisplayGetFrameBuf, SceDisplayFrameBu
     return 0;
 }
 
-EXPORT(SceDisplay, 0x5795E898, int, sceDisplayWaitVblankStart, void)
+static void vblank_wait(unsigned int periods)
 {
-    uint64_t started = frame_profile_enabled() ? frame_profile_now_ns() : 0;
+    uint64_t started;
+    uint64_t now;
+    uint64_t deadline;
+    struct timespec ts;
+    int ret;
 
-    host_sleep_ns(16666667ull);
-    __sync_fetch_and_add(&g_vcount, 1);
+    if (!periods)
+        return;
+
+    started = frame_profile_enabled() ? frame_profile_now_ns() : 0;
+    now = host_monotonic_ns();
+
+    /* First boundary strictly after now, then `periods` boundaries in all. */
+    deadline = g_vblank_epoch_ns +
+               ((now - g_vblank_epoch_ns) / VBLANK_PERIOD_NS + periods) * VBLANK_PERIOD_NS;
+
+    ts.tv_sec = (time_t)(deadline / 1000000000ull);
+    ts.tv_nsec = (long)(deadline % 1000000000ull);
+    do {
+        ret = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
+    } while (ret == EINTR);
+
     if (started)
         frame_profile_add_vblank_wait(frame_profile_now_ns() - started);
+}
+
+EXPORT(SceDisplay, 0x5795E898, int, sceDisplayWaitVblankStart, void)
+{
+    vblank_wait(1);
     return 0;
 }
 
@@ -337,19 +372,16 @@ EXPORT(SceDisplay, 0x2EBFC7CB, int, sceDisplayGetMaximumFrameBufResolution, int 
 
 EXPORT(SceDisplay, 0xB6FDE0BA, int, sceDisplayGetVcount, void)
 {
-    return __sync_fetch_and_add(&g_vcount, 0);
+    uint64_t now = host_monotonic_ns();
+    uint64_t index =
+        now > g_vblank_epoch_ns ? (now - g_vblank_epoch_ns) / VBLANK_PERIOD_NS : 0;
+
+    return (int)(index & 0x7fffffffu);
 }
 
 static int display_wait_vblanks(unsigned int count)
 {
-    uint64_t started = frame_profile_enabled() ? frame_profile_now_ns() : 0;
-
-    while (count--) {
-        host_sleep_ns(16666667ull);
-        __sync_fetch_and_add(&g_vcount, 1);
-    }
-    if (started)
-        frame_profile_add_vblank_wait(frame_profile_now_ns() - started);
+    vblank_wait(count);
     return 0;
 }
 
@@ -483,6 +515,9 @@ void SceDisplay_get_window_size(int *width, int *height)
 int SceDisplay_init(HostGpuDevice device)
 {
     (void)device;
+
+    /* The vblank grid starts before any guest thread can wait on it. */
+    g_vblank_epoch_ns = host_monotonic_ns();
 
     /* Bring SDL up before guest threads start rendering. SDL's X11/GLX
        initialisation and the guest's llvmpipe shader JIT both touch LLVM, and

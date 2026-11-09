@@ -129,7 +129,10 @@ rate, `VITA2NATIVE_TRACE_TEXTURES=1` logs texture uploads,
 `VITA2NATIVE_NO_BATCH=1` disables draw batching, and `tests/gpu_bench.c`
 measures the driver in isolation. `VITA2NATIVE_NO_DRAW_UNIFORMS=1` and
 `VITA2NATIVE_NO_PRESENT_OVERLAP=1` disable the per-draw uniform and direct
-present overlap paths for A/B measurements.
+present overlap paths for A/B measurements. `VITA2NATIVE_RENDER_SCALE=0.5`
+renders the 3D scene at half resolution and upscales it on present; on the
+Mali-G31 that roughly halves GPU time, which is the dominant cost at the
+native 960x544 resolution.
 
 The same ARM32 build also runs on an R36S handheld (Rockchip RK3326, Mali-G31
 through the proprietary Bifrost blob, 640x480 DSI panel). Output goes through
