@@ -890,6 +890,11 @@ EXPORT(SceHttp, 0xC616C200, int, sceHttpCreateConnectionWithURL, int template_id
 
     (void)enable_keepalive;
 
+    if (getenv("VITA2NATIVE_INPUT_DEBUG")) {
+        fprintf(stderr, "vita2native: HTTP connection for %s\n", url ? url : "(null)");
+        fflush(stderr);
+    }
+
     if (!parse_url(url, scheme, sizeof(scheme), host, sizeof(host), &port, path, sizeof(path)))
         return SCE_HTTP_ERROR_INVALID_URL;
 
@@ -991,12 +996,20 @@ EXPORT(SceHttp, 0x9CA58B99, int, sceHttpSendRequest, int request_id, const void 
        unsigned int post_size)
 {
     HttpRequest *request = request_for_id(request_id);
+    int result;
 
     if (!request)
         return SCE_HTTP_ERROR_INVALID_ID;
 
     request->aborted = false;
-    return perform_request(request, post_data, post_size, HTTP_MAX_REDIRECTS);
+    result = perform_request(request, post_data, post_size, HTTP_MAX_REDIRECTS);
+
+    if (getenv("VITA2NATIVE_INPUT_DEBUG")) {
+        fprintf(stderr, "vita2native: HTTP send %s -> %d\n", request->url, result);
+        fflush(stderr);
+    }
+
+    return result;
 }
 
 EXPORT(SceHttp, 0x7EDE3979, int, sceHttpReadData, int request_id, void *data,

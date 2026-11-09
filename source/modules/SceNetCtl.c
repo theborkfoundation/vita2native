@@ -11,8 +11,10 @@
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -196,6 +198,8 @@ static unsigned int read_mtu(const char *name)
     return mtu;
 }
 
+static bool network_forced_off(void);
+
 static int fill_info(int code, SceNetCtlInfo *info)
 {
     struct ifaddrs *list = NULL;
@@ -207,7 +211,7 @@ static int fill_info(int code, SceNetCtlInfo *info)
 
     memset(info, 0, sizeof(*info));
 
-    if (!find_primary_interface(&list)) {
+    if (network_forced_off() || !find_primary_interface(&list)) {
         /* No network: still answer identity constants, but no addresses. */
         switch (code) {
         case SCE_NETCTL_INFO_GET_CNF_NAME:
@@ -324,10 +328,24 @@ static int fill_info(int code, SceNetCtlInfo *info)
     return 0;
 }
 
+/* Diagnostic: pretend the console is offline, which is what Vita3K reports and
+   what makes titles take their "no network" fallback (usually a message dialog
+   before the menu becomes interactive). */
+static bool network_forced_off(void)
+{
+    static int forced = -1;
+
+    if (forced < 0)
+        forced = getenv("VITA2NATIVE_NO_NETWORK") != NULL;
+    return forced != 0;
+}
+
 static bool is_connected(void)
 {
     struct ifaddrs *list = NULL;
 
+    if (network_forced_off())
+        return false;
     if (!find_primary_interface(&list))
         return false;
 
@@ -361,6 +379,16 @@ EXPORT(SceNetCtl, 0x6D26AC68, int, sceNetCtlInetGetState, int *state)
         return SCE_NET_CTL_ERROR_INVALID_ADDR;
 
     *state = is_connected() ? SCE_NETCTL_STATE_CONNECTED : SCE_NETCTL_STATE_DISCONNECTED;
+
+    if (getenv("VITA2NATIVE_INPUT_DEBUG")) {
+        static int last = -2;
+
+        if (*state != last) {
+            fprintf(stderr, "vita2native: NetCtl state -> %d\n", *state);
+            fflush(stderr);
+            last = *state;
+        }
+    }
     return 0;
 }
 

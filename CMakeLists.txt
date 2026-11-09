@@ -122,6 +122,7 @@ add_executable(vita2native
     source/modules/SceHttp.c
     source/modules/SceSsl.c
     source/modules/SceNpDrm.c
+    source/modules/SceNp.c
     source/modules/ScePgf.c
     source/modules/SceProcessmgr.c
     source/modules/SceRegistryMgr.c

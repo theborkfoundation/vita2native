@@ -10,6 +10,7 @@
 
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <psp2/common_dialog.h>
@@ -203,12 +204,31 @@ EXPORT(SceCommonDialog, 0x755FF270, int, sceMsgDialogInit, const SceMsgDialogPar
         break;
     }
 
+    if (getenv("VITA2NATIVE_INPUT_DEBUG")) {
+        fprintf(stderr, "vita2native: MsgDialog init mode=%d text=\"%s\" hint=\"%s\"\n",
+                g_msg_dialog_mode, g_msg_text, g_msg_hint);
+        fflush(stderr);
+    }
+
     return 0;
 }
 
 EXPORT(SceCommonDialog, 0x4107019E, SceCommonDialogStatus, sceMsgDialogGetStatus, void)
 {
     msg_update_done();
+
+    if (getenv("VITA2NATIVE_INPUT_DEBUG")) {
+        static int last = -1;
+
+        if (!g_msg_dialog_active)
+            last = -1;
+        else if (last != (g_msg_dialog_done ? 1 : 0)) {
+            last = g_msg_dialog_done ? 1 : 0;
+            fprintf(stderr, "vita2native: MsgDialog status %s\n",
+                    g_msg_dialog_done ? "finished" : "running");
+            fflush(stderr);
+        }
+    }
 
     if (!g_msg_dialog_active)
         return SCE_COMMON_DIALOG_STATUS_NONE;

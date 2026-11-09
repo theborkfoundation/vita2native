@@ -179,8 +179,29 @@ static int touch_get(SceUInt32 port, SceTouchData *data, SceUInt32 n_bufs, bool 
 {
     SceTouchData sample;
 
+    if (g_debug) {
+        static unsigned int calls;
+
+        calls++;
+        if (calls <= 20 || (calls % 600) == 0) {
+            fprintf(stderr, "vita2native: SceTouch call #%u port %u nbufs %u block %d\n", calls,
+                    (unsigned)port, (unsigned)n_bufs, (int)block);
+            fflush(stderr);
+        }
+    }
+
     if (port >= SCE_TOUCH_PORT_MAX_NUM || !data || n_bufs == 0 || n_bufs > TOUCH_MAX_BUFFERS)
         return SCE_TOUCH_ERROR_INVALID_ARG;
+
+    if (g_debug) {
+        static unsigned int accepted;
+
+        accepted++;
+        if ((accepted % 600) == 0) {
+            fprintf(stderr, "vita2native: SceTouch read #%u port %u\n", accepted, (unsigned)port);
+            fflush(stderr);
+        }
+    }
 
     if (block) {
         for (int i = 0; i < TOUCH_READ_POLLS; i++) {
@@ -257,6 +278,9 @@ EXPORT(SceTouch, 0x1B9C5D14, int, sceTouchSetSamplingState, SceUInt32 port,
         return SCE_TOUCH_ERROR_INVALID_ARG;
 
     g_sampling[port] = state;
+    if (g_debug)
+        fprintf(stderr, "vita2native: SceTouch sampling port %u -> %d\n", (unsigned)port,
+                (int)state);
     return 0;
 }
 
