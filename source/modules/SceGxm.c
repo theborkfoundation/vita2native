@@ -2253,6 +2253,13 @@ static void gxm_arena_commit(GxmBufferArena *arena, GLenum target, uint32_t star
         return;
 
     g_gl->glBindBuffer(target, arena->buffer);
+
+    /* Re-writing a buffer that queued draws still read makes the driver wait
+       for (or copy) the old storage: on the Mali blob that cost about 5 ms
+       per batch. Giving each batch fresh storage lets the CPU run ahead; the
+       previous contents keep their references. This matches the uniform
+       buffer path, which uploads per batch too. */
+    g_gl->glBufferData(target, (GLsizeiptr)arena->capacity, NULL, GL_STREAM_DRAW);
     g_gl->glBufferSubData(target, (GLintptr)start, (GLsizeiptr)(end - start), arena->stage + start);
 }
 
