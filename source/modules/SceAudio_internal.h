@@ -29,4 +29,7 @@ size_t host_audio_port_pending(HostAudioPort *port);
 /* Waits until the queue is drained. */
 void host_audio_port_drain(HostAudioPort *port);
 
+/* Total device frames the mixer has consumed since startup. */
+uint64_t host_audio_frames_played(void);
+
 #endif

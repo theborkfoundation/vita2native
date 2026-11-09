@@ -49,6 +49,7 @@ typedef struct SdlAudioApi {
                                   int allowed_changes);
     void (*close_audio_device)(uint32_t dev);
     void (*pause_audio_device)(uint32_t dev, int pause_on);
+    const char *(*get_current_audio_driver)(void);
 } SdlAudioApi;
 
 struct HostAudioPort {
@@ -68,6 +69,7 @@ static unsigned int g_queue_count;
 static uint32_t g_device;
 static bool g_sdl_ready;
 static SdlAudioApi *g_api;
+static uint64_t g_frames_played;
 
 static void queue_push(HostAudioPort *port, const int16_t *frames, size_t count)
 {
@@ -126,6 +128,7 @@ static void audio_callback(void *userdata, uint8_t *stream, int length)
 
         out += chunk * 2;
         frames -= chunk;
+        __atomic_add_fetch(&g_frames_played, chunk, __ATOMIC_RELAXED);
     }
 }
 
@@ -168,6 +171,7 @@ static bool load_sdl_audio(void)
     LOAD_SDL(open_audio_device, "SDL_OpenAudioDevice");
     LOAD_SDL(close_audio_device, "SDL_CloseAudioDevice");
     LOAD_SDL(pause_audio_device, "SDL_PauseAudioDevice");
+    *(void **)(&api->get_current_audio_driver) = dlsym(api->library, "SDL_GetCurrentAudioDriver");
 
 #undef LOAD_SDL
 
@@ -206,9 +210,17 @@ bool host_audio_open(int freq)
     }
 
     g_api->pause_audio_device(g_device, 0);
-    LOG("SceAudio: SDL device %u opened (%d Hz, %u channels)", g_device, have.freq,
-        (unsigned)have.channels);
+    LOG("SceAudio: SDL device %u opened (%d Hz, %u ch, fmt 0x%04x, %u frames, driver %s)",
+        g_device, have.freq, (unsigned)have.channels, (unsigned)have.format, (unsigned)have.samples,
+        g_api->get_current_audio_driver && g_api->get_current_audio_driver()
+            ? g_api->get_current_audio_driver()
+            : "?");
     return true;
+}
+
+uint64_t host_audio_frames_played(void)
+{
+    return __atomic_load_n(&g_frames_played, __ATOMIC_RELAXED);
 }
 
 void host_audio_close(void)

@@ -41,6 +41,10 @@ typedef struct {
     int16_t *scratch;
     size_t scratch_frames;
     uint64_t next_deadline_ns;
+    uint64_t debug_last_ns;
+    uint64_t debug_last_played;
+    unsigned int debug_calls;
+    int debug_peak;
 } AudioPort;
 
 static AudioPort g_ports[AUDIO_MAX_PORTS];
@@ -50,6 +54,15 @@ static uint64_t g_audio_start_ns;
 static uint64_t now_ns(void)
 {
     return host_monotonic_ns();
+}
+
+static int audio_debug(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_AUDIO_DEBUG") != NULL;
+    return enabled;
 }
 
 static void sleep_until(uint64_t deadline_ns)
@@ -187,7 +200,7 @@ EXPORT(SceAudio, 0x5BC341E4, int, sceAudioOutOpenPort, SceAudioOutPortType type,
     p->channels = channels;
     p->volume[0] = SCE_AUDIO_OUT_MAX_VOL;
     p->volume[1] = SCE_AUDIO_OUT_MAX_VOL;
-    p->queue_frames = device_frames * 2;
+    p->queue_frames = device_frames * 4;
 
     if (g_audio_ready) {
         p->scratch_frames = device_frames + 2;
@@ -252,6 +265,35 @@ EXPORT(SceAudio, 0x02DB3F5F, int, sceAudioOutOutput, int port, const void *buf)
     }
 
     input_frames = (size_t)p->len;
+
+    if (audio_debug()) {
+        uint64_t now = now_ns();
+        int peak = 0;
+
+        for (size_t i = 0; i < input_frames * (size_t)p->channels; i++) {
+            int value = samples[i] < 0 ? -samples[i] : samples[i];
+
+            if (value > peak)
+                peak = value;
+        }
+
+        if (peak > p->debug_peak)
+            p->debug_peak = peak;
+        p->debug_calls++;
+
+        if (now - p->debug_last_ns >= 2000000000ull) {
+            uint64_t played = host_audio_frames_played();
+
+            LOG("SceAudio: port %d calls %u peak %d vol %d/%d pending %u played %llu", port,
+                p->debug_calls, p->debug_peak, p->volume[0], p->volume[1],
+                (unsigned)host_audio_port_pending(p->queue),
+                (unsigned long long)(played - p->debug_last_played));
+            p->debug_last_ns = now;
+            p->debug_last_played = played;
+            p->debug_calls = 0;
+            p->debug_peak = 0;
+        }
+    }
 
     if (!g_audio_ready) {
         size_t device_frames = (size_t)((double)input_frames * AUDIO_DEVICE_FREQ /
