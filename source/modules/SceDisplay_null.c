@@ -9,6 +9,7 @@
 #include "module.h"
 #include "modules/SceDisplay.h"
 #include "modules/common_dialog_overlay.h"
+#include "modules/fps_overlay.h"
 #include "util.h"
 
 static SceDisplayFrameBuf g_vita_conf_fb;
@@ -170,14 +171,20 @@ static void display_log_fps(void)
     static unsigned int frames;
     static bool ready;
     static bool enabled;
+    static bool overlay_enabled;
+    static const char *metrics_path;
     struct timespec ts;
     uint64_t now;
 
     if (!ready) {
         enabled = getenv("VITA2NATIVE_FPS") != NULL;
+        overlay_enabled = fps_overlay_enabled();
+        metrics_path = getenv("VITA2NATIVE_METRICS_FILE");
+        if (metrics_path && !metrics_path[0])
+            metrics_path = NULL;
         ready = true;
     }
-    if (!enabled)
+    if (!enabled && !overlay_enabled && !metrics_path)
         return;
 
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -189,9 +196,25 @@ static void display_log_fps(void)
     }
 
     frames++;
-    if (now - last_ns >= 2000000000ull) {
-        LOG("SceDisplay: %u frames in %.1f s (%.1f fps)", frames,
-            (double)(now - last_ns) / 1e9, (double)frames * 1e9 / (double)(now - last_ns));
+    if (now - last_ns >= 1000000000ull) {
+        const double elapsed = (double)(now - last_ns) / 1e9;
+        const double fps = (double)frames / elapsed;
+
+        if (enabled)
+            LOG("SceDisplay: %u frames in %.1f s (%.1f fps)", frames, elapsed, fps);
+
+        fps_overlay_add_sample(fps);
+
+        if (metrics_path) {
+            FILE *file = fopen(metrics_path, "a");
+
+            if (file) {
+                fprintf(file, "%llu,%.3f,%u\n", (unsigned long long)(now / 1000000ull), fps,
+                        g_frame_count);
+                fclose(file);
+            }
+        }
+
         last_ns = now;
         frames = 0;
     }
@@ -213,6 +236,8 @@ EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayF
                                        (int)pParam->height, (int)pParam->pitch);
             SceCommonDialog_overlayPresented();
         }
+        fps_overlay_render((uint32_t *)pParam->base, (int)pParam->width, (int)pParam->height,
+                           (int)pParam->pitch);
         dump_framebuffer(pParam);
 
         {

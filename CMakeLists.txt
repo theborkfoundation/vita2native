@@ -109,6 +109,7 @@ add_executable(vita2native
     source/modules/SceAppUtil.c
     source/modules/SceCommonDialog.c
     source/modules/common_dialog_overlay.c
+    source/modules/fps_overlay.c
     source/modules/SceKernelThreadMgr.c
     source/modules/SceKernelRuntime.c
     source/modules/SceKernelLocks.c
