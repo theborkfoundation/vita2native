@@ -71,6 +71,16 @@ int host_gpu_attach_window(HostGpuDevice device, void *native_window);
 void host_gpu_detach_window(HostGpuDevice device);
 
 /*
+ * Attaches a KMS/GBM presentation surface. The backend uses the GPU device's
+ * own DRM connection (it has to, while GLES buffers are allocated there) and
+ * makes it DRM master. `drm_fd` is accepted for callers that already own a
+ * master fd but is currently unused; `width`/`height` are an optional mode
+ * request, and 0 keeps the connector's current/preferred mode. Returns 0 on
+ * success, -1 when the backend cannot present on KMS.
+ */
+int host_gpu_attach_kms(HostGpuDevice device, int drm_fd, int width, int height);
+
+/*
  * Uploads an RGBA8 guest framebuffer (stride in pixels) and swaps the window.
  * Pass rgba == NULL to present a black frame. No-op without a window surface.
  */

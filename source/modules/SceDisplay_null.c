@@ -25,7 +25,7 @@ static HostVideo *display_video(void)
         g_video_checked = true;
         g_video = host_video_open();
         if (g_video)
-            LOG("SceDisplay: presenting through SDL (%dx%d)", host_video_width(g_video),
+            LOG("SceDisplay: video output %dx%d", host_video_width(g_video),
                 host_video_height(g_video));
         else
             LOG("SceDisplay: no video output, frames stay headless");

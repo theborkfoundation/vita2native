@@ -132,6 +132,14 @@ int host_gpu_attach_window(HostGpuDevice device, void *native_window)
     return host_gfx_gl_attach_window(device, native_window);
 }
 
+int host_gpu_attach_kms(HostGpuDevice device, int drm_fd, int width, int height)
+{
+    if (!device || device->backend != HOST_GPU_BACKEND_GLES)
+        return -1;
+
+    return host_gfx_gl_attach_kms(device, drm_fd, width, height);
+}
+
 void host_gpu_detach_window(HostGpuDevice device)
 {
     if (!device)

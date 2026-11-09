@@ -111,6 +111,9 @@ typedef struct HostGles {
     void *gbm_lib;
     void *gbm_device;
     int drm_fd;
+    bool owns_gbm_device;
+    bool owns_drm_fd;
+    bool display_is_gbm;
 
     EGLDisplay display;
     EGLContext context;
@@ -141,6 +144,16 @@ typedef struct HostGles {
     EGLConfig egl_config;
     bool window_capable;
     EGLSurface window_surface;
+
+    /* KMS/GBM presentation. The surface is created lazily on the presenting
+       thread; kms_state holds the private libdrm/GBM state. */
+    void *gbm_surface;
+    EGLSurface kms_surface;
+    int kms_width;
+    int kms_height;
+    int kms_drm_fd;
+    uint32_t kms_crtc_id;
+    void *kms_state;
     GLuint present_program;
     GLuint present_texture;
     GLuint present_vao;

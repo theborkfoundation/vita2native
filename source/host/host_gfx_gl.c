@@ -8,9 +8,11 @@
  * guest memory.
  */
 #include <dlfcn.h>
-#include <pthread.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -169,6 +171,27 @@ static void *open_egl(const char *const *names)
         }                                                                                          \
     } while (0)
 
+/* True when presentation should go straight to KMS instead of an X11 window. */
+static bool gles_kms_requested(void)
+{
+    static int cached = -1;
+    const char *driver;
+
+    if (cached >= 0)
+        return cached != 0;
+
+    cached = 0;
+    if (getenv("VITA2NATIVE_DIRECT_PRESENT")) {
+        driver = getenv("SDL_VIDEODRIVER");
+        if (getenv("VITA2NATIVE_KMS_PRESENT") || (driver && strstr(driver, "kmsdrm")))
+            cached = 1;
+        else if (!getenv("DISPLAY") && !getenv("WAYLAND_DISPLAY"))
+            cached = 1;
+    }
+
+    return cached != 0;
+}
+
 #define LOAD_GL(g, type, name)                                                                     \
     do {                                                                                           \
         *(void **)(&(g)->name) = dlsym((g)->gles_lib, #name);                                      \
@@ -184,6 +207,18 @@ static void *open_egl(const char *const *names)
  * screen. The blob does accept a GBM device, so create one when libgbm is
  * available and offer it as a display candidate.
  */
+static bool gles_open_gbm(HostGles *g)
+{
+    if (g->gbm_lib)
+        return true;
+
+    g->gbm_lib = dlopen("libgbm.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (!g->gbm_lib)
+        g->gbm_lib = dlopen("libgbm.so", RTLD_NOW | RTLD_LOCAL);
+
+    return g->gbm_lib != NULL;
+}
+
 static void *gxm_gbm_device_create(HostGles *g)
 {
     typedef void *(*gbm_create_device_fn)(int fd);
@@ -196,10 +231,7 @@ static void *gxm_gbm_device_create(HostGles *g)
     if (g->gbm_device)
         return g->gbm_device;
 
-    g->gbm_lib = dlopen("libgbm.so.1", RTLD_NOW | RTLD_LOCAL);
-    if (!g->gbm_lib)
-        g->gbm_lib = dlopen("libgbm.so", RTLD_NOW | RTLD_LOCAL);
-    if (!g->gbm_lib)
+    if (!gles_open_gbm(g))
         return NULL;
 
     create_device = (gbm_create_device_fn)dlsym(g->gbm_lib, "gbm_create_device");
@@ -214,12 +246,473 @@ static void *gxm_gbm_device_create(HostGles *g)
         g->gbm_device = create_device(fd);
         if (g->gbm_device) {
             g->drm_fd = fd;
+            g->owns_gbm_device = true;
+            g->owns_drm_fd = true;
             return g->gbm_device;
         }
         close(fd);
     }
 
     return NULL;
+}
+
+/* ---------------------------------------------------------- KMS / GBM ---- */
+
+/*
+ * Direct presentation on KMS/DRM. libdrm and libgbm are loaded at runtime, so
+ * the emulator still builds and runs on systems without either library. The
+ * structures below mirror libdrm's public ABI; only the fields we use are
+ * declared, in their original order (pointer fields follow the target ABI).
+ */
+
+#define V2N_DRM_MODE_CONNECTED 1
+#define V2N_DRM_MODE_TYPE_PREFERRED (1u << 3)
+#define V2N_DRM_MODE_PAGE_FLIP_EVENT 0x01u
+#define V2N_DRM_EVENT_CONTEXT_VERSION 2
+#define V2N_GBM_FORMAT_ARGB8888 0x34325241u
+#define V2N_GBM_BO_USE_SCANOUT (1u << 0)
+#define V2N_GBM_BO_USE_RENDERING (1u << 2)
+
+typedef struct {
+    uint32_t clock;
+    uint16_t hdisplay, hsync_start, hsync_end, htotal, hskew;
+    uint16_t vdisplay, vsync_start, vsync_end, vtotal, vscan;
+    uint32_t vrefresh;
+    uint32_t flags;
+    uint32_t type;
+    char name[32];
+} KmsModeInfo;
+
+typedef struct {
+    uint32_t crtc_id;
+    uint32_t buffer_id;
+    uint32_t x, y;
+    uint32_t width, height;
+    int mode_valid;
+    KmsModeInfo mode;
+    int gamma_size;
+} KmsCrtc;
+
+typedef struct {
+    uint32_t encoder_id;
+    uint32_t encoder_type;
+    uint32_t crtc_id;
+    uint32_t possible_crtcs;
+    uint32_t possible_clones;
+} KmsEncoder;
+
+typedef struct {
+    uint32_t connector_id;
+    uint32_t encoder_id;
+    uint32_t connector_type;
+    uint32_t connector_type_id;
+    uint32_t connection;
+    uint32_t mmWidth, mmHeight;
+    uint32_t subpixel;
+    int count_modes;
+    KmsModeInfo *modes;
+    int count_props;
+    uint32_t *props;
+    uint64_t *prop_values;
+    int count_encoders;
+    uint32_t *encoders;
+} KmsConnector;
+
+typedef struct {
+    int count_fbs;
+    uint32_t *fbs;
+    int count_crtcs;
+    uint32_t *crtcs;
+    int count_connectors;
+    uint32_t *connectors;
+    int count_encoders;
+    uint32_t *encoders;
+    uint32_t min_width, max_width;
+    uint32_t min_height, max_height;
+} KmsResources;
+
+typedef struct {
+    int version;
+    void (*vblank_handler)(int, unsigned int, unsigned int, unsigned int, void *);
+    void (*page_flip_handler)(int, unsigned int, unsigned int, unsigned int, void *);
+    void (*page_flip_handler2)(int, unsigned int, unsigned int, unsigned int, unsigned int, void *);
+    void (*sequence_handler)(int, uint64_t, uint64_t, uint64_t);
+} KmsEventContext;
+
+typedef union {
+    void *ptr;
+    int32_t s32;
+    uint32_t u32;
+    int64_t s64;
+    uint64_t u64;
+} KmsBoHandle;
+
+typedef struct {
+    void *lib;
+
+    KmsResources *(*get_resources)(int fd);
+    void (*free_resources)(KmsResources *resources);
+    KmsConnector *(*get_connector)(int fd, uint32_t connector_id);
+    void (*free_connector)(KmsConnector *connector);
+    KmsEncoder *(*get_encoder)(int fd, uint32_t encoder_id);
+    void (*free_encoder)(KmsEncoder *encoder);
+    KmsCrtc *(*get_crtc)(int fd, uint32_t crtc_id);
+    void (*free_crtc)(KmsCrtc *crtc);
+    int (*set_crtc)(int fd, uint32_t crtc_id, uint32_t fb_id, uint32_t x, uint32_t y,
+                    uint32_t *connectors, int count, KmsModeInfo *mode);
+    int (*page_flip)(int fd, uint32_t crtc_id, uint32_t fb_id, uint32_t flags, void *user_data);
+    int (*add_fb)(int fd, uint32_t width, uint32_t height, uint32_t depth, uint32_t bpp,
+                  uint32_t pitch, uint32_t handle, uint32_t *fb_id);
+    int (*rm_fb)(int fd, uint32_t fb_id);
+    int (*handle_event)(int fd, KmsEventContext *event);
+    int (*set_master)(int fd);
+    int (*drop_master)(int fd);
+
+    void *(*surface_create)(void *gbm, uint32_t width, uint32_t height, uint32_t format,
+                            uint32_t flags);
+    void (*surface_destroy)(void *surface);
+    void *(*surface_lock_front_buffer)(void *surface);
+    void (*surface_release_buffer)(void *surface, void *bo);
+    uint32_t (*bo_get_width)(void *bo);
+    uint32_t (*bo_get_height)(void *bo);
+    uint32_t (*bo_get_stride)(void *bo);
+    KmsBoHandle (*bo_get_handle)(void *bo);
+
+    KmsCrtc *saved_crtc;
+    KmsModeInfo mode;
+    uint32_t connector_id;
+    uint32_t crtc_id;
+    bool mode_set;
+    bool flip_pending;
+    void *scanout_bo;
+    uint32_t scanout_fb;
+    void *retired_bo;
+    uint32_t retired_fb;
+} KmsState;
+
+static void gles_kms_flip_handler(int fd, unsigned int frame, unsigned int sec,
+                                  unsigned int usec, void *user_data)
+{
+    KmsState *k = user_data;
+
+    (void)fd;
+    (void)frame;
+    (void)sec;
+    (void)usec;
+    if (k)
+        k->flip_pending = false;
+}
+
+static int gles_kms_wait_flip(HostGles *g, KmsState *k)
+{
+    while (k->flip_pending) {
+        struct pollfd pfd;
+        KmsEventContext event;
+        int ready;
+
+        pfd.fd = g->drm_fd;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+
+        ready = poll(&pfd, 1, 2000);
+        if (ready < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (ready == 0)
+            return -1;
+        if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))
+            return -1;
+        if (!(pfd.revents & POLLIN))
+            continue;
+
+        memset(&event, 0, sizeof(event));
+        event.version = V2N_DRM_EVENT_CONTEXT_VERSION;
+        event.page_flip_handler = gles_kms_flip_handler;
+        k->handle_event(g->drm_fd, &event);
+    }
+
+    return 0;
+}
+
+static void gles_kms_release_retired(HostGles *g, KmsState *k)
+{
+    if (!k->retired_bo)
+        return;
+
+    k->rm_fb(g->drm_fd, k->retired_fb);
+    k->surface_release_buffer(g->gbm_surface, k->retired_bo);
+    k->retired_bo = NULL;
+    k->retired_fb = 0;
+}
+
+static bool gles_kms_load(HostGles *g)
+{
+    KmsState *k;
+    void *lib;
+
+    if (g->kms_state)
+        return true;
+
+    k = calloc(1, sizeof(*k));
+    if (!k)
+        return false;
+
+    lib = dlopen("libdrm.so.2", RTLD_NOW | RTLD_LOCAL);
+    if (!lib)
+        lib = dlopen("libdrm.so", RTLD_NOW | RTLD_LOCAL);
+    if (!lib) {
+        fprintf(stderr, "vita2native: KMS: libdrm is not available\n");
+        free(k);
+        return false;
+    }
+    k->lib = lib;
+
+#define LOAD_DRM(field, name)                                                                      \
+    do {                                                                                           \
+        *(void **)(&k->field) = dlsym(lib, name);                                                  \
+        if (!k->field) {                                                                           \
+            fprintf(stderr, "vita2native: KMS: libdrm is missing %s\n", name);                   \
+            goto fail;                                                                             \
+        }                                                                                          \
+    } while (0)
+
+    LOAD_DRM(get_resources, "drmModeGetResources");
+    LOAD_DRM(free_resources, "drmModeFreeResources");
+    LOAD_DRM(get_connector, "drmModeGetConnector");
+    LOAD_DRM(free_connector, "drmModeFreeConnector");
+    LOAD_DRM(get_encoder, "drmModeGetEncoder");
+    LOAD_DRM(free_encoder, "drmModeFreeEncoder");
+    LOAD_DRM(get_crtc, "drmModeGetCrtc");
+    LOAD_DRM(free_crtc, "drmModeFreeCrtc");
+    LOAD_DRM(set_crtc, "drmModeSetCrtc");
+    LOAD_DRM(page_flip, "drmModePageFlip");
+    LOAD_DRM(add_fb, "drmModeAddFB");
+    LOAD_DRM(rm_fb, "drmModeRmFB");
+    LOAD_DRM(handle_event, "drmHandleEvent");
+#undef LOAD_DRM
+
+    /* Not fatal: on a KMSDRM desktop SDL may already hold master on another
+       fd, in which case modesetting will report the real error later. */
+    *(void **)(&k->set_master) = dlsym(lib, "drmSetMaster");
+    *(void **)(&k->drop_master) = dlsym(lib, "drmDropMaster");
+
+    if (!gles_open_gbm(g))
+        goto fail;
+
+#define LOAD_GBM(field, name)                                                                      \
+    do {                                                                                           \
+        *(void **)(&k->field) = dlsym(g->gbm_lib, name);                                           \
+        if (!k->field) {                                                                           \
+            fprintf(stderr, "vita2native: KMS: libgbm is missing %s\n", name);                    \
+            goto fail;                                                                             \
+        }                                                                                          \
+    } while (0)
+
+    LOAD_GBM(surface_create, "gbm_surface_create");
+    LOAD_GBM(surface_destroy, "gbm_surface_destroy");
+    LOAD_GBM(surface_lock_front_buffer, "gbm_surface_lock_front_buffer");
+    LOAD_GBM(surface_release_buffer, "gbm_surface_release_buffer");
+    LOAD_GBM(bo_get_width, "gbm_bo_get_width");
+    LOAD_GBM(bo_get_height, "gbm_bo_get_height");
+    LOAD_GBM(bo_get_stride, "gbm_bo_get_stride");
+    LOAD_GBM(bo_get_handle, "gbm_bo_get_handle");
+#undef LOAD_GBM
+
+    g->kms_state = k;
+    return true;
+
+fail:
+    dlclose(lib);
+    free(k);
+    return false;
+}
+
+static bool gles_kms_setup_output(HostGles *g, KmsState *k, int want_width, int want_height)
+{
+    KmsResources *resources;
+    KmsConnector *connector = NULL;
+    KmsEncoder *encoder = NULL;
+    KmsCrtc *crtc = NULL;
+    uint32_t crtc_id = 0;
+    int mode_index = -1;
+    int i, j;
+
+    resources = k->get_resources(g->drm_fd);
+    if (!resources) {
+        fprintf(stderr, "vita2native: KMS: drmModeGetResources failed\n");
+        return false;
+    }
+
+    for (i = 0; i < resources->count_connectors && !connector; i++) {
+        KmsConnector *candidate = k->get_connector(g->drm_fd, resources->connectors[i]);
+
+        if (!candidate)
+            continue;
+        if (candidate->connection == V2N_DRM_MODE_CONNECTED && candidate->count_modes > 0)
+            connector = candidate;
+        else
+            k->free_connector(candidate);
+    }
+    if (!connector) {
+        fprintf(stderr, "vita2native: KMS: no connected display\n");
+        k->free_resources(resources);
+        return false;
+    }
+
+    if (connector->encoder_id)
+        encoder = k->get_encoder(g->drm_fd, connector->encoder_id);
+
+    if (!encoder) {
+        for (i = 0; i < resources->count_encoders && !encoder; i++) {
+            KmsEncoder *candidate = k->get_encoder(g->drm_fd, resources->encoders[i]);
+
+            if (!candidate)
+                continue;
+            for (j = 0; j < connector->count_encoders; j++) {
+                if (connector->encoders[j] == candidate->encoder_id)
+                    break;
+            }
+            if (j < connector->count_encoders)
+                encoder = candidate;
+            else
+                k->free_encoder(candidate);
+        }
+    }
+    if (!encoder) {
+        fprintf(stderr, "vita2native: KMS: no encoder for the connected display\n");
+        k->free_connector(connector);
+        k->free_resources(resources);
+        return false;
+    }
+
+    if (encoder->crtc_id) {
+        crtc = k->get_crtc(g->drm_fd, encoder->crtc_id);
+        crtc_id = encoder->crtc_id;
+    }
+    if (!crtc) {
+        for (i = 0; i < resources->count_crtcs && !crtc; i++) {
+            if (encoder->possible_crtcs & (1u << i)) {
+                crtc = k->get_crtc(g->drm_fd, resources->crtcs[i]);
+                crtc_id = resources->crtcs[i];
+            }
+        }
+    }
+    if (!crtc) {
+        fprintf(stderr, "vita2native: KMS: no CRTC for the connected display\n");
+        k->free_encoder(encoder);
+        k->free_connector(connector);
+        k->free_resources(resources);
+        return false;
+    }
+
+    /* An explicit request wins, then keep the current mode, then the panel's
+       preferred mode, then the largest one. */
+    if (want_width > 0 && want_height > 0) {
+        for (i = 0; i < connector->count_modes; i++) {
+            if (connector->modes[i].hdisplay == want_width &&
+                connector->modes[i].vdisplay == want_height) {
+                mode_index = i;
+                break;
+            }
+        }
+    }
+    if (mode_index < 0 && crtc->mode_valid) {
+        for (i = 0; i < connector->count_modes; i++) {
+            if (memcmp(&connector->modes[i], &crtc->mode, sizeof(crtc->mode)) == 0) {
+                mode_index = i;
+                break;
+            }
+        }
+    }
+    if (mode_index < 0) {
+        for (i = 0; i < connector->count_modes; i++) {
+            if (connector->modes[i].type & V2N_DRM_MODE_TYPE_PREFERRED) {
+                mode_index = i;
+                break;
+            }
+        }
+    }
+    if (mode_index < 0) {
+        int best_area = 0;
+
+        for (i = 0; i < connector->count_modes; i++) {
+            int area = (int)connector->modes[i].hdisplay * (int)connector->modes[i].vdisplay;
+
+            if (area > best_area) {
+                best_area = area;
+                mode_index = i;
+            }
+        }
+    }
+    if (mode_index < 0) {
+        fprintf(stderr, "vita2native: KMS: no usable display mode\n");
+        k->free_crtc(crtc);
+        k->free_encoder(encoder);
+        k->free_connector(connector);
+        k->free_resources(resources);
+        return false;
+    }
+
+    k->mode = connector->modes[mode_index];
+    k->crtc_id = crtc_id;
+    k->connector_id = connector->connector_id;
+    k->saved_crtc = crtc;
+    g->kms_width = (int)k->mode.hdisplay;
+    g->kms_height = (int)k->mode.vdisplay;
+    g->kms_crtc_id = crtc_id;
+    g->kms_drm_fd = g->drm_fd;
+
+    fprintf(stderr, "vita2native: KMS display %s %ux%u@%u\n", k->mode.name, k->mode.hdisplay,
+            k->mode.vdisplay, k->mode.vrefresh);
+
+    k->free_encoder(encoder);
+    k->free_connector(connector);
+    k->free_resources(resources);
+    return true;
+}
+
+static void gles_kms_shutdown(HostGles *g)
+{
+    KmsState *k = g->kms_state;
+
+    if (!k)
+        return;
+
+    if (k->flip_pending)
+        gles_kms_wait_flip(g, k);
+
+    gles_kms_release_retired(g, k);
+
+    if (k->saved_crtc) {
+        if (g->drm_fd >= 0 && k->saved_crtc->mode_valid)
+            (void)k->set_crtc(g->drm_fd, k->saved_crtc->crtc_id, k->saved_crtc->buffer_id,
+                              k->saved_crtc->x, k->saved_crtc->y, &k->connector_id, 1,
+                              &k->saved_crtc->mode);
+        k->free_crtc(k->saved_crtc);
+        k->saved_crtc = NULL;
+    }
+
+    /* The CRTC no longer scans this buffer out, so it can be released. */
+    if (g->gbm_surface && k->scanout_bo) {
+        k->rm_fb(g->drm_fd, k->scanout_fb);
+        k->surface_release_buffer(g->gbm_surface, k->scanout_bo);
+        k->scanout_bo = NULL;
+        k->scanout_fb = 0;
+    }
+
+    if (g->gbm_surface) {
+        k->surface_destroy(g->gbm_surface);
+        g->gbm_surface = NULL;
+    }
+
+    if (k->drop_master && g->drm_fd >= 0)
+        (void)k->drop_master(g->drm_fd);
+
+    dlclose(k->lib);
+    free(k);
+    g->kms_state = NULL;
 }
 
 static void gles_destroy_impl(HostGles *g)
@@ -250,6 +743,8 @@ static void gles_destroy_impl(HostGles *g)
         free(g->thread_surfaces);
         if (g->window_surface != EGL_NO_SURFACE)
             g->eglDestroySurface(g->display, g->window_surface);
+        if (g->kms_surface != EGL_NO_SURFACE)
+            g->eglDestroySurface(g->display, g->kms_surface);
         if (g->surface != EGL_NO_SURFACE)
             g->eglDestroySurface(g->display, g->surface);
         if (g->context != EGL_NO_CONTEXT)
@@ -259,7 +754,10 @@ static void gles_destroy_impl(HostGles *g)
         g->eglTerminate(g->display);
     }
 
-    if (g->gbm_device) {
+    /* Releases GBM buffers, restores the CRTC and unloads libdrm. */
+    gles_kms_shutdown(g);
+
+    if (g->gbm_device && g->owns_gbm_device) {
         typedef void (*gbm_device_destroy_fn)(void *device);
         gbm_device_destroy_fn destroy_device =
             g->gbm_lib ? (gbm_device_destroy_fn)dlsym(g->gbm_lib, "gbm_device_destroy") : NULL;
@@ -267,7 +765,7 @@ static void gles_destroy_impl(HostGles *g)
         if (destroy_device)
             destroy_device(g->gbm_device);
     }
-    if (g->drm_fd >= 0)
+    if (g->drm_fd >= 0 && g->owns_drm_fd)
         close(g->drm_fd);
     if (g->gbm_lib)
         dlclose(g->gbm_lib);
@@ -363,44 +861,67 @@ HostGpuDevice host_gfx_gl_create(const HostGpuConfig *config)
      * A window build needs a platform display that can create window surfaces,
      * so try the default (X11/Wayland) display first. Headless builds prefer
      * the surfaceless platform, which needs no display server. In both cases
-     * the other options are fallbacks.
+     * the other options are fallbacks. KMS direct presentation needs the GBM
+     * platform display first, because the scanout surface and the GXM textures
+     * must live on the same EGL display.
      */
     {
         EGLDisplay candidates[8];
+        bool candidate_is_gbm[8] = { false };
         int num_candidates = 0;
         bool initialized = false;
+        bool prefer_gbm = gles_kms_requested();
+
+#define GXM_ADD_CANDIDATE(display, is_gbm)                                                         \
+    do {                                                                                           \
+        candidates[num_candidates] = (display);                                                    \
+        candidate_is_gbm[num_candidates] = (is_gbm);                                               \
+        num_candidates++;                                                                          \
+    } while (0)
 
 #define GXM_ADD_SURFACELESS()                                                                      \
     do {                                                                                           \
         if (g->eglGetPlatformDisplay)                                                              \
-            candidates[num_candidates++] = g->eglGetPlatformDisplay(                               \
-                EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);                         \
+            GXM_ADD_CANDIDATE(g->eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA,              \
+                                                        EGL_DEFAULT_DISPLAY, NULL),                \
+                              false);                                                              \
         if (g->eglGetPlatformDisplayEXT)                                                           \
-            candidates[num_candidates++] = g->eglGetPlatformDisplayEXT(                            \
-                EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);                         \
+            GXM_ADD_CANDIDATE(g->eglGetPlatformDisplayEXT(EGL_PLATFORM_SURFACELESS_MESA,            \
+                                                           EGL_DEFAULT_DISPLAY, NULL),             \
+                              false);                                                              \
     } while (0)
+
+#define GXM_ADD_GBM()                                                                              \
+    do {                                                                                           \
+        void *gbm = gxm_gbm_device_create(g);                                                      \
+        if (gbm) {                                                                                 \
+            if (g->eglGetPlatformDisplayEXT)                                                       \
+                GXM_ADD_CANDIDATE(g->eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR,                \
+                                                               (EGLNativeDisplayType)gbm, NULL),   \
+                                  true);                                                       \
+            GXM_ADD_CANDIDATE(g->eglGetDisplay((EGLNativeDisplayType)gbm), true);                  \
+        }                                                                                          \
+    } while (0)
+
+        /* Vendor blobs on handhelds need a GBM device; Mesa ignores this when
+           one of the other platforms already worked. */
+        if (prefer_gbm)
+            GXM_ADD_GBM();
 
         if (config->headless) {
             GXM_ADD_SURFACELESS();
-            candidates[num_candidates++] = g->eglGetDisplay(EGL_DEFAULT_DISPLAY);
+            GXM_ADD_CANDIDATE(g->eglGetDisplay(EGL_DEFAULT_DISPLAY), false);
         } else {
-            candidates[num_candidates++] = g->eglGetDisplay(EGL_DEFAULT_DISPLAY);
+            GXM_ADD_CANDIDATE(g->eglGetDisplay(EGL_DEFAULT_DISPLAY), false);
             GXM_ADD_SURFACELESS();
         }
+
+        if (!prefer_gbm)
+            GXM_ADD_GBM();
+
+#undef GXM_ADD_GBM
 #undef GXM_ADD_SURFACELESS
-
-        /* Vendor blobs on handhelds need a GBM device; Mesa ignores this when
-           one of the platforms above already worked. */
-        {
-            void *gbm = gxm_gbm_device_create(g);
-
-            if (gbm) {
-                if (g->eglGetPlatformDisplayEXT)
-                    candidates[num_candidates++] = g->eglGetPlatformDisplayEXT(
-                        EGL_PLATFORM_GBM_KHR, (EGLNativeDisplayType)gbm, NULL);
-                candidates[num_candidates++] = g->eglGetDisplay((EGLNativeDisplayType)gbm);
-            }
-        }
+#undef GXM_ADD_CANDIDATE
 
         for (int i = 0; i < num_candidates && !initialized; i++) {
             if (candidates[i] == EGL_NO_DISPLAY)
@@ -408,6 +929,7 @@ HostGpuDevice host_gfx_gl_create(const HostGpuConfig *config)
 
             if (g->eglInitialize(candidates[i], &egl_major, &egl_minor)) {
                 g->display = candidates[i];
+                g->display_is_gbm = candidate_is_gbm[i];
                 initialized = true;
             }
         }
@@ -683,6 +1205,164 @@ static bool gles_create_present_program(HostGles *g)
     return true;
 }
 
+static void gles_kms_recycle(HostGles *g)
+{
+    KmsState *k = g->kms_state;
+
+    if (!k)
+        return;
+
+    if (k->flip_pending && gles_kms_wait_flip(g, k) != 0) {
+        fprintf(stderr, "vita2native: KMS: page flip wait failed\n");
+        k->flip_pending = false;
+    }
+
+    /* The previous front buffer is no longer scanned out and can go back to
+       the GBM swap chain. The buffer being scanned out right now must stay
+       locked (and its fb must stay registered) until a newer flip completes. */
+    gles_kms_release_retired(g, k);
+}
+
+static int gles_kms_queue_flip(HostGles *g)
+{
+    KmsState *k = g->kms_state;
+    void *bo;
+    uint32_t fb_id = 0;
+    uint32_t handle;
+    uint32_t stride;
+    int ret;
+
+    if (!k || !g->gbm_surface || g->drm_fd < 0)
+        return -1;
+
+    bo = k->surface_lock_front_buffer(g->gbm_surface);
+    if (!bo) {
+        fprintf(stderr, "vita2native: KMS: gbm_surface_lock_front_buffer failed\n");
+        return -1;
+    }
+
+    handle = k->bo_get_handle(bo).u32;
+    stride = k->bo_get_stride(bo);
+    ret = k->add_fb(g->drm_fd, k->bo_get_width(bo), k->bo_get_height(bo), 24, 32, stride, handle,
+                    &fb_id);
+    if (ret != 0) {
+        fprintf(stderr, "vita2native: KMS: drmModeAddFB failed (%d)\n", ret);
+        k->surface_release_buffer(g->gbm_surface, bo);
+        return -1;
+    }
+
+    if (!k->mode_set) {
+        /* A page flip needs a CRTC that is already configured. */
+        ret = k->set_crtc(g->drm_fd, k->crtc_id, fb_id, 0, 0, &k->connector_id, 1, &k->mode);
+        if (ret != 0) {
+            fprintf(stderr, "vita2native: KMS: drmModeSetCrtc failed (%d)\n", ret);
+            k->rm_fb(g->drm_fd, fb_id);
+            k->surface_release_buffer(g->gbm_surface, bo);
+            return -1;
+        }
+        k->mode_set = true;
+    } else {
+        ret = k->page_flip(g->drm_fd, k->crtc_id, fb_id, V2N_DRM_MODE_PAGE_FLIP_EVENT, k);
+        if (ret != 0) {
+            fprintf(stderr, "vita2native: KMS: drmModePageFlip failed (%d)\n", ret);
+            k->rm_fb(g->drm_fd, fb_id);
+            k->surface_release_buffer(g->gbm_surface, bo);
+            return -1;
+        }
+        k->flip_pending = true;
+    }
+
+    k->retired_bo = k->scanout_bo;
+    k->retired_fb = k->scanout_fb;
+    k->scanout_bo = bo;
+    k->scanout_fb = fb_id;
+    return 0;
+}
+
+int host_gfx_gl_attach_kms(HostGpuDevice device, int drm_fd, int width, int height)
+{
+    HostGles *g = device->impl;
+    KmsState *k;
+    EGLSurface surface;
+
+    (void)drm_fd;
+
+    if (!g || !g->gbm_device || !g->display_is_gbm || !g->eglCreateWindowSurface)
+        return -1;
+
+    if (!g->window_capable) {
+        fprintf(stderr, "vita2native: KMS: the EGL display has no window config\n");
+        return -1;
+    }
+
+    if (g->kms_surface != EGL_NO_SURFACE)
+        return (g_window_thread_valid && !pthread_equal(pthread_self(), g_window_thread)) ? -1 : 0;
+
+    if (!gles_kms_load(g))
+        return -1;
+    k = g->kms_state;
+
+    if (k->crtc_id == 0 && !gles_kms_setup_output(g, k, width, height))
+        return -1;
+
+    if (k->set_master) {
+        int ret = k->set_master(g->drm_fd);
+
+        if (ret != 0) {
+            fprintf(stderr, "vita2native: KMS: drmSetMaster failed (%d): another DRM master?\n",
+                    ret);
+            return -1;
+        }
+    }
+
+    if (!g->gbm_surface) {
+        g->gbm_surface =
+            k->surface_create(g->gbm_device, (uint32_t)g->kms_width, (uint32_t)g->kms_height,
+                              V2N_GBM_FORMAT_ARGB8888, V2N_GBM_BO_USE_SCANOUT |
+                                                       V2N_GBM_BO_USE_RENDERING);
+        if (!g->gbm_surface) {
+            fprintf(stderr, "vita2native: KMS: gbm_surface_create(%dx%d) failed\n", g->kms_width,
+                    g->kms_height);
+            return -1;
+        }
+    }
+
+    while (g->glGetError() != GL_NO_ERROR) {
+    }
+
+    surface = g->eglCreateWindowSurface(g->display, g->egl_config,
+                                        (EGLNativeWindowType)g->gbm_surface, NULL);
+    if (surface == EGL_NO_SURFACE) {
+        fprintf(stderr, "vita2native: KMS: eglCreateWindowSurface failed: 0x%x\n",
+                g->eglGetError());
+        k->surface_destroy(g->gbm_surface);
+        g->gbm_surface = NULL;
+        return -1;
+    }
+
+    if (gl_thread_bind(g, surface) != 0) {
+        fprintf(stderr, "vita2native: KMS: eglMakeCurrent failed: 0x%x\n", g->eglGetError());
+        g->eglDestroySurface(g->display, surface);
+        k->surface_destroy(g->gbm_surface);
+        g->gbm_surface = NULL;
+        return -1;
+    }
+
+    /* Page flips provide the pacing; blocking in eglSwapBuffers would delay
+       the guest thread that hands frames over. */
+    if (g->eglSwapInterval)
+        g->eglSwapInterval(g->display, 0);
+
+    g_thread_state.window = true;
+    g->kms_surface = surface;
+    g_window_thread = pthread_self();
+    g_window_thread_valid = true;
+
+    fprintf(stderr, "vita2native: KMS presentation enabled (%dx%d, crtc %u, connector %u)\n",
+            g->kms_width, g->kms_height, k->crtc_id, k->connector_id);
+    return 0;
+}
+
 int host_gfx_gl_attach_window(HostGpuDevice device, void *native_window)
 {
     HostGles *g = device->impl;
@@ -737,6 +1417,8 @@ void host_gfx_gl_thread_enter(HostGpuDevice device)
 
     if (g_thread_state.window && g->window_surface != EGL_NO_SURFACE)
         gl_thread_bind(g, g->window_surface);
+    else if (g_thread_state.window && g->kms_surface != EGL_NO_SURFACE)
+        gl_thread_bind(g, g->kms_surface);
     else
         gl_thread_bind(g, g_thread_state.surface);
 }
@@ -745,7 +1427,10 @@ void host_gfx_gl_detach_window(HostGpuDevice device)
 {
     HostGles *g = device->impl;
 
-    if (!g || g->window_surface == EGL_NO_SURFACE)
+    if (!g)
+        return;
+
+    if (g->kms_surface == EGL_NO_SURFACE && g->window_surface == EGL_NO_SURFACE)
         return;
 
     if (g_window_thread_valid && !pthread_equal(pthread_self(), g_window_thread))
@@ -753,8 +1438,18 @@ void host_gfx_gl_detach_window(HostGpuDevice device)
 
     gl_thread_bind(g, g_thread_state.surface);
     g_thread_state.window = false;
-    g->eglDestroySurface(g->display, g->window_surface);
-    g->window_surface = EGL_NO_SURFACE;
+
+    if (g->kms_surface != EGL_NO_SURFACE) {
+        g->eglDestroySurface(g->display, g->kms_surface);
+        g->kms_surface = EGL_NO_SURFACE;
+        gles_kms_shutdown(g);
+    }
+
+    if (g->window_surface != EGL_NO_SURFACE) {
+        g->eglDestroySurface(g->display, g->window_surface);
+        g->window_surface = EGL_NO_SURFACE;
+    }
+
     g_window_thread_valid = false;
 }
 
@@ -840,18 +1535,37 @@ void host_gfx_gl_present_framebuffer(HostGpuDevice device, const void *rgba, int
 void host_gfx_gl_present_texture(HostGpuDevice device, unsigned int texture, int width, int height)
 {
     HostGles *g = device->impl;
+    EGLSurface surface;
     EGLint window_width = 0, window_height = 0;
+    bool kms = false;
 
-    if (!g || g->window_surface == EGL_NO_SURFACE || !texture || width <= 0 || height <= 0)
+    if (!g || !texture || width <= 0 || height <= 0)
         return;
 
-    if (!g->eglQuerySurface(g->display, g->window_surface, EGL_WIDTH, &window_width) ||
-        !g->eglQuerySurface(g->display, g->window_surface, EGL_HEIGHT, &window_height) ||
-        window_width <= 0 || window_height <= 0)
+    if (g->window_surface != EGL_NO_SURFACE) {
+        surface = g->window_surface;
+        if (g_window_thread_valid && !pthread_equal(pthread_self(), g_window_thread))
+            return;
+        if (!g->eglQuerySurface(g->display, surface, EGL_WIDTH, &window_width) ||
+            !g->eglQuerySurface(g->display, surface, EGL_HEIGHT, &window_height) ||
+            window_width <= 0 || window_height <= 0)
+            return;
+    } else if (g->kms_surface != EGL_NO_SURFACE) {
+        surface = g->kms_surface;
+        if (g_window_thread_valid && !pthread_equal(pthread_self(), g_window_thread))
+            return;
+        window_width = g->kms_width;
+        window_height = g->kms_height;
+        kms = true;
+    } else {
         return;
+    }
 
     if (!g->present_program && !gles_create_present_program(g))
         return;
+
+    if (kms)
+        gles_kms_recycle(g);
 
     g->glBindFramebuffer(GL_FRAMEBUFFER, 0);
     g->glViewport(0, 0, window_width, window_height);
@@ -899,5 +1613,16 @@ void host_gfx_gl_present_texture(HostGpuDevice device, unsigned int texture, int
         }
     }
 
-    g->eglSwapBuffers(g->display, g->window_surface);
+    /* The presenting context is not the rendering one: finish the blit before
+       the guest is allowed to overwrite the source texture. */
+    if (kms)
+        g->glFinish();
+
+    if (!g->eglSwapBuffers(g->display, surface)) {
+        fprintf(stderr, "vita2native: eglSwapBuffers failed: 0x%x\n", g->eglGetError());
+        return;
+    }
+
+    if (kms)
+        (void)gles_kms_queue_flip(g);
 }

@@ -112,9 +112,9 @@ void host_video_present(HostVideo *video, const void *rgba, int width, int heigh
                         int pitch_pixels);
 
 /*
- * Presents a GL texture owned by the GPU device directly on the window (X11
- * only for now). Returns false when direct presentation is unavailable and the
- * caller should fall back to host_video_present().
+ * Presents a GL texture owned by the GPU device directly on the window (X11)
+ * or the scanout plane (KMS/DRM). Returns false when direct presentation is
+ * unavailable and the caller should fall back to host_video_present().
  */
 bool host_video_present_texture(HostVideo *video, unsigned int texture, int width, int height);
 

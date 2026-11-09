@@ -254,13 +254,31 @@ struct HostVideo {
     uint16_t rumble_high;
     bool window_closed;
 
-    /* Direct EGL presentation (X11): the guest presents the GXM texture. */
+    /* Direct EGL presentation: X11 windows or KMS/DRM scanout. */
     bool direct_present;
+    bool kms_present;
     bool egl_attached;
     unsigned long x11_window;
 };
 
 static HostVideo *g_active_video;
+
+/* Matches gles_kms_requested() in host_gfx_gl.c. */
+static bool video_kms_requested(void)
+{
+    const char *driver;
+
+    if (!getenv("VITA2NATIVE_DIRECT_PRESENT"))
+        return false;
+    if (getenv("VITA2NATIVE_KMS_PRESENT"))
+        return true;
+
+    driver = getenv("SDL_VIDEODRIVER");
+    if (driver && strstr(driver, "kmsdrm"))
+        return true;
+
+    return !getenv("DISPLAY") && !getenv("WAYLAND_DISPLAY");
+}
 
 static uint64_t video_now_ns(void)
 {
@@ -274,6 +292,9 @@ static void video_present(HostVideo *video, const void *rgba, int width, int hei
                           int pitch_pixels)
 {
     SdlApi *api = video->api;
+
+    if (!video->renderer)
+        return;
 
     if (!video->texture || video->texture_width != width || video->texture_height != height) {
         if (video->texture)
@@ -348,6 +369,20 @@ static bool video_init_sdl(HostVideo *video)
         video->controller_ready = true;
     } else {
         fprintf(stderr, "vita2native: SDL controller init failed: %s\n", api->get_error());
+    }
+
+    if (video_kms_requested()) {
+        /* KMS presentation draws straight to the scanout buffers; SDL only
+           provides evdev input, so no window (and no extra GBM/EGL state) is
+           created here. */
+        video->direct_present = true;
+        video->kms_present = true;
+        video->width = 960;
+        video->height = 544;
+        fprintf(stderr, "vita2native: direct KMS presentation enabled (SDL %s input only)\n",
+                api->get_current_video_driver ? api->get_current_video_driver() : "unknown");
+        video->controller_scan_at_ns = video_now_ns();
+        return true;
     }
 
     if (!video->windowed)
@@ -1207,7 +1242,13 @@ bool host_video_present_texture(HostVideo *video, unsigned int texture, int widt
         return false;
 
     if (!video->egl_attached) {
-        if (host_gpu_attach_window(device, (void *)(uintptr_t)video->x11_window) != 0) {
+        int ret;
+
+        if (video->kms_present)
+            ret = host_gpu_attach_kms(device, -1, 0, 0);
+        else
+            ret = host_gpu_attach_window(device, (void *)(uintptr_t)video->x11_window);
+        if (ret != 0) {
             fprintf(stderr, "vita2native: direct EGL attach failed\n");
             return false;
         }
@@ -1232,6 +1273,16 @@ __attribute__((weak)) int host_gpu_attach_window(HostGpuDevice device, void *nat
 {
     (void)device;
     (void)native_window;
+    return -1;
+}
+
+__attribute__((weak)) int host_gpu_attach_kms(HostGpuDevice device, int drm_fd, int width,
+                                               int height)
+{
+    (void)device;
+    (void)drm_fd;
+    (void)width;
+    (void)height;
     return -1;
 }
 
