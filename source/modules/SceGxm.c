@@ -163,7 +163,10 @@ typedef struct {
     uint32_t gamma_mode;
     uint32_t hash;
     uint64_t hash_frame;
+    uint64_t hash_checked_frame;
+    uint32_t stable_checks;
     uint64_t last_used;
+    uint64_t bytes;
     uint32_t param_key;
     bool params_valid;
     bool valid;
@@ -179,6 +182,7 @@ typedef struct {
 #define GXM_TEXTURE_CACHE_SLOTS 64
 
 static GxmTextureCache g_texture_cache[GXM_TEXTURE_CACHE_SLOTS];
+static uint64_t g_texture_cache_bytes;
 static uint64_t g_texture_clock;
 static uint64_t g_gxm_frame;
 static unsigned int g_profile_draws;
@@ -1559,10 +1563,114 @@ static GxmTextureCache *gxm_texture_cache_find(const SceGxmTextureInner *texture
 
 static void gxm_forget_texture(GLuint tex);
 
-static GxmTextureCache *gxm_texture_cache_alloc(void)
+/*
+ * The cache holds GL texture objects, and the Mali driver backs them with
+ * system RAM. Sixty-four 2048x2048 textures are half a gigabyte, enough to
+ * OOM a 1 GB handheld. Bound the cache by bytes (1/5 of RAM by default,
+ * overridable with VITA2NATIVE_TEXTURE_CACHE_MB) and evict least recently
+ * used entries as needed.
+ */
+static uint64_t gxm_texture_cache_budget(void)
 {
+    static uint64_t budget;
+
+    if (!budget) {
+        const char *env = getenv("VITA2NATIVE_TEXTURE_CACHE_MB");
+
+        if (env) {
+            long mb = strtol(env, NULL, 0);
+
+            budget = mb > 0 ? (uint64_t)mb * 1024u * 1024u : 1;
+        } else {
+            FILE *file = fopen("/proc/meminfo", "r");
+            unsigned long total_kb = 0;
+            char line[128];
+
+            if (file) {
+                while (fgets(line, sizeof(line), file)) {
+                    if (sscanf(line, "MemTotal: %lu kB", &total_kb) == 1)
+                        break;
+                }
+                fclose(file);
+            }
+            if (total_kb == 0)
+                total_kb = 1024u * 1024u; /* 1 GiB fallback */
+
+            budget = (uint64_t)(total_kb / 5u) * 1024u;
+            if (budget < 96u * 1024u * 1024u)
+                budget = 96u * 1024u * 1024u;
+            if (budget > 256u * 1024u * 1024u)
+                budget = 256u * 1024u * 1024u;
+        }
+
+        LOG("SceGxm: texture cache budget %llu MB", (unsigned long long)(budget / (1024u * 1024u)));
+    }
+
+    return budget;
+}
+
+static uint64_t gxm_texture_estimate_bytes(uint32_t width, uint32_t height, uint32_t mip_count,
+                                           bool cube)
+{
+    uint64_t bytes = (uint64_t)width * height * 4u;
+
+    if (mip_count > 1)
+        bytes += bytes / 3u;
+    if (cube)
+        bytes *= 6u;
+    return bytes;
+}
+
+static void gxm_forget_texture(GLuint tex)
+{
+    for (unsigned int i = 0; i < ARRAY_SIZE(g_bound_texture); i++) {
+        if (g_bound_texture[i] == tex) {
+            g_bound_texture[i] = 0;
+            g_unit_texture_valid[i] = false;
+        }
+    }
+}
+
+static void gxm_texture_cache_evict(GxmTextureCache *cache)
+{
+    if (!cache->valid && !cache->tex)
+        return;
+
+    if (cache->tex) {
+        gxm_forget_texture(cache->tex);
+        if (g_gl)
+            g_gl->glDeleteTextures(1, &cache->tex);
+    }
+
+    if (cache->bytes <= g_texture_cache_bytes)
+        g_texture_cache_bytes -= cache->bytes;
+    else
+        g_texture_cache_bytes = 0;
+    memset(cache, 0, sizeof(*cache));
+}
+
+static GxmTextureCache *gxm_texture_cache_alloc(uint64_t needed)
+{
+    const uint64_t budget = gxm_texture_cache_budget();
     GxmTextureCache *victim = &g_texture_cache[0];
     bool found = false;
+
+    /* Reclaim the least recently used entries until the new texture fits. */
+    while (g_texture_cache_bytes > 0 && g_texture_cache_bytes + needed > budget) {
+        GxmTextureCache *lru = NULL;
+
+        for (unsigned int i = 0; i < GXM_TEXTURE_CACHE_SLOTS; i++) {
+            GxmTextureCache *cache = &g_texture_cache[i];
+
+            if (!cache->valid)
+                continue;
+            if (!lru || cache->last_used < lru->last_used)
+                lru = cache;
+        }
+        if (!lru)
+            break;
+        gxm_texture_cache_evict(lru);
+    }
 
     for (unsigned int i = 0; i < GXM_TEXTURE_CACHE_SLOTS; i++) {
         GxmTextureCache *cache = &g_texture_cache[i];
@@ -1578,36 +1686,61 @@ static GxmTextureCache *gxm_texture_cache_alloc(void)
         }
     }
 
-    if (victim->tex)
-        g_gl->glDeleteTextures(1, &victim->tex);
-    gxm_forget_texture(victim->tex);
-    memset(victim, 0, sizeof(*victim));
-
+    gxm_texture_cache_evict(victim);
     return victim;
-}
-
-static void gxm_forget_texture(GLuint tex)
-{
-    for (unsigned int i = 0; i < ARRAY_SIZE(g_bound_texture); i++) {
-        if (g_bound_texture[i] == tex) {
-            g_bound_texture[i] = 0;
-            g_unit_texture_valid[i] = false;
-        }
-    }
 }
 
 static void gxm_texture_cache_flush(void)
 {
-    for (unsigned int i = 0; i < GXM_TEXTURE_CACHE_SLOTS; i++) {
-        if (g_texture_cache[i].tex && g_gl)
-            g_gl->glDeleteTextures(1, &g_texture_cache[i].tex);
-        memset(&g_texture_cache[i], 0, sizeof(g_texture_cache[i]));
-    }
+    for (unsigned int i = 0; i < GXM_TEXTURE_CACHE_SLOTS; i++)
+        gxm_texture_cache_evict(&g_texture_cache[i]);
+
+    g_texture_cache_bytes = 0;
     memset(g_bound_texture, 0, sizeof(g_bound_texture));
     memset(g_unit_texture_valid, 0, sizeof(g_unit_texture_valid));
     g_active_texture_unit = UINT_MAX;
     g_texture_clock = 0;
     g_gxm_frame = 0;
+}
+
+/*
+ * Hashing a 2048x2048 texture costs several milliseconds, and a scene can
+ * bind a dozen of them every frame. A texture whose contents keep changing
+ * (video, animated UI) is checked every frame; after four unchanged checks it
+ * is treated as static and checked only every 30 frames. A change pulls it
+ * back to per-frame checking on the next check. VITA2NATIVE_TEXTURE_HASH_INTERVAL
+ * overrides the policy for every texture (diagnostics).
+ */
+#define GXM_STABLE_TEXTURE_CHECKS         4
+#define GXM_STABLE_TEXTURE_HASH_INTERVAL 30
+
+static int gxm_texture_hash_interval(const GxmTextureCache *cache)
+{
+    static int forced = -2;
+
+    if (forced == -2) {
+        const char *env = getenv("VITA2NATIVE_TEXTURE_HASH_INTERVAL");
+
+        forced = env ? atoi(env) : 0;
+        if (forced < 0)
+            forced = 0;
+    }
+
+    if (forced > 0)
+        return forced;
+    if (!cache)
+        return 1;
+    return cache->stable_checks >= GXM_STABLE_TEXTURE_CHECKS ? GXM_STABLE_TEXTURE_HASH_INTERVAL
+                                                            : 1;
+}
+
+static bool gxm_skip_finish(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_NO_FINISH") != NULL;
+    return enabled;
 }
 
 static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned int unit)
@@ -1693,10 +1826,35 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
         return true;
     }
 
+    /*
+     * Hashing a 2048x2048 texture costs several milliseconds, and a scene can
+     * bind a dozen of them every frame. VITA2NATIVE_TEXTURE_HASH_INTERVAL=N
+     * checks contents once every N frames instead of every frame; the default
+     * keeps the previous per-frame behaviour.
+     */
+    {
+        int interval = gxm_texture_hash_interval(cache);
+
+        if (cache && interval > 1 && cache->hash_checked_frame &&
+            g_gxm_frame - cache->hash_checked_frame < (uint64_t)interval) {
+            cache->hash_frame = g_gxm_frame;
+            if (g_bound_texture[unit] != cache->tex) {
+                g_gl->glBindTexture(target, cache->tex);
+                g_bound_texture[unit] = cache->tex;
+            }
+            gxm_apply_texture_params(cache, texture, target, mip_count);
+            cache->last_used = ++g_texture_clock;
+            return true;
+        }
+    }
+
     hash = gxm_texture_hash(texture, data);
 
     if (cache && cache->hash == hash) {
         cache->hash_frame = g_gxm_frame;
+        cache->hash_checked_frame = g_gxm_frame;
+        if (cache->stable_checks < 1000000u)
+            cache->stable_checks++;
         if (g_bound_texture[unit] != cache->tex) {
             g_gl->glBindTexture(target, cache->tex);
             g_bound_texture[unit] = cache->tex;
@@ -1708,14 +1866,11 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
 
     if (cache) {
         /* Same key, different content: re-upload into the same slot. */
-        if (cache->tex) {
-            gxm_forget_texture(cache->tex);
-            g_gl->glDeleteTextures(1, &cache->tex);
-        }
-        memset(cache, 0, sizeof(*cache));
+        gxm_texture_cache_evict(cache);
         cache->target = target;
     } else {
-        cache = gxm_texture_cache_alloc();
+        cache = gxm_texture_cache_alloc(
+            gxm_texture_estimate_bytes(width, height, mip_count, cube));
         cache->target = target;
     }
 
@@ -1947,11 +2102,15 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
     cache->palette = palette;
     cache->width = width;
     cache->height = height;
+    cache->bytes = gxm_texture_estimate_bytes(width, height, mip_count, cube);
+    g_texture_cache_bytes += cache->bytes;
     cache->format = (uint32_t)gxm_texture_get_format(texture);
     cache->mip_count = mip_count;
     cache->gamma_mode = texture->gamma_mode;
     cache->hash = hash;
     cache->hash_frame = g_gxm_frame;
+    cache->hash_checked_frame = g_gxm_frame;
+    cache->stable_checks = 0;
     cache->last_used = ++g_texture_clock;
     cache->valid = true;
 
@@ -5209,7 +5368,8 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
     }
     g_gl->glBindFramebuffer(GL_FRAMEBUFFER, context->render_target->fbo);
     t0 = gxm_time_ns();
-    g_gl->glFinish();
+    if (!gxm_skip_finish())
+        g_gl->glFinish();
     t1 = gxm_time_ns();
 
     if (gxm_probe_frame_end()) {
