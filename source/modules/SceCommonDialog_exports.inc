@@ -75,7 +75,7 @@ EXPORT_FUNC(SceCommonDialog, 0x6C49924B, dialog_ok) /* sceSaveDataDialogFinish *
 EXPORT_FUNC(SceCommonDialog, 0xB2FF576E, dialog_result_not_running) /* sceSaveDataDialogGetResult */
 EXPORT_FUNC(SceCommonDialog, 0x6E258046, dialog_status_none) /* sceSaveDataDialogGetStatus */
 EXPORT_FUNC(SceCommonDialog, 0xBA0542CA, dialog_ok) /* sceSaveDataDialogGetSubStatus */
-EXPORT_FUNC(SceCommonDialog, 0xBF5248FA, dialog_init_unsupported) /* sceSaveDataDialogInit */
+EXPORT_FUNC(SceCommonDialog, 0xBF5248FA, dialog_savedata_init) /* sceSaveDataDialogInit */
 EXPORT_FUNC(SceCommonDialog, 0xBDE00A83, dialog_ok) /* sceSaveDataDialogProgressBarInc */
 EXPORT_FUNC(SceCommonDialog, 0x5C322D1E, dialog_ok) /* sceSaveDataDialogProgressBarSetValue */
 EXPORT_FUNC(SceCommonDialog, 0x415D6068, dialog_ok) /* sceSaveDataDialogSubClose */

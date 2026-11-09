@@ -17,8 +17,11 @@
  * thread) needs a lot more stack; LLVM overflows a 64 KiB stack in
  * TargetLoweringBase::initActions. The guest's stack size is not emulated, so
  * a roomier host stack is harmless.
+ *
+ * Angry Birds Trilogy's level loader recurses through most of a megabyte on
+ * its JobQueue thread, so the minimum has to be well above the old 1 MiB.
  */
-#define HOST_THREAD_STACK_MIN (1024 * 1024)
+#define HOST_THREAD_STACK_MIN (4 * 1024 * 1024)
 #define HOST_THREAD_STACK_MAX (8 * 1024 * 1024)
 
 #if defined(__linux__)

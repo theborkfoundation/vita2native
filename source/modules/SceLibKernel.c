@@ -172,7 +172,17 @@ EXPORT(SceLibKernel, 0x6C60AC61, SceUID, sceIoOpen, const char *file, int flags,
         if (getenv("VITA2NATIVE_TRACE_FILEIO"))
             LOG("sceIoOpen(\"%s\") failed: %s (host \"%s\")", file ? file : "(null)",
                 strerror(errno), host_file);
+        if (file && strstr(file, "savedata") && getenv("VITA2NATIVE_INPUT_DEBUG")) {
+            fprintf(stderr, "vita2native: sceIoOpen %s failed: %s (host %s)\n", file,
+                    strerror(errno), host_file);
+            fflush(stderr);
+        }
         return sce_error_from_errno(errno);
+    }
+
+    if (file && strstr(file, "savedata") && getenv("VITA2NATIVE_INPUT_DEBUG")) {
+        fprintf(stderr, "vita2native: sceIoOpen %s -> %s\n", file, host_file);
+        fflush(stderr);
     }
 
     (void)mode;

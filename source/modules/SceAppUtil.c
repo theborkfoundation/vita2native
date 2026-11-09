@@ -35,6 +35,15 @@
 
 static bool g_apputil_initialized;
 
+static int save_debug(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_INPUT_DEBUG") != NULL;
+    return enabled;
+}
+
 /* Resolves a savedata path ("data.bin" or "savedata0:/data.bin") to a host path. */
 static int resolve_savedata_path(const char *path, char *out, size_t out_size)
 {
@@ -206,6 +215,11 @@ EXPORT(SceAppUtil, 0x93F0D89F, int, sceAppUtilSaveDataSlotGetParam, unsigned int
         return SCE_APPUTIL_ERROR_PARAMETER;
 
     param->status = 0;
+    if (save_debug()) {
+        fprintf(stderr, "vita2native: SaveDataSlotGetParam slot=%u -> ok status=%u\n",
+                slot_id, (unsigned)param->status);
+        fflush(stderr);
+    }
     return 0;
 }
 
@@ -220,12 +234,29 @@ EXPORT(SceAppUtil, 0x607647BA, int, sceAppUtilSaveDataDataSave, SceAppUtilSaveDa
     if (!files && file_num)
         return SCE_APPUTIL_ERROR_PARAMETER;
 
+    if (save_debug()) {
+        fprintf(stderr, "vita2native: SaveDataDataSave slot=%u files=%u\n",
+                slot ? slot->id : 0u, file_num);
+        for (unsigned int i = 0; i < file_num; i++)
+            fprintf(stderr, "  file[%u] path=%s buf=%p size=%u off=%lld mode=%u\n", i,
+                    files[i].filePath ? files[i].filePath : "(null)", files[i].buf,
+                    (unsigned)files[i].bufSize, (long long)files[i].offset,
+                    (unsigned)files[i].mode);
+        fflush(stderr);
+    }
+
     for (unsigned int i = 0; i < file_num; i++) {
         char path[PATH_MAX];
         mode_t mode = files[i].mode;
 
-        if (resolve_savedata_path(files[i].filePath, path, sizeof(path)) != 0)
+        if (resolve_savedata_path(files[i].filePath, path, sizeof(path)) != 0) {
+            if (save_debug()) {
+                fprintf(stderr, "vita2native: SaveDataDataSave bad path %s\n",
+                        files[i].filePath ? files[i].filePath : "(null)");
+                fflush(stderr);
+            }
             return SCE_APPUTIL_ERROR_PARAMETER;
+        }
 
         if (mode == SCE_APPUTIL_SAVEDATA_DATA_SAVE_MODE_DIRECTORY) {
             create_parent_dirs(path);
@@ -238,8 +269,11 @@ EXPORT(SceAppUtil, 0x607647BA, int, sceAppUtilSaveDataDataSave, SceAppUtilSaveDa
         if (!files[i].buf) {
             FILE *file = fopen(path, "ab");
 
-            if (!file)
+            if (!file) {
+                if (save_debug())
+                    fprintf(stderr, "vita2native: SaveDataDataSave fopen %s failed\n", path);
                 return SCE_APPUTIL_ERROR_NO_MEMORY;
+            }
             fclose(file);
             continue;
         }
@@ -251,12 +285,20 @@ EXPORT(SceAppUtil, 0x607647BA, int, sceAppUtilSaveDataDataSave, SceAppUtilSaveDa
 
             if (!file && mode != 1)
                 file = fopen(path, "w+b");
-            if (!file)
+            if (!file) {
+                if (save_debug())
+                    fprintf(stderr, "vita2native: SaveDataDataSave fopen %s failed\n", path);
                 return SCE_APPUTIL_ERROR_NO_MEMORY;
+            }
 
             if (fseek(file, (long)files[i].offset, SEEK_SET) == 0)
                 fwrite(files[i].buf, 1, files[i].bufSize, file);
             fclose(file);
+            if (save_debug()) {
+                fprintf(stderr, "vita2native: SaveDataDataSave wrote %s (%u bytes)\n", path,
+                        (unsigned)files[i].bufSize);
+                fflush(stderr);
+            }
         }
     }
 

@@ -735,6 +735,18 @@ static void guest_signal_handler(int signal, siginfo_t *info, void *context)
         backtrace_symbols_fd(frames, count, STDERR_FILENO);
     }
 
+    /* Optional: let the kernel write a core for post-mortem analysis.  Returning
+       from the handler retries the faulting instruction with SIG_DFL, which
+       produces the core without needing to unblock the signal here. */
+    if (getenv("VITA2NATIVE_CRASH_CORE")) {
+        struct sigaction dfl;
+
+        memset(&dfl, 0, sizeof(dfl));
+        dfl.sa_handler = SIG_DFL;
+        sigaction(signal, &dfl, NULL);
+        return;
+    }
+
     _exit(128 + signal);
 }
 

@@ -383,6 +383,17 @@ static int dialog_init_unsupported(void)
     return SCE_COMMON_DIALOG_ERROR_NOT_SUPPORTED;
 }
 
+/* Save-data dialogs are probed by titles that prefer the system UI; log them
+   separately so a title stuck on "Saving..." can be diagnosed. */
+static int dialog_savedata_init(void)
+{
+    if (getenv("VITA2NATIVE_INPUT_DEBUG")) {
+        fprintf(stderr, "vita2native: SaveDataDialogInit -> not supported\n");
+        fflush(stderr);
+    }
+    return SCE_COMMON_DIALOG_ERROR_NOT_SUPPORTED;
+}
+
 static int dialog_status_none(void)
 {
     return SCE_COMMON_DIALOG_STATUS_NONE;

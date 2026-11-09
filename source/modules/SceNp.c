@@ -99,8 +99,17 @@ EXPORT(SceNpManager, 0x54060DF6, int, sceNpGetServiceState, uint32_t *state)
         return 0x80550503; /* SCE_NP_MANAGER_ERROR_INVALID_ARGUMENT */
 
     *state = np_service_state();
-    if (np_debug())
-        fprintf(stderr, "vita2native: sceNpGetServiceState -> %u\n", (unsigned)*state);
+    if (np_debug()) {
+#if defined(__arm__)
+        void *lr;
+
+        __asm__ volatile("mov %0, lr" : "=r"(lr));
+#else
+        void *lr = __builtin_return_address(0);
+#endif
+        fprintf(stderr, "vita2native: sceNpGetServiceState lr=%p -> %u\n", lr,
+                (unsigned)*state);
+    }
     return 0;
 }
 
