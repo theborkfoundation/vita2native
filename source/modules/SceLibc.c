@@ -869,13 +869,58 @@ EXPORT(SceLibc, 0x66b7406c, FILE *, vita_stdin, void)
     return stdin;
 }
 
-/* ctype tables, published as pointers the way newlib does. */
-static unsigned char g_touptab[257];
-static unsigned char g_tolotab[257];
-static unsigned char g_ctype[257];
+/*
+ * Sony's libc publishes _Ctype, _Touptab and _Tolotab as *pointer variables*
+ * that point at 16-bit tables indexed by the raw (signed) char. The guest code
+ * loads the pointer and then indexes it with `ldrsh [ptr + c * 2]`, so both the
+ * cell and the table must be ready before any guest code runs. The entries are
+ * the ones libc.suprx ships: isdigit tests 0x20, isalpha 0x212, isspace 0x144,
+ * ispunct 0x8, isprint 0x23e, isgraph 0x23a, iscntrl 0x80 and isxdigit 0x404.
+ * The tables are padded below index 0 so that negative chars stay in bounds.
+ */
+#define LIBC_CTYPE_PAD 128
+
+static const uint16_t k_ctype[256] = {
+    0x080, 0x080, 0x080, 0x080, 0x080, 0x080, 0x080, 0x080,
+    0x080, 0x4c0, 0x0c0, 0x0c0, 0x0c0, 0x0c0, 0x080, 0x080,
+    0x080, 0x080, 0x080, 0x080, 0x080, 0x080, 0x080, 0x080,
+    0x080, 0x080, 0x080, 0x080, 0x080, 0x080, 0x080, 0x080,
+    0x004, 0x008, 0x008, 0x008, 0x008, 0x008, 0x008, 0x008,
+    0x008, 0x008, 0x008, 0x008, 0x008, 0x008, 0x008, 0x008,
+    0x021, 0x021, 0x021, 0x021, 0x021, 0x021, 0x021, 0x021,
+    0x021, 0x021, 0x008, 0x008, 0x008, 0x008, 0x008, 0x008,
+    0x008, 0x003, 0x003, 0x003, 0x003, 0x003, 0x003, 0x002,
+    0x002, 0x002, 0x002, 0x002, 0x002, 0x002, 0x002, 0x002,
+    0x002, 0x002, 0x002, 0x002, 0x002, 0x002, 0x002, 0x002,
+    0x002, 0x002, 0x002, 0x008, 0x008, 0x008, 0x008, 0x008,
+    0x008, 0x011, 0x011, 0x011, 0x011, 0x011, 0x011, 0x010,
+    0x010, 0x010, 0x010, 0x010, 0x010, 0x010, 0x010, 0x010,
+    0x010, 0x010, 0x010, 0x010, 0x010, 0x010, 0x010, 0x010,
+    0x010, 0x010, 0x010, 0x008, 0x008, 0x008, 0x008, 0x080,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+};
+
+static uint16_t g_ctype[LIBC_CTYPE_PAD + 256];
+static uint16_t g_touptab[LIBC_CTYPE_PAD + 256];
+static uint16_t g_tolotab[LIBC_CTYPE_PAD + 256];
 
 /*
- * newlib's stdio and ctype entry points are exported both as variables and as
+ * The stdio and ctype entry points are exported both as variables and as
  * accessor functions depending on the toolchain. Guest modules import the
  * variables, so publish cells holding the host objects. They must be ready
  * before any guest code runs.
@@ -890,54 +935,42 @@ extern void *g_vita_libc_ctype_cell;
 static void init_libc_var_cells(void) __attribute__((constructor));
 static void init_libc_var_cells(void)
 {
+    for (int i = 0; i < 256; i++) {
+        /* Negative chars index the pad; keep them in range and map them to
+           themselves, which is what the firmware tables do for 0x80..0xff. */
+        g_ctype[LIBC_CTYPE_PAD + i] = k_ctype[i];
+        g_touptab[LIBC_CTYPE_PAD + i] =
+            (uint16_t)(i >= 'a' && i <= 'z' ? i - 'a' + 'A' : i);
+        g_tolotab[LIBC_CTYPE_PAD + i] =
+            (uint16_t)(i >= 'A' && i <= 'Z' ? i - 'A' + 'a' : i);
+    }
+    for (int i = 0; i < LIBC_CTYPE_PAD; i++) {
+        g_ctype[i] = 0;
+        g_touptab[i] = (uint16_t)(i - LIBC_CTYPE_PAD);
+        g_tolotab[i] = (uint16_t)(i - LIBC_CTYPE_PAD);
+    }
+
     g_vita_libc_stdin_cell = stdin;
     g_vita_libc_stdout_cell = stdout;
     g_vita_libc_stderr_cell = stderr;
-    g_vita_libc_touptab_cell = g_touptab;
-    g_vita_libc_tolotab_cell = g_tolotab;
-    g_vita_libc_ctype_cell = &g_ctype[1];
+    g_vita_libc_touptab_cell = &g_touptab[LIBC_CTYPE_PAD];
+    g_vita_libc_tolotab_cell = &g_tolotab[LIBC_CTYPE_PAD];
+    g_vita_libc_ctype_cell = &g_ctype[LIBC_CTYPE_PAD];
 }
 
-EXPORT(SceLibc, 0x36878958, unsigned char *, _Touptab, void)
+EXPORT(SceLibc, 0x36878958, unsigned short *, _Touptab, void)
 {
-    if (!g_touptab[1]) {
-        for (int i = 0; i < 257; i++)
-            g_touptab[i] = (unsigned char)i;
-    }
-
-    return g_touptab;
+    return &g_touptab[LIBC_CTYPE_PAD];
 }
 
-EXPORT(SceLibc, 0xd662e07c, unsigned char *, _Tolotab, void)
+EXPORT(SceLibc, 0xd662e07c, unsigned short *, _Tolotab, void)
 {
-    if (!g_tolotab['a']) {
-        for (int i = 0; i < 257; i++)
-            g_tolotab[i] = (unsigned char)(i >= 'A' && i <= 'Z' ? i + 'a' - 'A' : i);
-    }
-
-    return g_tolotab;
+    return &g_tolotab[LIBC_CTYPE_PAD];
 }
 
-EXPORT(SceLibc, 0x3ce6109d, unsigned char *, _Ctype, void)
+EXPORT(SceLibc, 0x3ce6109d, unsigned short *, _Ctype, void)
 {
-    if (!g_ctype[1]) {
-        for (int i = 0; i < 257; i++) {
-            unsigned char flags = 0;
-
-            if ((i >= 'a' && i <= 'z') || (i >= 'A' && i <= 'Z'))
-                flags |= 0x01 | 0x02; /* _U | _L */
-            if (i >= '0' && i <= '9')
-                flags |= 0x04;
-            if (i == ' ' || (i >= 0x09 && i <= 0x0d))
-                flags |= 0x08;
-            if (i >= 0x20 && i < 0x7f)
-                flags |= 0x40; /* printable */
-
-            g_ctype[i] = flags;
-        }
-    }
-
-    return g_ctype;
+    return &g_ctype[LIBC_CTYPE_PAD];
 }
 
 /* ------------------------------------------------------------------------- */

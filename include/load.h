@@ -6,6 +6,9 @@
 #include "jit.h"
 
 #define LOAD_MAX_SEGMENTS 4
+/* Raw ELF program header count, used to resolve variable-import relocation
+   streams (their segment indices follow the program header table). */
+#define LOAD_MAX_RAW_SEGMENTS 8
 
 typedef struct {
     uint32_t perms;
@@ -35,6 +38,11 @@ typedef struct {
     uint32_t tls_memsz;
     LoadedSegment segments[LOAD_MAX_SEGMENTS];
     int num_segments;
+    /* Per raw program header: host RX/RW base, so variable-import relocations
+       can be re-applied after all modules have registered their exports. */
+    uintptr_t segment_rx[LOAD_MAX_RAW_SEGMENTS];
+    uintptr_t segment_rw[LOAD_MAX_RAW_SEGMENTS];
+    int num_raw_segments;
 } LoadedModuleInfo;
 
 int load_file(Jit *jit, const char *filename, void **entry);

@@ -68,8 +68,14 @@ static int load_elf(Jit *jit, const void *data, void **entry, LoadedModuleInfo *
 static int load_self(Jit *jit, const void *data, void **entry, LoadedModuleInfo *info);
 static int load_segments(Jit *jit, void **entry, Elf32_Addr e_entry, segment_info_t *segments,
                          int num_segments, LoadedModuleInfo *info, bool fixed);
+
+static void apply_relocation(uint32_t code, uint32_t addend, uintptr_t symval, uintptr_t loc_rw,
+                             uintptr_t loc_rx);
+static void relocate_var_import(uintptr_t block_rw, uintptr_t symval, const uintptr_t *seg_rx,
+                                const uintptr_t *seg_rw, int num_segments);
 static int resolve_imports(uintptr_t rx_base, uintptr_t rw_base, sce_module_imports_u_t *import,
-                           void *importer);
+                           void *importer, const uintptr_t *seg_rx, const uintptr_t *seg_rw,
+                           int num_segments);
 static int relocate(const void *reloc, uint32_t size, segment_info_t *segs, int num_segments);
 
 /* Per-NID resolution logs are very noisy for large titles; unresolved NIDs are
@@ -727,6 +733,22 @@ segments_ready:
     LOG("  tls filesz: 0x%" PRIx32, mod_info->tls_filesz);
     LOG("  tls memsz: 0x%" PRIx32, mod_info->tls_memsz);
 
+    /* Variable-import relocation streams use program-header indices, so keep
+       the raw RX/RW bases (loaded segments only) around for re-patching. */
+    uintptr_t seg_rx[LOAD_MAX_RAW_SEGMENTS] = { 0 };
+    uintptr_t seg_rw[LOAD_MAX_RAW_SEGMENTS] = { 0 };
+    int seg_count = num_segments < LOAD_MAX_RAW_SEGMENTS ? num_segments : LOAD_MAX_RAW_SEGMENTS;
+
+    for (int i = 0; i < seg_count; i++) {
+        seg_rx[i] = segments[i].rx_addr;
+        seg_rw[i] = segments[i].rw_addr;
+    }
+    if (info) {
+        memcpy(info->segment_rx, seg_rx, sizeof(seg_rx));
+        memcpy(info->segment_rw, seg_rw, sizeof(seg_rw));
+        info->num_raw_segments = seg_count;
+    }
+
     /* Resolve NIDs */
     sce_module_imports_u_t *import =
         (void *)(segments[mod_info_idx].rw_addr + mod_info->import_top);
@@ -736,7 +758,7 @@ segments_ready:
         imp_name = (void *)CODE_RX_TO_RW_ADDR(code_rx_addr, code_rw_addr, IMP_GET_NAME(import));
         LOG("Resolving imports for %s (NID: 0x%08" PRIx32 ")", imp_name, IMP_GET_NID(import));
         if (resolve_imports(code_rx_addr, code_rw_addr, import,
-                            info ? info->module_info : NULL) < 0) {
+                            info ? info->module_info : NULL, seg_rx, seg_rw, seg_count) < 0) {
             LOG("Failed to resolve imports for %s", imp_name);
             goto err_free_data;
         }
@@ -866,7 +888,8 @@ int load_repatch_imports(LoadedModuleInfo *info)
 
     for (; (void *)import < end; import = IMP_GET_NEXT(import)) {
         if (resolve_imports((uintptr_t)info->code_rx, (uintptr_t)info->code_rw, import,
-                            info->module_info) < 0)
+                            info->module_info, info->segment_rx, info->segment_rw,
+                            info->num_raw_segments) < 0)
             return -1;
     }
 
@@ -874,7 +897,8 @@ int load_repatch_imports(LoadedModuleInfo *info)
 }
 
 static int resolve_imports(uintptr_t rx_base, uintptr_t rw_base, sce_module_imports_u_t *import,
-                           void *importer)
+                           void *importer, const uintptr_t *seg_rx, const uintptr_t *seg_rw,
+                           int num_segments)
 {
     const void *addr;
     uint32_t nid;
@@ -915,7 +939,17 @@ static int resolve_imports(uintptr_t rx_base, uintptr_t rw_base, sce_module_impo
         if (addr) {
             uint32_t *entry = (void *)CODE_RX_TO_RW_ADDR(
                 rx_base, rw_base, IMP_GET_VARS_ENTRIES(import));
-            entry[i] = (uint32_t)(uintptr_t)addr;
+            uintptr_t block = entry[i] ? CODE_RX_TO_RW_ADDR(rx_base, rw_base, entry[i]) : 0;
+
+            /* The entry is not a pointer slot: it points at a relocation
+               stream that patches every instruction referring to the
+               variable. Leave the table alone; the stream binds those
+               references to the host object. */
+            if (block) {
+                relocate_var_import(block, (uintptr_t)addr, seg_rx, seg_rw, num_segments);
+            } else {
+                LOG("  Variable NID 0x%08" PRIx32 " has no relocation stream", nid);
+            }
         } else {
             LOG("  Could not resolve variable NID 0x%08" PRIx32, nid);
         }
@@ -1050,6 +1084,73 @@ static void apply_relocation(uint32_t code, uint32_t addend, uintptr_t symval,
     }
 
     memcpy((void *)loc_rw, &value, sizeof(value));
+}
+
+/*
+ * A variable import entry points at a relocation stream, not at storage:
+ *
+ *   uint32_t header;  // unk:4, size:24 (bytes, including this header), unk:4
+ *   entries...        // 8-byte format 1 or 12-byte format 2, "Alt" layout
+ *
+ * Every entry patches one MOVW/MOVT instruction with the address of the
+ * exported object. Applying the stream is what binds guest code to the host
+ * variable; the entry table itself must be left untouched.
+ */
+static void relocate_var_import(uintptr_t block_rw, uintptr_t symval, const uintptr_t *seg_rx,
+                                const uintptr_t *seg_rw, int num_segments)
+{
+    const uint8_t *bytes;
+    uint32_t header;
+    uint32_t size;
+    uint32_t pos = 0;
+
+    memcpy(&header, (const void *)block_rw, sizeof(header));
+    size = (header >> 4) & 0xFFFFFFu;
+    if (size < sizeof(header))
+        return;
+
+    bytes = (const uint8_t *)(block_rw + sizeof(header));
+    size -= sizeof(header);
+
+    while (pos + 8 <= size) {
+        uint32_t w1, w2, w3 = 0;
+        uint32_t format, patch_segment, code, addend, offset, step;
+
+        memcpy(&w1, bytes + pos, 4);
+        memcpy(&w2, bytes + pos + 4, 4);
+
+        format = w1 & 0xF;
+        patch_segment = (w1 >> 4) & 0xF;
+        code = (w1 >> 8) & 0xFF;
+
+        if (format == 1) {
+            /* EntryFormat1Alt: patch_segment:4, code:8, addend:16, offset:32 */
+            addend = (w1 >> 16) & 0xFFFF;
+            offset = w2;
+            step = 8;
+        } else if (format == 2) {
+            /* EntryFormat2Alt: as format 1 but a full 32-bit addend. */
+            if (pos + 12 > size)
+                break;
+            memcpy(&w3, bytes + pos + 8, 4);
+            addend = w3;
+            offset = w2;
+            step = 12;
+        } else {
+            LOG("Variable import relocation: unknown format %" PRIu32, format);
+            break;
+        }
+
+        if (patch_segment < (uint32_t)num_segments && seg_rw[patch_segment]) {
+            uintptr_t loc_rw = seg_rw[patch_segment] + offset;
+            uintptr_t loc_rx = seg_rx[patch_segment] + offset;
+
+            apply_relocation(code, addend, symval, loc_rw, loc_rx);
+            __builtin___clear_cache((char *)loc_rw, (char *)loc_rw + 4);
+        }
+
+        pos += step;
+    }
 }
 
 /* Rebase an ABS32 slot whose current content is a link-time address. */
