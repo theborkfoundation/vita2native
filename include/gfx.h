@@ -29,6 +29,9 @@ typedef struct {
 HostGpuDevice host_gpu_create(const HostGpuConfig *config);
 void host_gpu_destroy(HostGpuDevice device);
 
+/* Device created by host_gpu_create(); NULL before creation. */
+HostGpuDevice host_gpu_current(void);
+
 HostGpuBackend host_gpu_backend(HostGpuDevice device);
 /* Human-readable backend/renderer/version, e.g. "GLES 3.2 (Mesa...)". */
 const char *host_gpu_description(HostGpuDevice device);
@@ -73,6 +76,12 @@ void host_gpu_detach_window(HostGpuDevice device);
  */
 void host_gpu_present_framebuffer(HostGpuDevice device, const void *rgba, int width, int height,
                                   int stride_in_pixels);
+
+/*
+ * Presents an existing GL texture owned by `device` and swaps the window.
+ * Used by the direct-present path to skip the GPU-to-CPU readback entirely.
+ */
+void host_gpu_present_texture(HostGpuDevice device, unsigned int texture, int width, int height);
 
 HostGpuMemBlock host_gpu_memblock_create(void *cpu_addr, size_t size);
 void host_gpu_memblock_destroy(HostGpuMemBlock block);

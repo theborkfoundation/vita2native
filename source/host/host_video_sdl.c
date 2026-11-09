@@ -23,6 +23,7 @@
  * does the scaling and letterboxing. Renderer handles are opaque and the few
  * constants below are part of SDL 2.x's stable ABI.
  */
+#include "gfx.h"
 #include "host.h"
 
 #include <dlfcn.h>
@@ -54,6 +55,29 @@ typedef struct SDL_RendererInfo {
     int max_texture_width;
     int max_texture_height;
 } SDL_RendererInfo;
+
+typedef struct {
+    uint8_t major, minor, patch;
+} SdlVersion;
+
+/*
+ * SDL_SysWMinfo prefix. The public struct is SDL_version (3 bytes), the
+ * SDL_SYSWM_TYPE enum, then a 64-byte union whose first member for X11 is
+ * { Display *display; Window window; }. Only X11 direct presentation uses it.
+ */
+typedef struct {
+    SdlVersion version;
+    int subsystem;
+    union {
+        struct {
+            void *display;
+            unsigned long window;
+        } x11;
+        uint8_t dummy[64];
+    } info;
+} SdlSysWmInfo;
+
+#define SDL_SYSWM_X11 2
 
 /* SDL_Event is a 56-byte union in SDL 2.x; only the common header and the
    window-event prefix are needed. */
@@ -116,6 +140,8 @@ typedef struct {
     int (*game_controller_rumble)(SDL_GameController *, unsigned short low,
                                   unsigned short high, unsigned int duration_ms);
     int (*poll_event)(void *event);
+    void (*get_version)(SdlVersion *version);
+    int (*get_window_wm_info)(SDL_Window *window, SdlSysWmInfo *info);
 } SdlApi;
 
 #define SDL_INIT_VIDEO 0x00000020u
@@ -227,6 +253,11 @@ struct HostVideo {
     uint16_t rumble_low;
     uint16_t rumble_high;
     bool window_closed;
+
+    /* Direct EGL presentation (X11): the guest presents the GXM texture. */
+    bool direct_present;
+    bool egl_attached;
+    unsigned long x11_window;
 };
 
 static HostVideo *g_active_video;
@@ -330,13 +361,31 @@ static bool video_init_sdl(HostVideo *video)
         return false;
     }
 
-    video->renderer = api->create_renderer(
-        video->window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    if (!video->renderer)
-        video->renderer = api->create_renderer(video->window, -1, 0);
-    if (!video->renderer) {
-        fprintf(stderr, "vita2native: SDL renderer creation failed: %s\n", api->get_error());
-        return false;
+    if (getenv("VITA2NATIVE_DIRECT_PRESENT") && api->get_window_wm_info && api->get_version) {
+        SdlSysWmInfo wm;
+
+        memset(&wm, 0, sizeof(wm));
+        api->get_version(&wm.version);
+        if (api->get_window_wm_info(video->window, &wm) && wm.subsystem == SDL_SYSWM_X11 &&
+            wm.info.x11.window) {
+            video->direct_present = true;
+            video->x11_window = wm.info.x11.window;
+            fprintf(stderr, "vita2native: direct EGL presentation enabled (X11 window 0x%lx)\n",
+                    video->x11_window);
+        } else {
+            fprintf(stderr, "vita2native: direct EGL presentation unavailable, using SDL\n");
+        }
+    }
+
+    if (!video->direct_present) {
+        video->renderer = api->create_renderer(
+            video->window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+        if (!video->renderer)
+            video->renderer = api->create_renderer(video->window, -1, 0);
+        if (!video->renderer) {
+            fprintf(stderr, "vita2native: SDL renderer creation failed: %s\n", api->get_error());
+            return false;
+        }
     }
 
     api->show_cursor(0);
@@ -344,7 +393,7 @@ static bool video_init_sdl(HostVideo *video)
     video->width = panel_width > 0 ? panel_width : 960;
     video->height = panel_height > 0 ? panel_height : 544;
 
-    if (api->get_renderer_info) {
+    if (video->renderer && api->get_renderer_info) {
         SDL_RendererInfo info;
 
         memset(&info, 0, sizeof(info));
@@ -353,9 +402,13 @@ static bool video_init_sdl(HostVideo *video)
                     info.name ? info.name : "?", info.flags);
     }
 
-    fprintf(stderr, "vita2native: presenting through SDL (%s video, %dx%d window)\n",
-            api->get_current_video_driver ? api->get_current_video_driver() : "unknown",
-            video->width, video->height);
+    if (video->direct_present)
+        fprintf(stderr, "vita2native: presenting through EGL (direct, %dx%d window)\n",
+                video->width, video->height);
+    else
+        fprintf(stderr, "vita2native: presenting through SDL (%s video, %dx%d window)\n",
+                api->get_current_video_driver ? api->get_current_video_driver() : "unknown",
+                video->width, video->height);
 
     video->controller_scan_at_ns = video_now_ns();
     return true;
@@ -967,6 +1020,8 @@ HostVideo *host_video_open(void)
     LOAD_SDL(get_renderer_info, "SDL_GetRendererInfo");
     LOAD_SDL(show_cursor, "SDL_ShowCursor");
     *(void **)(&api->get_current_video_driver) = dlsym(api->library, "SDL_GetCurrentVideoDriver");
+    *(void **)(&api->get_version) = dlsym(api->library, "SDL_GetVersion");
+    *(void **)(&api->get_window_wm_info) = dlsym(api->library, "SDL_GetWindowWMInfo");
 
     /* Input is optional: every symbol below may be absent on a minimal SDL
        build, and missing video symbols are the only hard failures. */
@@ -1139,3 +1194,53 @@ void host_video_present(HostVideo *video, const void *rgba, int width, int heigh
     pthread_cond_signal(&video->cond);
     pthread_mutex_unlock(&video->lock);
 }
+
+bool host_video_present_texture(HostVideo *video, unsigned int texture, int width, int height)
+{
+    HostGpuDevice device;
+
+    if (!video || !video->direct_present || !texture || width <= 0 || height <= 0)
+        return false;
+
+    device = host_gpu_current();
+    if (!device)
+        return false;
+
+    if (!video->egl_attached) {
+        if (host_gpu_attach_window(device, (void *)(uintptr_t)video->x11_window) != 0) {
+            fprintf(stderr, "vita2native: direct EGL attach failed\n");
+            return false;
+        }
+        video->egl_attached = true;
+    }
+
+    host_gpu_present_texture(device, texture, width, height);
+    return true;
+}
+
+/*
+ * Standalone test binaries link this file without the GL backend. The real
+ * implementations live in host_gfx.c in the emulator and override these.
+ */
+#if defined(__GNUC__)
+__attribute__((weak)) HostGpuDevice host_gpu_current(void)
+{
+    return NULL;
+}
+
+__attribute__((weak)) int host_gpu_attach_window(HostGpuDevice device, void *native_window)
+{
+    (void)device;
+    (void)native_window;
+    return -1;
+}
+
+__attribute__((weak)) void host_gpu_present_texture(HostGpuDevice device, unsigned int texture,
+                                                    int width, int height)
+{
+    (void)device;
+    (void)texture;
+    (void)width;
+    (void)height;
+}
+#endif

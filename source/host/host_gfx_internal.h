@@ -26,5 +26,6 @@ int host_gfx_gl_attach_window(HostGpuDevice device, void *native_window);
 void host_gfx_gl_detach_window(HostGpuDevice device);
 void host_gfx_gl_present_framebuffer(HostGpuDevice device, const void *rgba, int width, int height,
                                      int stride_in_pixels);
+void host_gfx_gl_present_texture(HostGpuDevice device, unsigned int texture, int width, int height);
 
 #endif

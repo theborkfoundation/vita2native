@@ -8,6 +8,7 @@
  * guest memory.
  */
 #include <dlfcn.h>
+#include <pthread.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -32,6 +33,8 @@ typedef struct {
 } GlThreadState;
 
 static _Thread_local GlThreadState g_thread_state;
+static pthread_t g_window_thread;
+static bool g_window_thread_valid;
 static pthread_mutex_t g_thread_contexts_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static const EGLint g_thread_context_attribs[] = {
@@ -630,8 +633,13 @@ static bool gles_create_present_program(HostGles *g)
         "precision mediump float;\n"
         "in vec2 v_uv;\n"
         "uniform sampler2D u_tex;\n"
+        "uniform float u_flip;\n"
         "out vec4 o_color;\n"
-        "void main() { o_color = texture(u_tex, vec2(v_uv.x, 1.0 - v_uv.y)); }\n";
+        "void main() {\n"
+        "    vec2 uv = v_uv;\n"
+        "    if (u_flip > 0.5) uv.y = 1.0 - uv.y;\n"
+        "    o_color = texture(u_tex, uv);\n"
+        "}\n";
     GLuint vertex = gles_compile_present_shader(g, GL_VERTEX_SHADER, vertex_source);
     GLuint fragment = 0;
     GLuint program = 0;
@@ -664,6 +672,8 @@ static bool gles_create_present_program(HostGles *g)
 
     g->glUseProgram(program);
     g->glUniform1i(g->glGetUniformLocation(program, "u_tex"), 0);
+    g->present_flip_uniform = g->glGetUniformLocation(program, "u_flip");
+    g->glUniform1f(g->present_flip_uniform, 1.0f);
     g->glUseProgram(0);
 
     if (!g->present_vao)
@@ -680,6 +690,10 @@ int host_gfx_gl_attach_window(HostGpuDevice device, void *native_window)
 
     if (!g || !native_window || !g->window_capable || !g->eglCreateWindowSurface)
         return -1;
+
+    /* An EGL surface can only be current on one context at a time. */
+    if (g->window_surface != EGL_NO_SURFACE && g_window_thread_valid)
+        return pthread_equal(pthread_self(), g_window_thread) ? 0 : -1;
 
     while (g->glGetError() != GL_NO_ERROR) {
     }
@@ -702,6 +716,8 @@ int host_gfx_gl_attach_window(HostGpuDevice device, void *native_window)
     if (g->window_surface != EGL_NO_SURFACE)
         g->eglDestroySurface(g->display, g->window_surface);
     g->window_surface = surface;
+    g_window_thread = pthread_self();
+    g_window_thread_valid = true;
 
     if (g->eglSwapInterval)
         g->eglSwapInterval(g->display, 1);
@@ -732,10 +748,14 @@ void host_gfx_gl_detach_window(HostGpuDevice device)
     if (!g || g->window_surface == EGL_NO_SURFACE)
         return;
 
+    if (g_window_thread_valid && !pthread_equal(pthread_self(), g_window_thread))
+        return;
+
     gl_thread_bind(g, g_thread_state.surface);
     g_thread_state.window = false;
     g->eglDestroySurface(g->display, g->window_surface);
     g->window_surface = EGL_NO_SURFACE;
+    g_window_thread_valid = false;
 }
 
 void host_gfx_gl_present_framebuffer(HostGpuDevice device, const void *rgba, int width, int height,
@@ -806,11 +826,77 @@ void host_gfx_gl_present_framebuffer(HostGpuDevice device, const void *rgba, int
 
         g->glViewport(viewport_x, viewport_y, viewport_width, viewport_height);
         g->glUseProgram(g->present_program);
+        g->glUniform1f(g->present_flip_uniform, 1.0f);
         g->glBindVertexArray(g->present_vao);
         g->glDrawArrays(GL_TRIANGLES, 0, 3);
         g->glBindVertexArray(0);
         g->glUseProgram(0);
         g->glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
+    g->eglSwapBuffers(g->display, g->window_surface);
+}
+
+void host_gfx_gl_present_texture(HostGpuDevice device, unsigned int texture, int width, int height)
+{
+    HostGles *g = device->impl;
+    EGLint window_width = 0, window_height = 0;
+
+    if (!g || g->window_surface == EGL_NO_SURFACE || !texture || width <= 0 || height <= 0)
+        return;
+
+    if (!g->eglQuerySurface(g->display, g->window_surface, EGL_WIDTH, &window_width) ||
+        !g->eglQuerySurface(g->display, g->window_surface, EGL_HEIGHT, &window_height) ||
+        window_width <= 0 || window_height <= 0)
+        return;
+
+    if (!g->present_program && !gles_create_present_program(g))
+        return;
+
+    g->glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    g->glViewport(0, 0, window_width, window_height);
+    g->glDisable(GL_SCISSOR_TEST);
+    g->glDisable(GL_DEPTH_TEST);
+    g->glDisable(GL_STENCIL_TEST);
+    g->glDisable(GL_BLEND);
+    g->glDisable(GL_CULL_FACE);
+    g->glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    g->glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    g->glClear(GL_COLOR_BUFFER_BIT);
+
+    while (g->glGetError() != GL_NO_ERROR) {
+    }
+
+    {
+        double scale_x = (double)window_width / width;
+        double scale_y = (double)window_height / height;
+        double scale = scale_x < scale_y ? scale_x : scale_y;
+        GLint viewport_width = (GLint)(width * scale + 0.5);
+        GLint viewport_height = (GLint)(height * scale + 0.5);
+        GLint viewport_x = (window_width - viewport_width) / 2;
+        GLint viewport_y = (window_height - viewport_height) / 2;
+
+        g->glViewport(viewport_x, viewport_y, viewport_width, viewport_height);
+        g->glUseProgram(g->present_program);
+        g->glUniform1f(g->present_flip_uniform, 0.0f);
+        g->glActiveTexture(GL_TEXTURE0);
+        g->glBindTexture(GL_TEXTURE_2D, texture);
+        g->glBindVertexArray(g->present_vao);
+        g->glDrawArrays(GL_TRIANGLES, 0, 3);
+        g->glBindVertexArray(0);
+        g->glBindTexture(GL_TEXTURE_2D, 0);
+        g->glUseProgram(0);
+    }
+
+    if (getenv("VITA2NATIVE_DIRECT_PRESENT_DEBUG")) {
+        static unsigned int logged;
+        GLenum error = g->glGetError();
+
+        if (logged < 20) {
+            fprintf(stderr, "SceGxm present texture %u %dx%d: window %dx%d error 0x%x\n",
+                    texture, width, height, (int)window_width, (int)window_height, error);
+            logged++;
+        }
     }
 
     g->eglSwapBuffers(g->display, g->window_surface);

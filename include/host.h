@@ -112,6 +112,13 @@ void host_video_present(HostVideo *video, const void *rgba, int width, int heigh
                         int pitch_pixels);
 
 /*
+ * Presents a GL texture owned by the GPU device directly on the window (X11
+ * only for now). Returns false when direct presentation is unavailable and the
+ * caller should fall back to host_video_present().
+ */
+bool host_video_present_texture(HostVideo *video, unsigned int texture, int width, int height);
+
+/*
  * Pad state sampled by the video layer from SDL (keyboard and game
  * controllers). Buttons use the SCE_CTRL_* encoding and axes are 0..255 with
  * 128 centred. `pressed` holds the button edges accumulated since the previous

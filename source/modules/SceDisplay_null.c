@@ -8,6 +8,7 @@
 #include "log.h"
 #include "module.h"
 #include "modules/SceDisplay.h"
+#include "modules/SceGxm.h"
 #include "modules/common_dialog_overlay.h"
 #include "modules/fps_overlay.h"
 #include "util.h"
@@ -229,19 +230,26 @@ EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayF
         g_vita_conf_fb = *pParam;
 
     if (pParam) {
-        CommonDialogOverlay overlay;
+        unsigned int present_texture;
+        int present_width, present_height;
+        HostVideo *video = display_video();
 
-        if (SceCommonDialog_getOverlay(&overlay)) {
-            CommonDialogOverlay_render(&overlay, (uint32_t *)pParam->base, (int)pParam->width,
-                                       (int)pParam->height, (int)pParam->pitch);
-            SceCommonDialog_overlayPresented();
-        }
-        fps_overlay_render((uint32_t *)pParam->base, (int)pParam->width, (int)pParam->height,
-                           (int)pParam->pitch);
-        dump_framebuffer(pParam);
+        if (video &&
+            SceGxm_get_present_frame(pParam->base, &present_texture, &present_width,
+                                     &present_height) &&
+            host_video_present_texture(video, present_texture, present_width, present_height)) {
+            /* Already presented from the GPU; no readback or CPU upload. */
+        } else {
+            CommonDialogOverlay overlay;
 
-        {
-            HostVideo *video = display_video();
+            if (SceCommonDialog_getOverlay(&overlay)) {
+                CommonDialogOverlay_render(&overlay, (uint32_t *)pParam->base, (int)pParam->width,
+                                           (int)pParam->height, (int)pParam->pitch);
+                SceCommonDialog_overlayPresented();
+            }
+            fps_overlay_render((uint32_t *)pParam->base, (int)pParam->width, (int)pParam->height,
+                               (int)pParam->pitch);
+            dump_framebuffer(pParam);
 
             if (video && pParam->base && pParam->width && pParam->height)
                 host_video_present(video, pParam->base, (int)pParam->width, (int)pParam->height,

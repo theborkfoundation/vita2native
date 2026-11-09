@@ -620,6 +620,17 @@ struct GxmCommand {
 static bool g_gxm_initialized;
 static HostGpuDevice g_device;
 static HostGles *g_gl;
+
+/* Last frame that can be presented from the GPU without a readback. */
+typedef struct {
+    bool valid;
+    const void *data;
+    GLuint texture;
+    int width;
+    int height;
+} GxmPresentFrame;
+
+static GxmPresentFrame g_present_frame;
 static uint32_t *g_notification_region;
 static GxmLinkedProgram g_linked[GXM_MAX_LINKED_PROGRAMS];
 static unsigned int g_linked_count;
@@ -5318,6 +5329,15 @@ static int gxm_skip_readback(void)
     return enabled;
 }
 
+static int gxm_direct_present_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_DIRECT_PRESENT") != NULL;
+    return enabled;
+}
+
 EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
        const SceGxmNotification *vertexNotification, const SceGxmNotification *fragmentNotification)
 {
@@ -5339,6 +5359,7 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
         return SCE_GXM_ERROR_NOT_WITHIN_SCENE;
 
     context->in_scene = false;
+    g_present_frame.valid = false;
 
     if (g_f32m_uploads_frame) {
         static int trace_f32m = -1;
@@ -5368,7 +5389,7 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
     }
     g_gl->glBindFramebuffer(GL_FRAMEBUFFER, context->render_target->fbo);
     t0 = gxm_time_ns();
-    if (!gxm_skip_finish())
+    if (!gxm_skip_finish() || gxm_direct_present_enabled())
         g_gl->glFinish();
     t1 = gxm_time_ns();
 
@@ -5416,6 +5437,29 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
             scale = 2;
             width = target->params.width;
             height = target->params.height;
+        }
+
+        if (gxm_direct_present_enabled() && scale == 1 && target->color &&
+            surface->width == target->params.width &&
+            surface->height == target->params.height) {
+            g_present_frame.valid = true;
+            g_present_frame.data = surface->data;
+            g_present_frame.texture = target->color;
+            g_present_frame.width = (int)target->params.width;
+            g_present_frame.height = (int)target->params.height;
+            if (getenv("VITA2NATIVE_DIRECT_PRESENT_DEBUG")) {
+                static unsigned int logged;
+
+                if (logged < 20) {
+                    LOG("SceGxm direct frame %llu: surf=%p tex=%u %dx%d",
+                        (unsigned long long)g_gxm_frame, surface->data, target->color,
+                        (int)target->params.width, (int)target->params.height);
+                    logged++;
+                }
+            }
+            t2 = gxm_time_ns();
+            gxm_profile_frame(t_resolve, t1 - t0, t2 - t1, 0);
+            goto convert_done;
         }
 
         if (gxm_skip_readback()) {
@@ -9626,6 +9670,30 @@ EXPORT(SceGxmInternalForVsh, 0x9B8FC52F, int, sceGxmVshSyncObjectDestroy, void)
 
 DECLARE_LIBRARY(SceGxm, 0xf76b66bd);
 DECLARE_LIBRARY(SceGxmInternalForVsh, 0xc98aeb79);
+
+bool SceGxm_get_present_frame(const void *data, unsigned int *texture, int *width, int *height)
+{
+    if (getenv("VITA2NATIVE_DIRECT_PRESENT_DEBUG")) {
+        static unsigned int logged;
+
+        if (logged < 20) {
+            LOG("SceGxm present query: base=%p last=%p valid=%d tex=%u", data,
+                g_present_frame.data, g_present_frame.valid ? 1 : 0, g_present_frame.texture);
+            logged++;
+        }
+    }
+
+    if (!g_present_frame.valid || !data || data != g_present_frame.data)
+        return false;
+
+    if (texture)
+        *texture = g_present_frame.texture;
+    if (width)
+        *width = g_present_frame.width;
+    if (height)
+        *height = g_present_frame.height;
+    return true;
+}
 
 int SceGxm_init(HostGpuDevice device)
 {

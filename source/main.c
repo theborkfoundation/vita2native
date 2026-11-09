@@ -952,9 +952,9 @@ int main(int argc, char *argv[])
 
 #if defined(VITA2NATIVE_HEADLESS_BUILD)
     /* The display backend presents through SDL, so the GLES context is always
-       offscreen. Letting DISPLAY select the windowing EGL platform would make
-       every GL call round-trip through the X server. */
-    g_headless = true;
+       offscreen. Direct GPU presentation is the exception: it needs a
+       window-capable EGL display for the SDL window. */
+    g_headless = getenv("VITA2NATIVE_DIRECT_PRESENT") == NULL;
 #else
     if (!g_headless && !getenv("DISPLAY") && !getenv("WAYLAND_DISPLAY"))
         g_headless = true;

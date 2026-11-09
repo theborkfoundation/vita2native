@@ -9,6 +9,13 @@ struct HostGpuMemBlock {
     size_t size;
 };
 
+static HostGpuDevice g_host_gpu;
+
+HostGpuDevice host_gpu_current(void)
+{
+    return g_host_gpu;
+}
+
 HostGpuDevice host_gpu_create(const HostGpuConfig *config)
 {
     static const HostGpuConfig defaults = {640, 480, true};
@@ -21,17 +28,21 @@ HostGpuDevice host_gpu_create(const HostGpuConfig *config)
      * Panfrost's default tiled/AFBC layouts make glReadPixels roughly twice as
      * slow (195 ns/pixel on Mali-G31), and this port reads the whole frame
      * back every frame for sceDisplaySetFrameBuf. Linear layouts only affect
-     * Panfrost, and a caller-supplied PAN_MESA_DEBUG wins.
+     * Panfrost, and a caller-supplied PAN_MESA_DEBUG wins. Direct presentation
+     * removes the readback, so it keeps the faster tiled layout.
      */
-    if (!getenv("PAN_MESA_DEBUG"))
+    if (!getenv("VITA2NATIVE_DIRECT_PRESENT") && !getenv("PAN_MESA_DEBUG"))
         setenv("PAN_MESA_DEBUG", "linear", 0);
 
     device = host_gfx_gl_create(config);
-    if (device)
+    if (device) {
+        g_host_gpu = device;
         return device;
+    }
 
     device = host_gfx_null_create(config);
     if (device) {
+        g_host_gpu = device;
         fprintf(stderr, "vita2native: GLES 3.x unavailable, using the null graphics backend\n");
         fflush(stderr);
     }
@@ -138,6 +149,15 @@ void host_gpu_present_framebuffer(HostGpuDevice device, const void *rgba, int wi
 
     if (device->backend == HOST_GPU_BACKEND_GLES)
         host_gfx_gl_present_framebuffer(device, rgba, width, height, stride_in_pixels);
+}
+
+void host_gpu_present_texture(HostGpuDevice device, unsigned int texture, int width, int height)
+{
+    if (!device)
+        return;
+
+    if (device->backend == HOST_GPU_BACKEND_GLES)
+        host_gfx_gl_present_texture(device, texture, width, height);
 }
 
 HostGpuMemBlock host_gpu_memblock_create(void *cpu_addr, size_t size)
