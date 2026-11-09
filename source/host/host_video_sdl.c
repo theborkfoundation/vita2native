@@ -609,6 +609,20 @@ static void video_sample_touch(HostVideo *video)
     buttons = api->get_mouse_state(&mouse_x, &mouse_y);
     down = (buttons & SDL_BUTTON_LMASK) != 0;
 
+    if (getenv("VITA2NATIVE_INPUT_DEBUG")) {
+        static int last_x = -1, last_y = -1;
+        static unsigned int last_buttons;
+
+        if (mouse_x != last_x || mouse_y != last_y || buttons != last_buttons) {
+            fprintf(stderr, "vita2native: mouse %d,%d buttons=0x%x\n", mouse_x, mouse_y,
+                    buttons);
+            fflush(stderr);
+            last_x = mouse_x;
+            last_y = mouse_y;
+            last_buttons = buttons;
+        }
+    }
+
     if (video->width > 0 && video->height > 0) {
         int content_x = 0, content_y = 0;
         int content_w = video->width, content_h = video->height;
@@ -678,8 +692,26 @@ static void video_sample_input(HostVideo *video)
         int numkeys = 0;
         const unsigned char *keys = api->get_keyboard_state(&numkeys);
 
-        if (keys && numkeys > 0)
+        if (keys && numkeys > 0) {
             buttons |= keyboard_button_mask(keys, numkeys);
+
+            /* A keyboard has no analog stick, but several titles only aim with
+               one (Angry Birds' slingshot menu). Drive the left stick from the
+               arrow keys when no physical pad is attached; d-pad titles still
+               get the button mask above. */
+            if (!video->controller && !video->joystick) {
+                int x = (keys[SDL_SCANCODE_RIGHT] ? 1 : 0) - (keys[SDL_SCANCODE_LEFT] ? 1 : 0);
+                int y = (keys[SDL_SCANCODE_UP] ? 1 : 0) - (keys[SDL_SCANCODE_DOWN] ? 1 : 0);
+
+                /* Make the keyboard the axis source: without a pad the SDL
+                   axes are only honoured when the sample is marked active. */
+                active = true;
+                if (x)
+                    lx = x > 0 ? 255 : 0;
+                if (y)
+                    ly = y > 0 ? 255 : 0;
+            }
+        }
     }
 
     if (video->controller && api->game_controller_get_attached &&

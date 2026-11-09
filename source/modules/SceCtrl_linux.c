@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 #include <psp2/ctrl.h>
 
@@ -15,6 +16,7 @@
 static SDL_GameController *g_controller;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool g_initialized;
+static bool g_input_debug;
 
 static uint8_t axis_to_vita(int value, bool invert)
 {
@@ -122,24 +124,40 @@ static uint32_t keyboard_buttons(const Uint8 *keys)
     return buttons;
 }
 
+/* See SceCtrl_null.c: a peek fills and returns the whole requested count. */
+#define CTRL_MAX_BUFFERED 64
+
 EXPORT(SceCtrl, 0xA9C3CED6, int, sceCtrlPeekBufferPositive, int port, SceCtrlData *pad_data,
        int count)
 {
     const Uint8 *keys;
     uint32_t buttons = 0;
     uint8_t lx = 128, ly = 128, rx = 128, ry = 128;
+    SceCtrlData sample;
 
     (void)port;
-    (void)count;
 
-    if (!pad_data)
+    if (!pad_data || count <= 0)
         return -1;
+    if (count > CTRL_MAX_BUFFERED)
+        count = CTRL_MAX_BUFFERED;
+
+    memset(&sample, 0, sizeof(sample));
 
     pthread_mutex_lock(&g_lock);
 
     keys = SDL_GetKeyboardState(NULL);
     buttons |= keyboard_buttons(keys);
     buttons |= SceCtrl_script_buttons();
+
+    if (g_input_debug && buttons) {
+        static uint32_t last;
+
+        if (buttons != last)
+            LOG("SceCtrl: buttons %08x (keys z=%d x=%d a=%d s=%d)", buttons, keys[SDL_SCANCODE_Z],
+                keys[SDL_SCANCODE_X], keys[SDL_SCANCODE_A], keys[SDL_SCANCODE_S]);
+        last = buttons;
+    }
 
     if (g_controller) {
         buttons |= controller_buttons(g_controller);
@@ -149,16 +167,22 @@ EXPORT(SceCtrl, 0xA9C3CED6, int, sceCtrlPeekBufferPositive, int port, SceCtrlDat
         ry = axis_to_vita(SDL_GameControllerGetAxis(g_controller, SDL_CONTROLLER_AXIS_RIGHTY), true);
     }
 
-    pad_data->buttons = buttons;
-    pad_data->lx = lx;
-    pad_data->ly = ly;
-    pad_data->rx = rx;
-    pad_data->ry = ry;
-    pad_data->timeStamp = host_monotonic_ns() / 1000;
+    sample.buttons = buttons;
+    sample.lx = lx;
+    sample.ly = ly;
+    sample.rx = rx;
+    sample.ry = ry;
+    sample.timeStamp = host_monotonic_ns() / 1000;
 
     pthread_mutex_unlock(&g_lock);
 
-    return 0;
+    memset(pad_data, 0, sizeof(*pad_data) * (size_t)count);
+    for (int i = 0; i < count; i++) {
+        pad_data[i] = sample;
+        pad_data[i].timeStamp -= (uint64_t)i * 16667ull;
+    }
+
+    return count;
 }
 
 DECLARE_LIBRARY(SceCtrl, 0xD197E3C7);
@@ -167,6 +191,8 @@ int SceCtrl_init(void)
 {
     if (g_initialized)
         return 0;
+
+    g_input_debug = getenv("VITA2NATIVE_INPUT_DEBUG") != NULL;
 
     if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
         LOG("SDL game controller init failed: %s", SDL_GetError());

@@ -308,18 +308,27 @@ static bool input_open_devices(void)
     return g_fd_count > 0;
 }
 
+/* The guest provides room for `count` samples. The Vita fills every slot and
+   returns how many it wrote, which is the whole count for a peek. Titles such
+   as Angry Birds Trilogy pass 64 and treat a zero return as "no new input",
+   so duplicate the current state across the requested samples as hardware
+   does (older timestamps first). */
+#define CTRL_MAX_BUFFERED 64
+
 EXPORT(SceCtrl, 0xA9C3CED6, int, sceCtrlPeekBufferPositive, int port, SceCtrlData *pad_data,
        int count)
 {
     HostPadState sdl_pad;
     bool have_sdl_pad;
     unsigned int script_buttons;
+    SceCtrlData sample;
 
     (void)port;
-    (void)count;
 
-    if (!pad_data)
+    if (!pad_data || count <= 0)
         return -1;
+    if (count > CTRL_MAX_BUFFERED)
+        count = CTRL_MAX_BUFFERED;
 
     script_buttons = SceCtrl_script_buttons();
 
@@ -327,42 +336,51 @@ EXPORT(SceCtrl, 0xA9C3CED6, int, sceCtrlPeekBufferPositive, int port, SceCtrlDat
        before taking g_lock so the two locks are never taken in both orders. */
     have_sdl_pad = host_video_pad_state(&sdl_pad);
 
+    memset(&sample, 0, sizeof(sample));
+
     pthread_mutex_lock(&g_lock);
-    pad_data->buttons = g_pad_buttons | g_pending_presses | script_buttons;
+    sample.buttons = g_pad_buttons | g_pending_presses | script_buttons;
     g_pending_presses = 0;
-    pad_data->lx = g_lx;
-    pad_data->ly = g_ly;
-    pad_data->rx = g_rx;
-    pad_data->ry = g_ry;
+    sample.lx = g_lx;
+    sample.ly = g_ly;
+    sample.rx = g_rx;
+    sample.ry = g_ry;
 
     if (have_sdl_pad) {
-        pad_data->buttons |= sdl_pad.buttons | sdl_pad.pressed;
+        sample.buttons |= sdl_pad.buttons | sdl_pad.pressed;
         /* Prefer SDL axes only when a controller is actually attached; a
            keyboard-only session must not overwrite the evdev stick values. */
         if (sdl_pad.active) {
-            pad_data->lx = sdl_pad.lx;
-            pad_data->ly = sdl_pad.ly;
-            pad_data->rx = sdl_pad.rx;
-            pad_data->ry = sdl_pad.ry;
+            sample.lx = sdl_pad.lx;
+            sample.ly = sdl_pad.ly;
+            sample.rx = sdl_pad.rx;
+            sample.ry = sdl_pad.ry;
         }
     }
     pthread_mutex_unlock(&g_lock);
+
+    sample.timeStamp = host_monotonic_ns() / 1000;
+
+    memset(pad_data, 0, sizeof(*pad_data) * (size_t)count);
+    for (int i = 0; i < count; i++) {
+        pad_data[i] = sample;
+        pad_data[i].timeStamp -= (uint64_t)i * 16667ull;
+    }
 
     if (g_debug) {
         /* Rate-limited so a 60 Hz guest does not flood the log: always report a
            state change, otherwise a heartbeat every ~600 polls. */
         g_peek_calls++;
-        if (pad_data->buttons != g_peek_logged_buttons ||
+        if (sample.buttons != g_peek_logged_buttons ||
             (g_peek_calls % 600) == 0) {
-            fprintf(stderr, "vita2native: SceCtrl peek #%llu buttons=0x%x\n",
-                    g_peek_calls, pad_data->buttons);
-            g_peek_logged_buttons = pad_data->buttons;
+            fprintf(stderr,
+                    "vita2native: SceCtrl peek #%llu buttons=0x%x lx=%u ly=%u count=%d\n",
+                    g_peek_calls, sample.buttons, sample.lx, sample.ly, count);
+            g_peek_logged_buttons = sample.buttons;
         }
     }
 
-    pad_data->timeStamp = host_monotonic_ns() / 1000;
-
-    return 0;
+    return count;
 }
 
 DECLARE_LIBRARY(SceCtrl, 0xD197E3C7);
