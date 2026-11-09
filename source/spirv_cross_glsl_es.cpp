@@ -114,6 +114,157 @@ void rewrite_readonly_storage_buffers(std::vector<uint32_t> &words)
 
 namespace {
 
+/*
+ * Every draw carries its own GXM uniform container, and a batch may contain
+ * dozens of draws with different matrices. SPIRV-Cross emits the container as
+ * a uniform block (`vertexDataType { vec4 buffer0[N]; ... }`), which forces one
+ * upload and one state flush per draw. Rewriting the accesses to a flat array
+ * indexed by a per-vertex draw slot lets all of them share a single draw call.
+ * The array size matches the 16 KiB minimum GLES 3.10 uniform block size.
+ */
+constexpr unsigned kDrawUniformVecs = 1024;
+constexpr unsigned kDrawUniformBinding = 4;
+
+size_t find_closing_bracket(const std::string &text, size_t open)
+{
+    int depth = 0;
+
+    for (size_t i = open; i < text.size(); i++) {
+        if (text[i] == '[') {
+            depth++;
+        } else if (text[i] == ']') {
+            depth--;
+            if (depth == 0)
+                return i;
+        }
+    }
+
+    return std::string::npos;
+}
+
+bool apply_draw_uniforms(std::string &glsl, int location)
+{
+    static const std::string block_marker = "uniform vertexDataType";
+    static const std::string variable_marker = "} vertexData;";
+    size_t block = glsl.find(block_marker);
+    size_t open, close;
+
+    if (location < 0 || block == std::string::npos)
+        return false;
+
+    open = glsl.find('{', block);
+    close = open == std::string::npos ? std::string::npos : glsl.find(variable_marker, open);
+    if (open == std::string::npos || close == std::string::npos)
+        return false;
+
+    struct Member {
+        std::string name;
+        unsigned base;
+    };
+    std::vector<Member> members;
+    unsigned total = 0;
+
+    for (size_t pos = open + 1; pos < close;) {
+        size_t declaration = glsl.find("vec4 ", pos);
+        size_t name_start, bracket, end;
+        std::string name;
+        unsigned count;
+
+        if (declaration == std::string::npos || declaration >= close)
+            break;
+
+        name_start = declaration + 5;
+        while (name_start < close && std::isspace(static_cast<unsigned char>(glsl[name_start])))
+            name_start++;
+        bracket = glsl.find('[', name_start);
+        end = bracket == std::string::npos ? std::string::npos : glsl.find(']', bracket);
+        if (bracket == std::string::npos || bracket >= close || end == std::string::npos ||
+            end >= close)
+            return false;
+
+        name = glsl.substr(name_start, bracket - name_start);
+        while (!name.empty() && std::isspace(static_cast<unsigned char>(name.back())))
+            name.pop_back();
+
+        count = static_cast<unsigned>(std::strtoul(glsl.c_str() + bracket + 1, nullptr, 10));
+        if (name.empty() || count == 0)
+            return false;
+
+        members.push_back({ name, total });
+        total += count;
+        pos = end + 1;
+    }
+
+    if (members.empty() || total == 0 || total > kDrawUniformVecs)
+        return false;
+
+    std::string rewritten = glsl;
+
+    for (const Member &member : members) {
+        const std::string needle = "vertexData." + member.name + "[";
+        size_t at = 0;
+
+        while ((at = rewritten.find(needle, at)) != std::string::npos) {
+            size_t expression = at + needle.size();
+            size_t end = find_closing_bracket(rewritten, expression - 1);
+            std::string index;
+            std::string replacement;
+
+            if (end == std::string::npos)
+                return false;
+
+            index = rewritten.substr(expression, end - expression);
+            replacement = "v2nDrawUniforms.data[v2nDrawBase + " + std::to_string(member.base) +
+                          " + (" + index + ")]";
+            rewritten.replace(at, end + 1 - at, replacement);
+            at += replacement.size();
+        }
+    }
+
+    /* A reference to a member the block parser did not see would keep reading
+       the (now unbound) block. Leave the shader untouched instead. */
+    if (rewritten.find("vertexData.") != std::string::npos)
+        return false;
+
+    size_t main_position = rewritten.find("void main()");
+    size_t main_brace =
+        main_position == std::string::npos ? std::string::npos : rewritten.find('{', main_position);
+    if (main_brace == std::string::npos)
+        return false;
+
+    size_t line_start = rewritten.rfind('\n', block);
+    size_t declaration_end;
+    std::string declaration;
+
+    line_start = line_start == std::string::npos ? 0 : line_start + 1;
+    declaration_end = rewritten.find(variable_marker, close);
+    if (declaration_end == std::string::npos)
+        return false;
+    declaration_end += variable_marker.size();
+    while (declaration_end < rewritten.size() && rewritten[declaration_end] == '\n')
+        declaration_end++;
+
+    declaration = "layout(binding = " + std::to_string(kDrawUniformBinding) +
+                  ", std140) uniform v2nDrawUniformBlock\n{\n    vec4 data[" +
+                  std::to_string(kDrawUniformVecs) +
+                  "];\n} v2nDrawUniforms;\nint v2nDrawBase;\nlayout(location = " +
+                  std::to_string(location) + ") in highp float v2nDrawIndex;\n";
+    rewritten.replace(line_start, declaration_end - line_start, declaration);
+
+    main_position = rewritten.find("void main()");
+    main_brace = main_position == std::string::npos
+                     ? std::string::npos
+                     : rewritten.find('{', main_position);
+    if (main_brace == std::string::npos)
+        return false;
+
+    rewritten.insert(main_brace + 1, "\n    v2nDrawBase = int(v2nDrawIndex) * " +
+                                         std::to_string(total) + ";");
+
+    glsl.swap(rewritten);
+    return true;
+}
+
 void replace_all(std::string &text, const std::string &needle, const std::string &replacement)
 {
     size_t pos = 0;
@@ -278,12 +429,15 @@ void rewrite_arm_framebuffer_fetch(std::string &glsl)
 } // namespace
 
 extern "C" int spirv_to_glsl_es(const uint32_t *spirv, size_t num_words, bool framebuffer_fetch,
-                                bool arm_framebuffer_fetch, char **glsl_out)
+                                bool arm_framebuffer_fetch, int vertex_draw_index_location,
+                                bool *draw_uniforms_applied, char **glsl_out)
 {
     if (!spirv || num_words == 0 || !glsl_out)
         return -1;
 
     *glsl_out = nullptr;
+    if (draw_uniforms_applied)
+        *draw_uniforms_applied = false;
 
     try {
         std::vector<uint32_t> words(spirv, spirv + num_words);
@@ -307,6 +461,8 @@ extern "C" int spirv_to_glsl_es(const uint32_t *spirv, size_t num_words, bool fr
         lower_texture_query_lod(glsl);
         if (framebuffer_fetch && arm_framebuffer_fetch)
             rewrite_arm_framebuffer_fetch(glsl);
+        if (draw_uniforms_applied)
+            *draw_uniforms_applied = apply_draw_uniforms(glsl, vertex_draw_index_location);
 
         char *copy = static_cast<char *>(malloc(glsl.size() + 1));
         if (!copy)

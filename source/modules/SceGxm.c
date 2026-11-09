@@ -56,6 +56,18 @@ extern int vita3k_gxm_get_attribute_location(const SceGxmProgram *program, uint1
 #define GXM_UNIFORM_ARENA_SIZE  (64 * 1024)
 #define GXM_NOTIFICATIONS       512
 
+/*
+ * Per-draw uniform batching. The vertex shader reads its uniform container
+ * from a flat UBO array indexed by an attribute, so draws with different
+ * constants can share one GL draw call. The array is 1024 vec4 (the GLES 3.10
+ * minimum uniform block size) and the attribute is a per-vertex float holding
+ * the draw slot inside the current batch.
+ */
+#define GXM_DRAW_UNIFORM_BINDING 4
+#define GXM_DRAW_UNIFORM_BYTES   (1024 * 16)
+#define GXM_DRAW_INDEX_BYTES     (256 * 1024)
+#define GXM_DRAW_UNIFORM_HASH    0x44524157u /* "DRAW" */
+
 struct GXMRenderVertUniformBlock {
     float viewport_flip[4];
     float viewport_flag;
@@ -142,6 +154,9 @@ typedef struct {
     uint8_t *fragment_uniforms;
     uint32_t vertex_uniform_size;
     uint32_t fragment_uniform_size;
+    bool draw_uniforms;
+    uint32_t draw_uniform_stride;
+    uint32_t draw_index_start;
     uint32_t index_start;
     uint32_t index_count;
     uint32_t vertex_count;
@@ -220,6 +235,8 @@ static unsigned int g_batch_break_stencil;
 static unsigned int g_batch_break_rest;
 static unsigned int g_batch_break_size;
 static unsigned int g_batch_break_uniform;
+static unsigned int g_batch_break_uniform_vertex;
+static unsigned int g_batch_break_uniform_fragment;
 static unsigned int g_batch_break_texture;
 
 /*
@@ -339,6 +356,8 @@ typedef struct SceGxmContext {
     bool frag_info_valid;
     GxmBufferArena stream_arena[SCE_GXM_MAX_VERTEX_STREAMS];
     GxmBufferArena index_arena;
+    GxmBufferArena draw_uniform_arena;
+    GxmBufferArena draw_index_arena;
     GxmDrawBatch batch;
     uint8_t *index_scratch;
     uint32_t index_scratch_capacity;
@@ -388,6 +407,8 @@ typedef struct SceGxmVertexProgram {
     GLuint shader;
     uint32_t shader_hash;
     uint32_t hint_signature;
+    /* >= 0: the vertex attribute carrying the per-draw uniform slot. */
+    int draw_uniform_location;
     int refcount;
 } SceGxmVertexProgram;
 
@@ -645,6 +666,7 @@ typedef struct {
     uint32_t hash;
     GLenum stage;
     GLuint shader;
+    bool draw_uniforms;
 } GxmCachedShader;
 static GxmCachedShader g_cached_shaders[GXM_MAX_CACHED_SHADERS];
 static unsigned int g_cached_shader_count;
@@ -657,6 +679,7 @@ static bool g_unit_texture_valid[2 * SCE_GXM_MAX_TEXTURE_UNITS];
 static unsigned int g_active_texture_unit = UINT_MAX;
 static GLuint g_bound_uniform_block[2];
 static GLuint g_bound_render_ubo[2];
+static GLuint g_bound_draw_uniform_block;
 static SceGxmDisplayQueueCallback *g_display_callback;
 static uint32_t g_display_callback_data_size;
 
@@ -1183,14 +1206,55 @@ static bool gxm_framebuffer_fetch_enabled(void)
     return forced && g_framebuffer_fetch_state >= 0 && gxm_framebuffer_fetch_kind() != GXM_FETCH_NONE;
 }
 
+/*
+ * Picks a vertex attribute slot for the per-draw uniform slot. Attribute
+ * locations assigned by the recompiler are dense, so the slot above the last
+ * attribute the program declares is always free. GLES guarantees at least 16
+ * locations; anything above that disables the optimisation for this shader.
+ */
+static int gxm_program_draw_index_location(const SceGxmProgram *program)
+{
+    static int disabled = -1;
+    const uint8_t *parameters;
+    int location = 0;
+
+    if (disabled < 0)
+        disabled = getenv("VITA2NATIVE_NO_DRAW_UNIFORMS") != NULL;
+    if (disabled || !program)
+        return -1;
+    /* Without either kind of uniform container there is no vertexDataType
+       block for the rewrite to operate on. */
+    if (!program->default_uniform_buffer_count && !program->uniform_buffer_count)
+        return -1;
+
+    parameters = (const uint8_t *)&program->parameters_offset + program->parameters_offset;
+    for (uint32_t i = 0; i < program->parameter_count; i++) {
+        const SceGxmProgramParameter *parameter =
+            (const SceGxmProgramParameter *)(parameters + i * sizeof(*parameter));
+        int attribute;
+
+        if (parameter->category != SCE_GXM_PARAMETER_CATEGORY_ATTRIBUTE)
+            continue;
+        attribute = vita3k_gxm_get_attribute_location(program, parameter->resource_index);
+        if (attribute >= location)
+            location = attribute + 1;
+    }
+
+    return location < 16 ? location : -1;
+}
+
 static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, const char *name,
                                    const SceGxmVertexAttribute *attributes, unsigned int count,
                                    const uint32_t *fragment_formats, const uint32_t *vertex_formats,
-                                   uint32_t color_format, uint32_t *hash_out)
+                                   uint32_t color_format, uint32_t *hash_out,
+                                   int draw_index_location, bool *draw_uniforms_out)
 {
     bool debug_colors = gxm_debug_program_colors();
     bool debug_texcolor = gxm_debug_texcolor();
     bool fetch = stage == GL_FRAGMENT_SHADER && gxm_framebuffer_fetch_enabled();
+
+    if (draw_uniforms_out)
+        *draw_uniforms_out = false;
 
     for (;;) {
         uint32_t hint_signature =
@@ -1200,22 +1264,29 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
             gxm_shader_cache_hash(program, stage, attributes, count, hint_signature);
         char *glsl = NULL;
         bool compiled = false;
+        bool draw_uniforms = false;
         GLuint shader;
 
         if (fetch)
             cache_hash ^= GXM_SHADER_FETCH_HASH;
+        if (draw_index_location >= 0)
+            cache_hash ^= GXM_DRAW_UNIFORM_HASH;
 
         if (hash_out)
             *hash_out = cache_hash;
 
         for (unsigned int i = 0; i < g_cached_shader_count; i++) {
-            if (g_cached_shaders[i].hash == cache_hash && g_cached_shaders[i].stage == stage)
+            if (g_cached_shaders[i].hash == cache_hash && g_cached_shaders[i].stage == stage) {
+                if (draw_uniforms_out)
+                    *draw_uniforms_out = g_cached_shaders[i].draw_uniforms;
                 return g_cached_shaders[i].shader;
+            }
         }
 
         glsl = (debug_colors || debug_texcolor) ? NULL : gxm_shader_cache_read(cache_hash);
 
         if (glsl) {
+            draw_uniforms = strstr(glsl, "v2nDrawUniforms") != NULL;
             shader = gxm_create_compiled_shader(stage, name, glsl, &compiled);
             if (compiled) {
                 LOG("SceGxm: shader cache hit %08x (%s) program %p", cache_hash, name,
@@ -1233,6 +1304,7 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
         {
             uint32_t *spirv = NULL;
             uint32_t num_instr = 0;
+            bool applied = false;
             const char *dump_dir = getenv("VITA2NATIVE_GXM_SHADER_DUMP");
 
             g_shader_dump_hash = cache_hash;
@@ -1250,14 +1322,15 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
             g_shader_dump_dir = NULL;
 
             if (spirv_to_glsl_es(spirv, num_instr, fetch,
-                                 fetch && gxm_framebuffer_fetch_kind() == GXM_FETCH_ARM, &glsl) !=
-                0) {
+                                 fetch && gxm_framebuffer_fetch_kind() == GXM_FETCH_ARM,
+                                 draw_index_location, &applied, &glsl) != 0) {
                 free(spirv);
                 LOG("SceGxm: SPIR-V -> GLSL ES failed for %s", name);
                 return 0;
             }
 
             free(spirv);
+            draw_uniforms = applied;
 
             if (debug_colors)
                 glsl = gxm_patch_program_color(glsl, cache_hash);
@@ -1272,6 +1345,15 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
             gxm_shader_cache_write(cache_hash, glsl);
 
         free(glsl);
+
+        /* A driver that cannot index a uniform block dynamically (or rejects
+           the 16 KiB array) must not take the whole title down: fall back to
+           the per-draw uniform upload. */
+        if (!compiled && draw_index_location >= 0) {
+            LOG("SceGxm: per-draw uniform shader rejected (%s), retrying without", name);
+            draw_index_location = -1;
+            continue;
+        }
 
         if (!compiled && fetch) {
             LOG("SceGxm: framebuffer fetch shader rejected (%s), retrying without", name);
@@ -1288,8 +1370,12 @@ cache_shader:
             g_cached_shaders[g_cached_shader_count].hash = cache_hash;
             g_cached_shaders[g_cached_shader_count].stage = stage;
             g_cached_shaders[g_cached_shader_count].shader = shader;
+            g_cached_shaders[g_cached_shader_count].draw_uniforms = draw_uniforms;
             g_cached_shader_count++;
         }
+
+        if (draw_uniforms_out)
+            *draw_uniforms_out = draw_uniforms;
 
         return compiled ? shader : 0;
     }
@@ -2724,7 +2810,8 @@ static void gxm_flush_state(SceGxmContext *context, const GxmLinkedProgram *link
             g_bound_render_ubo[1] = context->ubo[1];
         }
     }
-    if (vp)
+    /* Programs using per-draw uniforms read the batch's array instead. */
+    if (vp && vp->draw_uniform_location < 0)
         gxm_upload_uniforms(context, vp->programId, true);
     if (fp)
         gxm_upload_uniforms(context, fp->programId, false);
@@ -2908,6 +2995,7 @@ EXPORT(SceGxm, 0xB627DE66, int, sceGxmTerminate)
         gxm_texture_cache_flush();
         memset(g_bound_uniform_block, 0, sizeof(g_bound_uniform_block));
         memset(g_bound_render_ubo, 0, sizeof(g_bound_render_ubo));
+        g_bound_draw_uniform_block = 0;
     }
     g_linked_count = 0;
     g_linked_next = 0;
@@ -3061,6 +3149,12 @@ EXPORT(SceGxm, 0xEDDC5FB2, int, sceGxmDestroyContext, SceGxmContext *context)
         if (context->index_arena.buffer)
             g_gl->glDeleteBuffers(1, &context->index_arena.buffer);
         free(context->index_arena.stage);
+        if (context->draw_uniform_arena.buffer)
+            g_gl->glDeleteBuffers(1, &context->draw_uniform_arena.buffer);
+        free(context->draw_uniform_arena.stage);
+        if (context->draw_index_arena.buffer)
+            g_gl->glDeleteBuffers(1, &context->draw_index_arena.buffer);
+        free(context->draw_index_arena.stage);
         if (context->uniform_block[0] || context->uniform_block[1])
             g_gl->glDeleteBuffers(2, context->uniform_block);
     }
@@ -5378,7 +5472,7 @@ static void gxm_profile_frame(uint64_t resolve_ns, uint64_t finish_ns, uint64_t 
         "%.1f convert "
         "%.1f ds %.1f ms/frame (%u gl draws, %u vertices, %u uploads/%llu KiB per frame, "
         "dsload %.1f ms (%u calls), "
-        "breaks %u/%u/%u/%u [prog%u prim%u dfunc%u dwrite%u dbias%u stencil%u])",
+        "breaks %u/%u/%u(v%u/f%u)/%u [prog%u prim%u dfunc%u dwrite%u dbias%u stencil%u])",
         frames, (double)(now - last) / 1e9, (double)g_profile_draw_ns / frames / 1e6,
         (double)g_profile_flush_ns / frames / 1e6, (double)g_profile_commit_ns / frames / 1e6,
         (double)g_profile_gldraw_ns / frames / 1e6, (double)g_profile_uniform_ns / frames / 1e6,
@@ -5392,6 +5486,7 @@ static void gxm_profile_frame(uint64_t resolve_ns, uint64_t finish_ns, uint64_t 
         (double)g_profile_ds_load_ns / frames / 1e6, g_profile_ds_load_calls / frames,
         g_batch_break_state / frames,
         g_batch_break_size / frames, g_batch_break_uniform / frames,
+        g_batch_break_uniform_vertex / frames, g_batch_break_uniform_fragment / frames,
         g_batch_break_texture / frames, g_batch_break_program / frames,
         g_batch_break_prim / frames, g_batch_break_depth_func / frames,
         g_batch_break_depth_write / frames, g_batch_break_depth_bias / frames,
@@ -5428,6 +5523,8 @@ static void gxm_profile_frame(uint64_t resolve_ns, uint64_t finish_ns, uint64_t 
     g_batch_break_rest = 0;
     g_batch_break_size = 0;
     g_batch_break_uniform = 0;
+    g_batch_break_uniform_vertex = 0;
+    g_batch_break_uniform_fragment = 0;
     g_batch_break_texture = 0;
     frames = 0;
     last = now;
@@ -6892,10 +6989,34 @@ static void gxm_fill_draw_state(SceGxmContext *context, GLuint program,
     state->instances = instances;
 }
 
+static void gxm_trace_uniform_diff(const char *what, const uint8_t *batch_data,
+                                   const uint8_t *current, uint32_t size)
+{
+    static unsigned int logged;
+    uint32_t first = 0, last = 0, count = 0;
+
+    if (!getenv("VITA2NATIVE_BATCH_DEBUG") || logged >= 24)
+        return;
+
+    for (uint32_t i = 0; i < size; i++) {
+        if (batch_data[i] != current[i]) {
+            if (!count)
+                first = i;
+            last = i;
+            count++;
+        }
+    }
+    if (count) {
+        LOG("SceGxm: %s uniform break size=%u diff=%u first=%u last=%u", what, size, count,
+            first, last);
+        logged++;
+    }
+}
+
 static bool gxm_batch_matches(SceGxmContext *context, const GxmDrawState *state,
                               uint32_t vertex_uniform_size, uint32_t fragment_uniform_size)
 {
-    const GxmDrawBatch *batch = &context->batch;
+    GxmDrawBatch *batch = &context->batch;
 
     if (!batch->active)
         return false;
@@ -6968,14 +7089,21 @@ static bool gxm_batch_matches(SceGxmContext *context, const GxmDrawState *state,
         g_batch_break_size++;
         return false;
     }
-    if (vertex_uniform_size &&
+    if (!batch->draw_uniforms && vertex_uniform_size &&
         memcmp(batch->vertex_uniforms, context->vertex_block_data, vertex_uniform_size) != 0) {
         g_batch_break_uniform++;
+        g_batch_break_uniform_vertex++;
+        gxm_trace_uniform_diff("vertex", batch->vertex_uniforms, context->vertex_block_data,
+                               vertex_uniform_size);
         return false;
     }
     if (fragment_uniform_size &&
-        memcmp(batch->fragment_uniforms, context->fragment_block_data, fragment_uniform_size) != 0) {
+        memcmp(batch->fragment_uniforms, context->fragment_block_data, fragment_uniform_size) !=
+            0) {
         g_batch_break_uniform++;
+        g_batch_break_uniform_fragment++;
+        gxm_trace_uniform_diff("fragment", batch->fragment_uniforms, context->fragment_block_data,
+                               fragment_uniform_size);
         return false;
     }
     if (memcmp(batch->fragment_textures, context->fragment_textures,
@@ -7515,6 +7643,18 @@ static void gxm_batch_flush(SceGxmContext *context)
         }
         gxm_arena_commit(&context->index_arena, GL_ELEMENT_ARRAY_BUFFER, batch->index_start,
                          context->index_arena.used);
+        if (batch->draw_uniforms && batch->vertex_program &&
+            batch->vertex_program->draw_uniform_location >= 0) {
+            gxm_arena_commit(&context->draw_uniform_arena, GL_UNIFORM_BUFFER, 0,
+                             context->draw_uniform_arena.used);
+            gxm_arena_commit(&context->draw_index_arena, GL_ARRAY_BUFFER, 0,
+                             context->draw_index_arena.used);
+            if (g_bound_draw_uniform_block != context->draw_uniform_arena.buffer) {
+                g_gl->glBindBufferBase(GL_UNIFORM_BUFFER, GXM_DRAW_UNIFORM_BINDING,
+                                       context->draw_uniform_arena.buffer);
+                g_bound_draw_uniform_block = context->draw_uniform_arena.buffer;
+            }
+        }
 
         g_profile_commit_ns += gxm_time_ns() - commit_started;
         commit_started = gxm_time_ns();
@@ -7607,6 +7747,16 @@ static void gxm_batch_flush(SceGxmContext *context)
 
         if (getenv("VITA2NATIVE_GXM_FRAME_DUMP"))
             gxm_dump_flush(context, batch);
+
+        if (batch->draw_uniforms && batch->vertex_program &&
+            batch->vertex_program->draw_uniform_location >= 0) {
+            GLuint location = (GLuint)batch->vertex_program->draw_uniform_location;
+
+            g_gl->glBindBuffer(GL_ARRAY_BUFFER, context->draw_index_arena.buffer);
+            g_gl->glEnableVertexAttribArray(location);
+            g_gl->glVertexAttribPointer(location, 1, GL_FLOAT, GL_FALSE, sizeof(float),
+                                        (const void *)(uintptr_t)batch->draw_index_start);
+        }
 
         if (batch->state.instances > 1 && batch->gl_primitive != GL_POINTS)
             g_gl->glDrawElementsInstanced(batch->gl_primitive, (GLsizei)batch->index_count,
@@ -7713,6 +7863,24 @@ static void gxm_batch_begin(SceGxmContext *context, const GxmLinkedProgram *link
     }
     batch->index_start = gxm_arena_reserve_offset(&context->index_arena, index_alignment);
 
+    batch->draw_uniforms = vp && vp->draw_uniform_location >= 0 && vertex_uniform_size > 0;
+    batch->draw_uniform_stride = vertex_uniform_size;
+    batch->draw_index_start = 0;
+    if (batch->draw_uniforms) {
+        if (!context->draw_uniform_arena.buffer)
+            gxm_arena_init(&context->draw_uniform_arena, GL_UNIFORM_BUFFER,
+                           GXM_DRAW_UNIFORM_BYTES);
+        if (!context->draw_index_arena.buffer)
+            gxm_arena_init(&context->draw_index_arena, GL_ARRAY_BUFFER, GXM_DRAW_INDEX_BYTES);
+
+        /* Each batch is committed into freshly orphaned storage, so its
+           containers and draw slots always start at zero. */
+        context->draw_uniform_arena.used = 0;
+        context->draw_index_arena.used = 0;
+        gxm_arena_reserve_offset(&context->draw_uniform_arena, vertex_uniform_size);
+        batch->draw_index_start = gxm_arena_reserve_offset(&context->draw_index_arena, 4);
+    }
+
     gxm_flush_state(context, linked, context->fragment_program, batch->stream_start);
     batch->active = true;
 }
@@ -7794,6 +7962,21 @@ static bool gxm_batch_append(SceGxmContext *context, uint32_t max_index, const v
     uint32_t bytes = expanded * index_size;
     uint32_t rebase = batch->vertex_count;
     uint8_t *scratch;
+
+    if (batch->draw_uniforms) {
+        uint32_t count = max_index + 1;
+        uint32_t offset;
+        float *values;
+
+        gxm_arena_append(&context->draw_uniform_arena, context->vertex_block_data,
+                         batch->draw_uniform_stride, batch->draw_uniform_stride);
+
+        offset = gxm_arena_append(&context->draw_index_arena, NULL, count * sizeof(float),
+                                  sizeof(float));
+        values = (float *)(context->draw_index_arena.stage + offset);
+        for (uint32_t v = 0; v < count; v++)
+            values[v] = (float)batch->draws;
+    }
 
     for (unsigned int i = 0; i < vp->streamCount && i < SCE_GXM_MAX_VERTEX_STREAMS; i++) {
         uint32_t stride = vp->streams[i].stride;
@@ -8192,10 +8375,21 @@ static void gxm_ensure_shaders(SceGxmContext *context)
         SceGxmVertexProgram *vp = (SceGxmVertexProgram *)context->vertex_program;
 
         if (vp->programId && (!vp->shader || vp->hint_signature != vs_signature)) {
+            int draw_index_location = gxm_program_draw_index_location(vp->programId->programHeader);
+            bool draw_uniforms = false;
+
             vp->shader = gxm_translate_shader(vp->programId->programHeader, GL_VERTEX_SHADER, "vert",
                                               vp->attributes, vp->attributeCount, fragment_formats,
-                                              vertex_formats, color_format, &vp->shader_hash);
+                                              vertex_formats, color_format, &vp->shader_hash,
+                                              draw_index_location, &draw_uniforms);
+            vp->draw_uniform_location =
+                draw_uniforms && vp->shader ? draw_index_location : -1;
             vp->hint_signature = vs_signature;
+
+            if (vp->draw_uniform_location >= 0 && gxm_program_trace())
+                LOG("SceGxm: program %p per-draw vertex uniforms: %u vec4, attribute %d",
+                    (const void *)vp->programId->programHeader,
+                    vp->programId->uniform_buffer_size / 16, vp->draw_uniform_location);
         }
     }
 
@@ -8206,7 +8400,7 @@ static void gxm_ensure_shaders(SceGxmContext *context)
         if (fp->programId && (!fp->shader || fp->hint_signature != fs_signature)) {
             fp->shader = gxm_translate_shader(fp->programId->programHeader, GL_FRAGMENT_SHADER,
                                               "frag", NULL, 0, fragment_formats, vertex_formats,
-                                              color_format, &fp->shader_hash);
+                                              color_format, &fp->shader_hash, -1, NULL);
             fp->hint_signature = fs_signature;
         }
     }
@@ -8371,7 +8565,39 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
                              context->streams[i].data, size, s->stride);
         }
 
+        /* The rewritten vertex shader still reads its container from the
+           per-draw array; give it slot 0 for this unbatched draw. */
+        if (vp->draw_uniform_location >= 0) {
+            uint32_t size = gxm_build_uniforms(context, vp->programId, true);
+            float zero = 0.0f;
+
+            if (!context->draw_uniform_arena.buffer)
+                gxm_arena_init(&context->draw_uniform_arena, GL_UNIFORM_BUFFER,
+                               GXM_DRAW_UNIFORM_BYTES);
+            if (!context->draw_index_arena.buffer)
+                gxm_arena_init(&context->draw_index_arena, GL_ARRAY_BUFFER, GXM_DRAW_INDEX_BYTES);
+            context->draw_uniform_arena.used = 0;
+            context->draw_index_arena.used = 0;
+            gxm_arena_append(&context->draw_uniform_arena, context->vertex_block_data, size, size);
+            gxm_arena_commit(&context->draw_uniform_arena, GL_UNIFORM_BUFFER, 0, size);
+            gxm_arena_append(&context->draw_index_arena, &zero, sizeof(zero), 4);
+            gxm_arena_commit(&context->draw_index_arena, GL_ARRAY_BUFFER, 0, sizeof(zero));
+            if (g_bound_draw_uniform_block != context->draw_uniform_arena.buffer) {
+                g_gl->glBindBufferBase(GL_UNIFORM_BUFFER, GXM_DRAW_UNIFORM_BINDING,
+                                       context->draw_uniform_arena.buffer);
+                g_bound_draw_uniform_block = context->draw_uniform_arena.buffer;
+            }
+        }
+
         gxm_flush_state(context, linked, context->fragment_program, stream_starts);
+
+        if (vp->draw_uniform_location >= 0) {
+            GLuint location = (GLuint)vp->draw_uniform_location;
+
+            g_gl->glBindBuffer(GL_ARRAY_BUFFER, context->draw_index_arena.buffer);
+            g_gl->glEnableVertexAttribArray(location);
+            g_gl->glVertexAttribPointer(location, 1, GL_FLOAT, GL_FALSE, sizeof(float), NULL);
+        }
 
         wire = gxm_wireframe_indices(primType, indexType, indexData, indexCount, &wire_count);
         if (wire) {
@@ -8499,6 +8725,11 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
         if (!gxm_arena_fits(&context->index_arena, (uint32_t)(indexCount * index_size),
                             (uint32_t)index_size))
             can_merge = false;
+        if (context->vertex_program->draw_uniform_location >= 0 &&
+            (!gxm_arena_fits(&context->draw_uniform_arena, vertex_uniform_size,
+                             vertex_uniform_size) ||
+             !gxm_arena_fits(&context->draw_index_arena, (max_index + 1) * 4, 4)))
+            can_merge = false;
     }
 
     if (!can_merge) {
@@ -8516,6 +8747,9 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
         }
         gxm_arena_reserve(&context->index_arena, GL_ELEMENT_ARRAY_BUFFER,
                           (uint32_t)(indexCount * index_size), (uint32_t)index_size);
+        if (context->vertex_program->draw_uniform_location >= 0)
+            gxm_arena_reserve(&context->draw_index_arena, GL_ARRAY_BUFFER,
+                              (max_index + 1) * 4, 4);
 
         gxm_batch_begin(context, linked, &state, vertex_uniform_size, fragment_uniform_size,
                         gl_index_type, gl_primitive, (uint32_t)index_size);

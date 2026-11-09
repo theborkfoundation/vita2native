@@ -19,9 +19,16 @@ extern "C" {
  * "inout" variable whose initial value is the destination pixel. With
  * arm_framebuffer_fetch the ARM variant is emitted instead, since some Mali
  * drivers only expose GL_ARM_shader_framebuffer_fetch (gl_LastFragColorARM).
+ *
+ * vertex_draw_index_location >= 0 rewrites a vertex shader's default uniform
+ * container into a flat array indexed by a per-vertex attribute, so draws with
+ * different uniforms can share one GL draw call. *draw_uniforms_applied is set
+ * to true when the rewrite happened; the caller must then supply that
+ * attribute. Pass -1 (and NULL) for fragment shaders.
  */
 int spirv_to_glsl_es(const uint32_t *spirv, size_t num_words, bool framebuffer_fetch,
-                     bool arm_framebuffer_fetch, char **glsl_out);
+                     bool arm_framebuffer_fetch, int vertex_draw_index_location,
+                     bool *draw_uniforms_applied, char **glsl_out);
 
 #ifdef __cplusplus
 }
