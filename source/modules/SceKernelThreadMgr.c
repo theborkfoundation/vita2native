@@ -36,6 +36,8 @@
 #define SCE_KERNEL_LOWEST_PRIORITY_USER                191
 #define SCE_KERNEL_DEFAULT_PRIORITY                    ((SceInt32)0x10000100)
 #define SCE_KERNEL_DEFAULT_PRIORITY_GAME_APP           160
+#define SCE_KERNEL_HIGHEST_DEFAULT_PRIORITY            (SCE_KERNEL_DEFAULT_PRIORITY - 32)
+#define SCE_KERNEL_LOWEST_DEFAULT_PRIORITY             (SCE_KERNEL_DEFAULT_PRIORITY + 31)
 #define SCE_KERNEL_DEFAULT_PRIORITY_USER               SCE_KERNEL_DEFAULT_PRIORITY
 #define SCE_KERNEL_THREAD_STACK_SIZE_DEFAULT_USER_MAIN (256 * 1024)
 #define SCE_KERNEL_TLS_SIZE                            0x800
@@ -137,8 +139,12 @@ static inline int vita_priority_to_host_priority(int priority)
         priority = current ? current->current_priority : SCE_KERNEL_DEFAULT_PRIORITY_GAME_APP;
     }
 
-    if ((priority & SCE_KERNEL_DEFAULT_PRIORITY) == SCE_KERNEL_DEFAULT_PRIORITY)
-        priority = SCE_KERNEL_DEFAULT_PRIORITY_GAME_APP + (priority & ~SCE_KERNEL_DEFAULT_PRIORITY);
+    /* Default-priority values are offsets from a 0x10000000-based base and
+       span a range (0x100000E0..0x1000011F), e.g. 0x100000FF means one step
+       above default. Map them relative to the game-application default. */
+    if (priority >= SCE_KERNEL_HIGHEST_DEFAULT_PRIORITY &&
+        priority <= SCE_KERNEL_LOWEST_DEFAULT_PRIORITY)
+        priority = SCE_KERNEL_DEFAULT_PRIORITY_GAME_APP + (priority - SCE_KERNEL_DEFAULT_PRIORITY);
 
     if ((priority < SCE_KERNEL_HIGHEST_PRIORITY_USER) ||
         (priority > SCE_KERNEL_LOWEST_PRIORITY_USER))
@@ -2355,8 +2361,8 @@ static int change_thread_priority2(SceUID thid, int priority)
         priority = current->current_priority;
     }
 
-    if (priority >= SCE_KERNEL_DEFAULT_PRIORITY - 32 &&
-        priority <= SCE_KERNEL_DEFAULT_PRIORITY + 31)
+    if (priority >= SCE_KERNEL_HIGHEST_DEFAULT_PRIORITY &&
+        priority <= SCE_KERNEL_LOWEST_DEFAULT_PRIORITY)
         priority = SCE_KERNEL_DEFAULT_PRIORITY_GAME_APP + (priority - SCE_KERNEL_DEFAULT_PRIORITY);
 
     if (priority < SCE_KERNEL_HIGHEST_PRIORITY_USER ||
