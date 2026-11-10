@@ -148,6 +148,7 @@ static int prefer_guest_exports(uint32_t lib_nid)
 
     if (enabled < 0)
         enabled = getenv("VITA2NATIVE_PREFER_GUEST_EXPORTS") != NULL;
+
     if (enabled)
         return lib_nid != SCE_LIBC_NID;
 
@@ -230,20 +231,9 @@ const void *module_get_func_export(uint32_t lib_nid, uint32_t func_nid, void *im
     return NULL;
 }
 
-void *module_get_var_export(uint32_t lib_nid, uint32_t var_nid, void *importer)
+static void *guest_var_export(uint32_t lib_nid, uint32_t var_nid, void *importer)
 {
     void *result = NULL;
-
-    /* The firmware exports its stack guard as a variable as well as a function. */
-    if (lib_nid == 0xCAE9ACE6 && var_nid == 0x93B8AA67)
-        return &g_stack_chk_guard;
-
-    for (size_t i = 0; i < ARRAY_SIZE(g_host_var_exports); i++) {
-        if (g_host_var_exports[i].library_nid == lib_nid &&
-            g_host_var_exports[i].var_nid == var_nid) {
-            return g_host_var_exports[i].address;
-        }
-    }
 
     pthread_mutex_lock(&g_guest_libraries_lock);
     for (int i = 0; i < MAX_GUEST_LIBRARIES; i++) {
@@ -266,6 +256,24 @@ void *module_get_var_export(uint32_t lib_nid, uint32_t var_nid, void *importer)
 done:
     pthread_mutex_unlock(&g_guest_libraries_lock);
     return result;
+}
+
+void *module_get_var_export(uint32_t lib_nid, uint32_t var_nid, void *importer)
+{
+    void *result = NULL;
+
+    /* The firmware exports its stack guard as a variable as well as a function. */
+    if (lib_nid == 0xCAE9ACE6 && var_nid == 0x93B8AA67)
+        return &g_stack_chk_guard;
+
+    for (size_t i = 0; i < ARRAY_SIZE(g_host_var_exports); i++) {
+        if (g_host_var_exports[i].library_nid == lib_nid &&
+            g_host_var_exports[i].var_nid == var_nid) {
+            return g_host_var_exports[i].address;
+        }
+    }
+
+    return guest_var_export(lib_nid, var_nid, importer);
 }
 
 bool module_guest_library_has_dependents(const void *owner)
