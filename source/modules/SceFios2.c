@@ -968,10 +968,298 @@ static int64_t fios_unimplemented(void)
 
 #include "SceFios2_stubs.inc"
 
+/*
+ * SceFios2User: the kernel-side overlay API used by applications that ship
+ * their own libfios2.suprx. The module resolves guest paths such as
+ * "/app0/package_info.txt" through this library; return the equivalent
+ * device-qualified path so the host filesystem resolver can open it.
+ */
+#define SCE_FIOS2USER_LIBRARY_NID 0xC2ED82D7
+#define FIOS_MAX_OVERLAYS 64
+#define FIOS_OVERLAY_POINT_MAX 292
+
+enum {
+    SCE_FIOS_OVERLAY_TYPE_OPAQUE = 0,
+};
+
+typedef struct {
+    uint8_t type;
+    uint8_t order;
+    int16_t src_size;
+    int16_t dst_size;
+    uint32_t process_id;
+    uint32_t reserved;
+    char dst[FIOS_OVERLAY_POINT_MAX];
+    char src[FIOS_OVERLAY_POINT_MAX];
+} SceFiosProcessOverlay;
+
+typedef struct {
+    int used;
+    int32_t id;
+    uint8_t type;
+    uint8_t order;
+    uint32_t process_id;
+    char dst[FIOS_OVERLAY_POINT_MAX];
+    char src[FIOS_OVERLAY_POINT_MAX];
+} VitaFiosOverlay;
+
+static VitaFiosOverlay g_overlays[FIOS_MAX_OVERLAYS];
+static int32_t g_next_overlay_id = 1;
+static pthread_mutex_t g_overlay_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned int g_overlay_trace_count;
+
+static void copy_overlay_path(char *dest, const char *source)
+{
+    size_t length = strnlen(source, FIOS_OVERLAY_POINT_MAX - 1);
+
+    memcpy(dest, source, length);
+    dest[length] = '\0';
+}
+
+/* app0:foo and app0:/foo name the same guest path. */
+static void standardize_overlay_path(char *path)
+{
+    size_t length;
+
+    if (strncmp(path, "app0:", 5) != 0 || path[5] == '/')
+        return;
+
+    length = strlen(path + 5);
+    if (5 + 1 + length >= FIOS_OVERLAY_POINT_MAX)
+        return;
+    memmove(path + 6, path + 5, length + 1);
+    path[5] = '/';
+}
+
+static void overlay_resolve_path(const char *input, char *out, size_t out_size,
+                                 uint32_t min_order, uint32_t max_order)
+{
+    char current[FIOS_OVERLAY_POINT_MAX * 2];
+
+    snprintf(current, sizeof(current), "%s", input ? input : "");
+    pthread_mutex_lock(&g_overlay_lock);
+
+    for (uint32_t order = 0; order < 256; order++) {
+        if (order < min_order || order > max_order)
+            continue;
+
+        for (int i = 0; i < FIOS_MAX_OVERLAYS; i++) {
+            VitaFiosOverlay *overlay = &g_overlays[i];
+            size_t dst_length;
+
+            if (!overlay->used || overlay->order != order)
+                continue;
+            dst_length = strlen(overlay->dst);
+            if (dst_length == 0 || strncmp(current, overlay->dst, dst_length) != 0)
+                continue;
+
+            {
+                char next[FIOS_OVERLAY_POINT_MAX * 2];
+
+                snprintf(next, sizeof(next), "%s%s", overlay->src, current + dst_length);
+                snprintf(current, sizeof(current), "%s", next);
+            }
+        }
+    }
+
+    pthread_mutex_unlock(&g_overlay_lock);
+
+    /* Default guest mounts when the title did not install an explicit overlay. */
+    if (strncmp(current, "/app0", 5) == 0 && (current[5] == '/' || current[5] == '\0'))
+        snprintf(out, out_size, "app0:%s", current + 5);
+    else if (strncmp(current, "/ux0", 4) == 0 && (current[4] == '/' || current[4] == '\0'))
+        snprintf(out, out_size, "ux0:%s", current + 4);
+    else if (strncmp(current, "/savedata0", 10) == 0 &&
+             (current[10] == '/' || current[10] == '\0'))
+        snprintf(out, out_size, "savedata0:%s", current + 10);
+    else if (strncmp(current, "/os0", 4) == 0 && (current[4] == '/' || current[4] == '\0'))
+        snprintf(out, out_size, "os0:%s", current + 4);
+    else if (strncmp(current, "/vs0", 4) == 0 && (current[4] == '/' || current[4] == '\0'))
+        snprintf(out, out_size, "vs0:%s", current + 4);
+    else
+        snprintf(out, out_size, "%s", current);
+}
+
+EXPORT(SceFios2User, 0x6C4BE9CD, int, sceFiosOverlayAddForProcess02, uint32_t process_id,
+       const SceFiosProcessOverlay *overlay, int32_t *out_id)
+{
+    int slot = -1;
+    int32_t id;
+
+    if (!overlay || !out_id)
+        return SCE_FIOS_ERROR_BAD_ARGUMENT;
+
+    pthread_mutex_lock(&g_overlay_lock);
+    for (int i = 0; i < FIOS_MAX_OVERLAYS; i++) {
+        if (!g_overlays[i].used) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        pthread_mutex_unlock(&g_overlay_lock);
+        return SCE_FIOS_ERROR_UNSUPPORTED;
+    }
+
+    memset(&g_overlays[slot], 0, sizeof(g_overlays[slot]));
+    g_overlays[slot].used = 1;
+    g_overlays[slot].id = id = g_next_overlay_id++;
+    g_overlays[slot].type = overlay->type;
+    g_overlays[slot].order = overlay->order;
+    g_overlays[slot].process_id = process_id ? process_id : overlay->process_id;
+    copy_overlay_path(g_overlays[slot].dst, overlay->dst);
+    copy_overlay_path(g_overlays[slot].src, overlay->src);
+    standardize_overlay_path(g_overlays[slot].dst);
+    standardize_overlay_path(g_overlays[slot].src);
+    pthread_mutex_unlock(&g_overlay_lock);
+
+    *out_id = id;
+    if (trace_fios() && g_overlay_trace_count++ < 16)
+        LOG("SceFios2User: overlay %d order %u '%s' -> '%s'", id, overlay->order,
+            g_overlays[slot].dst, g_overlays[slot].src);
+    return 0;
+}
+
+EXPORT(SceFios2User, 0xAB7B4213, int, sceFiosOverlayGetInfoForProcess02, uint32_t process_id,
+       int32_t overlay_id, SceFiosProcessOverlay *out_overlay)
+{
+    int found = 0;
+
+    (void)process_id;
+    if (!out_overlay)
+        return SCE_FIOS_ERROR_BAD_ARGUMENT;
+
+    pthread_mutex_lock(&g_overlay_lock);
+    for (int i = 0; i < FIOS_MAX_OVERLAYS; i++) {
+        VitaFiosOverlay *overlay = &g_overlays[i];
+
+        if (!overlay->used || overlay->id != overlay_id)
+            continue;
+
+        memset(out_overlay, 0, sizeof(*out_overlay));
+        out_overlay->type = overlay->type;
+        out_overlay->order = overlay->order;
+        out_overlay->process_id = overlay->process_id;
+        out_overlay->dst_size = (int16_t)strlen(overlay->dst);
+        out_overlay->src_size = (int16_t)strlen(overlay->src);
+        memcpy(out_overlay->dst, overlay->dst, (size_t)out_overlay->dst_size + 1);
+        memcpy(out_overlay->src, overlay->src, (size_t)out_overlay->src_size + 1);
+        found = 1;
+        break;
+    }
+    pthread_mutex_unlock(&g_overlay_lock);
+
+    if (trace_fios() && g_overlay_trace_count++ < 16)
+        LOG("SceFios2User: get info %d -> %s", overlay_id, found ? "ok" : "missing");
+    return found ? 0 : SCE_FIOS_ERROR_BAD_ARGUMENT;
+}
+
+EXPORT(SceFios2User, 0x1DD808D1, int, sceFiosOverlayGetList02, uint32_t process_id,
+       uint32_t min_order, uint32_t max_order, int32_t *out_ids, uint32_t max_ids,
+       uint32_t *actual_ids)
+{
+    uint32_t count = 0;
+
+    (void)process_id;
+    pthread_mutex_lock(&g_overlay_lock);
+    for (int i = 0; i < FIOS_MAX_OVERLAYS; i++) {
+        VitaFiosOverlay *overlay = &g_overlays[i];
+
+        if (!overlay->used || overlay->order < min_order || overlay->order > max_order)
+            continue;
+        if (out_ids && count < max_ids)
+            out_ids[count] = overlay->id;
+        count++;
+    }
+    pthread_mutex_unlock(&g_overlay_lock);
+
+    if (actual_ids)
+        *actual_ids = count;
+    if (trace_fios() && g_overlay_trace_count++ < 16)
+        LOG("SceFios2User: get list -> %u overlay(s)", count);
+    return 0;
+}
+
+EXPORT(SceFios2User, 0xF5C1F928, int, sceFiosOverlayGetRecommendedScheduler02, int param1,
+       const char *path)
+{
+    /* Matches Vita3K: host0: paths use a different scheduler. */
+    if (param1 <= 1 || !path || strlen(path) < 6)
+        return 0;
+    return memcmp(path, "host", 4) == 0 && path[4] <= '9' && path[5] == ':';
+}
+
+EXPORT(SceFios2User, 0xCA388053, int, sceFiosOverlayModifyForProcess02)
+{
+    return SCE_FIOS_ERROR_UNSUPPORTED;
+}
+
+EXPORT(SceFios2User, 0xE5D1B6F5, int, sceFiosOverlayRemoveForProcess02, uint32_t process_id,
+       int32_t overlay_id)
+{
+    (void)process_id;
+    pthread_mutex_lock(&g_overlay_lock);
+    for (int i = 0; i < FIOS_MAX_OVERLAYS; i++) {
+        if (g_overlays[i].used && g_overlays[i].id == overlay_id) {
+            memset(&g_overlays[i], 0, sizeof(g_overlays[i]));
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_overlay_lock);
+    return 0;
+}
+
+EXPORT(SceFios2User, 0x9C3AAAF0, int, sceFiosOverlayResolveSync02, uint32_t process_id, int mode,
+       const char *in_path, char *out_path, uint32_t max_path)
+{
+    (void)process_id;
+    (void)mode;
+    if (!in_path || !out_path || max_path == 0)
+        return SCE_FIOS_ERROR_BAD_ARGUMENT;
+    overlay_resolve_path(in_path, out_path, max_path, 0, 255);
+    return 0;
+}
+
+EXPORT(SceFios2User, 0x61C4AAC4, int, sceFiosOverlayResolveWithRangeSync02, uint32_t process_id,
+       int mode, const char *in_path, char *out_path, uint32_t max_path, uint32_t min_order,
+       uint32_t max_order)
+{
+    (void)process_id;
+    (void)mode;
+    if (!in_path || !out_path || max_path == 0)
+        return SCE_FIOS_ERROR_BAD_ARGUMENT;
+    overlay_resolve_path(in_path, out_path, max_path, min_order, max_order);
+    if (trace_fios() && g_overlay_trace_count++ < 32)
+        LOG("SceFios2User: resolve '%s' -> '%s'", in_path, out_path);
+    return 0;
+}
+
+EXPORT(SceFios2User, 0x23B8DB1D, int, sceFiosOverlayThreadIsDisabled02)
+{
+    return 0;
+}
+
+EXPORT(SceFios2User, 0x70321220, int, sceFiosOverlayThreadSetDisabled02)
+{
+    return 0;
+}
+
+DECLARE_LIBRARY(SceFios2User, SCE_FIOS2USER_LIBRARY_NID);
 DECLARE_LIBRARY(SceFios2, SCE_FIOS2_LIBRARY_NID);
 
 int SceFios2_init(void)
 {
+    static const struct {
+        const char *dst;
+        const char *src;
+    } defaults[] = {
+        { "/app0/", "app0:/" },
+        { "/ux0/", "ux0:/" },
+        { "/savedata0/", "savedata0:/" },
+        { "/os0/", "os0:/" },
+        { "/vs0/", "vs0:/" },
+    };
+
     pthread_mutex_lock(&g_lock);
     memset(g_files, 0, sizeof(g_files));
     memset(g_dirs, 0, sizeof(g_dirs));
@@ -979,6 +1267,21 @@ int SceFios2_init(void)
     g_initialized = 0;
     g_path_max = FIOS_DEFAULT_PATH_MAX;
     pthread_mutex_unlock(&g_lock);
+
+    pthread_mutex_lock(&g_overlay_lock);
+    memset(g_overlays, 0, sizeof(g_overlays));
+    g_next_overlay_id = 1;
+    for (size_t i = 0; i < sizeof(defaults) / sizeof(defaults[0]); i++) {
+        VitaFiosOverlay *overlay = &g_overlays[i];
+
+        overlay->used = 1;
+        overlay->id = g_next_overlay_id++;
+        overlay->type = SCE_FIOS_OVERLAY_TYPE_OPAQUE;
+        overlay->order = 0;
+        copy_overlay_path(overlay->dst, defaults[i].dst);
+        copy_overlay_path(overlay->src, defaults[i].src);
+    }
+    pthread_mutex_unlock(&g_overlay_lock);
     return 0;
 }
 
