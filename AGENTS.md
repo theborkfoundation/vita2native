@@ -19,6 +19,21 @@
   sudo systemctl start emulationstation
   ```
 
+- The Mali EGL/GLES environment is injected by **login shells**. Run the game
+  through one, otherwise `SDL_VIDEO_EGL_DRIVER=libEGL.so` is missing and EGL
+  loads Mesa/glvnd instead of the vendor blob. GLES 3.x initialization then
+  fails, the null GPU backend is selected, and the screen stays black:
+
+  ```sh
+  ssh -tt r36s 'bash -lc "cd /home/ark/v2n-run && \
+    VITA2NATIVE_KMS_PRESENT=1 VITA2NATIVE_RENDER_SCALE=0.6667 \
+    ./v2n-arm PCSE00322/eboot.bin"'
+  ```
+
+  A plain `ssh r36s 'command'` runs a non-login shell and does not get this
+  environment. `VITA2NATIVE_KMS_PRESENT=1` (or `SDL_VIDEODRIVER=kmsdrm`) is
+  also required for a manual run to use the direct-KMS present path.
+
 - Maximum performance mode uses the ArkOS helper, not raw sysfs:
 
   ```sh
