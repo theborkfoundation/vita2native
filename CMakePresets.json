@@ -40,6 +40,22 @@
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "CMAKE_COLOR_DIAGNOSTICS": "ON"
             }
+        },
+        {
+            "name": "Linux-Cross-MinSize",
+            "hidden": false,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/Linux-Cross-MinSize",
+            "toolchainFile": "${sourceDir}/cmake/toolchains/arm-linux-gnueabihf.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "MinSizeRel",
+                "VITA2NATIVE_HEADLESS": "ON",
+                "VITA2NATIVE_NO_BACKTRACE_SYMBOLS": "ON",
+                "CMAKE_C_FLAGS_MINSIZEREL": "-Os -DNDEBUG -flto",
+                "CMAKE_CXX_FLAGS_MINSIZEREL": "-Os -DNDEBUG -flto",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "CMAKE_COLOR_DIAGNOSTICS": "ON"
+            }
         }
     ],
     "buildPresets": [
@@ -57,6 +73,11 @@
             "name": "Linux-Cross-Headless",
             "hidden": false,
             "configurePreset": "Linux-Cross-Headless"
+        },
+        {
+            "name": "Linux-Cross-MinSize",
+            "hidden": false,
+            "configurePreset": "Linux-Cross-MinSize"
         }
     ]
 }

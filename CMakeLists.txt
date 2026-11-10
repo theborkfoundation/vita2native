@@ -41,6 +41,9 @@ set(VITA2NATIVE_AUDIO_SOURCE source/modules/SceAudio_sdl.c)
 option(VITA2NATIVE_ALLOW_64BIT
     "Allow 64-bit builds for syntax checks (cannot execute Vita code)" OFF)
 
+option(VITA2NATIVE_NO_BACKTRACE_SYMBOLS
+    "Strip dynamic symbols from the executable (smaller binary, but crash backtraces lose names)" OFF)
+
 if(CMAKE_SIZEOF_VOID_P EQUAL 8 AND NOT VITA2NATIVE_ALLOW_64BIT)
     message(FATAL_ERROR
         "vita2native requires a 32-bit ARM target. "
@@ -232,9 +235,11 @@ target_link_libraries(vita2native PRIVATE
 )
 
 # Keep symbols in the executable so the guest crash handler can print a useful
-# backtrace.
-target_link_options(vita2native PRIVATE -rdynamic)
-set_target_properties(vita2native PROPERTIES ENABLE_EXPORTS ON)
+# backtrace. MinSize builds can opt out to save the dynamic symbol table.
+if(NOT VITA2NATIVE_NO_BACKTRACE_SYMBOLS)
+    target_link_options(vita2native PRIVATE -rdynamic)
+    set_target_properties(vita2native PROPERTIES ENABLE_EXPORTS ON)
+endif()
 
 include(GNUInstallDirs)
 
