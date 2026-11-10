@@ -39,6 +39,10 @@ void *g_sce_libc_param;
 /* Value of std::nothrow (an empty tag object). */
 static uint32_t g_nothrow_tag;
 
+/* ScePerf: _pLibPerfCaptureFlagPtr points at a flag no one sets here. */
+static volatile int g_perf_capture_flag;
+static volatile int *g_perf_capture_flag_ptr = &g_perf_capture_flag;
+
 typedef struct {
     uint32_t library_nid;
     uint32_t var_nid;
@@ -66,6 +70,8 @@ static const host_var_export_t g_host_var_exports[] = {
     { 0xbe43bb07, 0x36878958, &g_vita_libc_touptab_cell },
     { 0xbe43bb07, 0xd662e07c, &g_vita_libc_tolotab_cell },
     { 0xbe43bb07, 0x3ce6109d, &g_vita_libc_ctype_cell },
+    /* ScePerf: libperf capture flag pointer */
+    { 0x447f047d, 0x936a5f31, &g_perf_capture_flag_ptr },
 };
 
 static void add_dependent(guest_library_t *lib, void *importer)
