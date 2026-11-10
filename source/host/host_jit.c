@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -30,6 +31,49 @@ static size_t align_up(size_t value, size_t alignment)
     return (value + alignment - 1) & ~(alignment - 1);
 }
 
+/*
+ * Some titles tag function pointers with bit 30 and clear it before calling.
+ * That only works while executable code stays below 0xc0000000: with a higher
+ * address the tag either collides with the host address or overflows when the
+ * game sets it. mmap(NULL) puts the JIT near the top of the 32-bit address
+ * space, so ask for the range the Vita image would normally occupy first.
+ */
+#define JIT_MAX_ADDR 0xc0000000u
+#define JIT_TAG_MASK 0x40000000u
+
+static void *jit_map(size_t size, int prot, int flags, int fd)
+{
+    static const uintptr_t hints[] = {
+        0x90000000u, 0x94000000u, 0x98000000u, 0x9c000000u,
+        0xa0000000u, 0xa4000000u, 0xa8000000u, 0xac000000u,
+        0xb0000000u, 0xb4000000u, 0xb8000000u, 0xbc000000u,
+    };
+
+    for (size_t i = 0; i < sizeof(hints) / sizeof(hints[0]); i++) {
+        void *mapped;
+
+        if (size > (size_t)(JIT_MAX_ADDR - hints[i]))
+            continue;
+
+        mapped = mmap((void *)hints[i], size, prot, flags, fd, 0);
+        if (mapped == MAP_FAILED)
+            continue;
+        if (((uintptr_t)mapped & JIT_TAG_MASK) == 0)
+            return mapped;
+        munmap(mapped, size);
+    }
+
+    {
+        void *mapped = mmap(NULL, size, prot, flags, fd, 0);
+
+        if (mapped != MAP_FAILED && ((uintptr_t)mapped & JIT_TAG_MASK) != 0)
+            fprintf(stderr,
+                    "vita2native: JIT mapping at %p has bit 30 set; tagged pointers may fail\n",
+                    mapped);
+        return mapped;
+    }
+}
+
 Result jitCreate(Jit *jit, size_t size)
 {
     size_t page_size;
@@ -50,8 +94,8 @@ Result jitCreate(Jit *jit, size_t size)
 #if defined(__linux__)
     fd = (int)syscall(SYS_memfd_create, "vita2native-jit", MFD_CLOEXEC);
     if (fd >= 0 && ftruncate(fd, (off_t)size) == 0) {
-        void *rw = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-        void *rx = mmap(NULL, size, PROT_READ | PROT_EXEC, MAP_SHARED, fd, 0);
+        void *rw = jit_map(size, PROT_READ | PROT_WRITE, MAP_SHARED, fd);
+        void *rx = jit_map(size, PROT_READ | PROT_EXEC, MAP_SHARED, fd);
 
         if (rw != MAP_FAILED && rx != MAP_FAILED) {
             jit->rw = rw;
@@ -77,8 +121,8 @@ Result jitCreate(Jit *jit, size_t size)
      * Fallback for non-Linux development hosts and kernels without memfd.
      * This is a single mapping that we flip between writable and executable.
      */
-    jit->rw = mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC,
-                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    jit->rw = jit_map(size, PROT_READ | PROT_WRITE | PROT_EXEC,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1);
     if (jit->rw == MAP_FAILED) {
         jit->rw = NULL;
         return -1;
