@@ -154,11 +154,16 @@ bottleneck (about 5 ms per `glDrawElements`).
 
 Input follows the same split. While SDL video is running, its dedicated video
 thread samples input too: keyboards, plus pads that SDL recognises through its
-controller database, with a raw-joystick fallback for unknown devices. Keyboard
-mapping is arrows for the D-pad, `Z`/`Enter` = cross, `X`/`Backspace` = circle,
-`A` = square, `S` = triangle, `Q`/`E` = L1/R1, `1`/`2` = L2/R2 and `Tab`/
-`Space` = Select/Start. Presses are latched until the guest polls, so a tap is
-not lost on a title running at 1 fps.
+controller database, with a raw-joystick fallback for unknown devices. When
+evdev found a pad, SDL contributes the keyboard and stick axes only; pad
+buttons come from evdev, because SDL's controller database is label-based and
+can disagree with the Vita's positional layout (on the R36S the same face
+button would otherwise be reported as both square and triangle). When evdev
+found no pad, SDL's buttons are used instead. Keyboard mapping is arrows for
+the D-pad, `Z`/`Enter` = cross, `X`/`Backspace` = circle, `A` = square,
+`S` = triangle, `Q`/`E` = L1/R1, `1`/`2` = L2/R2 and `Tab`/`Space` =
+Select/Start. Presses are latched until the guest polls, so a tap is not lost
+on a title running at 1 fps.
 `VITA2NATIVE_CTRL_SWAP_AB` swaps cross/circle on all sources, and
 `VITA2NATIVE_INPUT_DEBUG=1` logs the mapping (`SDL mapping ...` shows the
 mapping SDL picked for a controller). The same video-thread poll reads the
@@ -168,12 +173,15 @@ the guest reads it. Clicks on the black bars are ignored. `sceCtrlSetActuator`
 feeds the attached controller's rumble motors through SDL, and closing the SDL
 window (or SDL_QUIT) exits the emulator cleanly.
 
-When SDL is unavailable, the headless build reads the pad directly from evdev
-(`/dev/input/event*`), which remains the reliable path on the R36S: face
-buttons, D-pad, shoulders, `BTN_SELECT/START`, the F1–F5 buttons and both
-sticks. SDL and evdev states are ORed together; axes come from SDL only when a
-controller is attached, so a keyboard-only session cannot overwrite the evdev
-stick values. Scripted input still works and is ORed with both.
+The headless build always reads the pad directly from evdev
+(`/dev/input/event*`), which is the reliable path on the R36S: face buttons,
+D-pad, shoulders, `BTN_SELECT/START`, the F1–F5 buttons and both sticks. When
+evdev found a pad its buttons win over SDL's; otherwise SDL's buttons are ORed
+in. Axes come from SDL only when a controller is attached, so a keyboard-only
+session cannot overwrite the evdev stick values. Scripted input still works and
+is ORed with both. `tools/ctrl_test` is a guest-side probe for this path: build
+it with `python3 tools/ctrl_test/build.py` and it draws the live pad state on a
+960x544 pane while logging every controller state change.
 
 Video output goes through SDL, loaded with `dlopen` so the headless ARM binary
 keeps no SDL build dependency. SDL chooses the platform driver itself: KMSDRM

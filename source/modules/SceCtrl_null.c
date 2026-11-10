@@ -1,14 +1,20 @@
 /*
  * Controller backend.
  *
- * Input comes from two places and the states are ORed:
+ * Input comes from two places:
  *
- *   SDL      the video layer samples keyboards and game controllers on its own
- *            thread (see host_video_sdl.c). This is the desktop/X11 path and
- *            also covers any pad SDL can open when the video window exists.
  *   evdev    every /dev/input/event* node is opened below, which is the
  *            reliable path on the R36S where SDL may have no controller
- *            mapping and the pad is exposed as a plain gpio-keys device:
+ *            mapping and the pad is exposed as a plain gpio-keys device.
+ *            Its buttons are positional and cover the whole pad, so they win
+ *            over SDL whenever a pad was found.
+ *   SDL      the video layer samples keyboards and game controllers on its own
+ *            thread (see host_video_sdl.c). Its keyboard and stick samples are
+ *            always used. Its buttons are only used when evdev found no pad,
+ *            because SDL's controller mapping is label-based while evdev
+ *            reports physical positions; on some pads the same press would
+ *            otherwise be reported as two different Vita buttons (the R36S
+ *            reports its square/triangle pair swapped between the two paths).
  *
  *   BTN_SOUTH/EAST/NORTH/WEST   face buttons (A/B/X/Y)
  *   BTN_TL/TR and BTN_TL2/TR2   shoulders
@@ -347,7 +353,13 @@ EXPORT(SceCtrl, 0xA9C3CED6, int, sceCtrlPeekBufferPositive, int port, SceCtrlDat
     sample.ry = g_ry;
 
     if (have_sdl_pad) {
-        sample.buttons |= sdl_pad.buttons | sdl_pad.pressed;
+        /* evdev's positional mapping already covers every pad button, including
+           the F1-F5 keys SDL's controller database does not bind. SDL's mapping
+           is label-based, so ORing both would report one press as two different
+           buttons on pads whose x/y labels do not match the Vita layout. Keep
+           SDL buttons only as the fallback for machines without an evdev pad. */
+        if (!g_have_pad)
+            sample.buttons |= sdl_pad.buttons | sdl_pad.pressed;
         /* Prefer SDL axes only when a controller is actually attached; a
            keyboard-only session must not overwrite the evdev stick values. */
         if (sdl_pad.active) {
@@ -401,6 +413,8 @@ int SceCtrl_init(void)
 "
                         "devices\n",
                 g_fd_count);
+    else if (g_debug)
+        fprintf(stderr, "vita2native: SceCtrl evdev pad controls buttons, SDL buttons disabled\n");
 
     if (pthread_create(&g_thread, NULL, input_thread, NULL) == 0)
         g_thread_started = true;
