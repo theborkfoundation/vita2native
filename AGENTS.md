@@ -3,6 +3,9 @@
 ## R36S (ArkOS)
 
 - Work from `/home/ark/v2n-run`; the host binary is `v2n-arm`.
+- Deploy the normal `build/cmake-arm-rel/vita2native` build. The
+  `Linux-Cross-MinSize` preset is for size experiments and rare cases only; do
+  not use it as the default deployment artifact.
 - A direct-KMS run needs EmulationStation stopped, otherwise `drmSetMaster`
   fails and direct EGL attach is unavailable:
 
