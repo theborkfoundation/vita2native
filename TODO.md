@@ -71,3 +71,24 @@ watchdog cannot run) with `VITA2NATIVE_TEXTURE_CACHE_MB=128` and no
 `VITA2NATIVE_FINISH_PER_FRAME`. The R36S survives the same path. If the Pi is
 used for in-game testing again, run it with `VITA2NATIVE_FINISH_PER_FRAME=1`
 and a cgroup memory cap, and keep logs on disk rather than tmpfs.
+
+## Input: use the R36S Fn key as a Home/debug key
+
+**Priority:** low.
+
+**Status:** `BTN_TRIGGER_HAPPY5` (the R36S Fn key) is currently ignored by
+`source/modules/SceCtrl_null.c`. It is a firmware hotkey modifier and has no
+Vita equivalent, so forwarding it as Select/Start was wrong.
+
+**Idea:** expose it as a host-side Home key. A short press could toggle a small
+debug pane (FPS graph, frame profiler, input viewer, texture-cache stats); a
+long press or Fn+Start could exit the game. Keep the key out of the guest's
+`SceCtrlData` so titles never see a phantom button.
+
+**Open questions:**
+
+- Does ArkOS consume Fn combinations before evdev sees them?
+- Should the pane be host-rendered like `fps_overlay.c` (composited into the
+  guest framebuffer) or drawn by a guest overlay?
+- Which gesture should open the menu without colliding with the existing Fn
+  hotkeys (brightness, volume, etc.)?
