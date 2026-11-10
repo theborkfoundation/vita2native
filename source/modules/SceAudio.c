@@ -13,7 +13,9 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/uio.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "host.h"
 #include "log.h"
@@ -40,6 +42,8 @@ typedef struct {
     bool has_previous;
     int16_t *scratch;
     size_t scratch_frames;
+    int16_t *input;
+    size_t input_samples;
     uint64_t next_deadline_ns;
     uint64_t debug_last_ns;
     uint64_t debug_last_played;
@@ -79,6 +83,40 @@ static AudioPort *get_port(int port)
         return NULL;
 
     return &g_ports[port];
+}
+
+/*
+ * Audio buffers come from guest memory and titles sometimes hand us a buffer
+ * shorter than len * channels. Use process_vm_readv so an unmapped tail becomes
+ * silence instead of taking the emulator down; the guest heap can end on a
+ * guard page.
+ */
+static void copy_guest_samples(int16_t *dest, const int16_t *source, size_t bytes)
+{
+    struct iovec local = { dest, bytes };
+    struct iovec remote = { (void *)source, bytes };
+    ssize_t copied = process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
+
+    if (copied < 0)
+        copied = 0;
+    if ((size_t)copied < bytes)
+        memset((uint8_t *)dest + copied, 0, bytes - (size_t)copied);
+}
+
+static int16_t *port_input(AudioPort *p, size_t samples)
+{
+    int16_t *grown;
+
+    if (samples <= p->input_samples)
+        return p->input;
+
+    grown = realloc(p->input, samples * sizeof(int16_t));
+    if (!grown)
+        return NULL;
+
+    p->input = grown;
+    p->input_samples = samples;
+    return grown;
 }
 
 /* One stereo input frame, clamped at the edges of the buffer. */
@@ -239,6 +277,7 @@ EXPORT(SceAudio, 0x69E2E6B5, int, sceAudioOutReleasePort, int port)
 
     host_audio_port_destroy(p->queue);
     free(p->scratch);
+    free(p->input);
     memset(p, 0, sizeof(*p));
 
     return 0;
@@ -265,6 +304,16 @@ EXPORT(SceAudio, 0x02DB3F5F, int, sceAudioOutOutput, int port, const void *buf)
     }
 
     input_frames = (size_t)p->len;
+
+    {
+        size_t sample_count = input_frames * (size_t)p->channels;
+        int16_t *staging = port_input(p, sample_count);
+
+        if (!staging)
+            return SCE_AUDIO_OUT_ERROR_OUT_OF_MEMORY;
+        copy_guest_samples(staging, samples, sample_count * sizeof(int16_t));
+        samples = staging;
+    }
 
     if (audio_debug()) {
         uint64_t now = now_ns();
@@ -655,6 +704,7 @@ int SceAudio_finish(void)
             continue;
         host_audio_port_destroy(g_ports[i].queue);
         free(g_ports[i].scratch);
+        free(g_ports[i].input);
         memset(&g_ports[i], 0, sizeof(g_ports[i]));
     }
 
