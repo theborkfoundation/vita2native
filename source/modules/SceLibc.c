@@ -14,6 +14,7 @@
  */
 
 #include <errno.h>
+#include <limits.h>
 #include <malloc.h>
 #include <math.h>
 #include <pthread.h>
@@ -27,6 +28,7 @@
 #include <time.h>
 
 #include "fs.h"
+#include "host_psarc.h"
 #include "log.h"
 #include "module.h"
 #include "mspace.h"
@@ -595,13 +597,21 @@ static void vita_guest_stream_write(const void *data, size_t size)
 EXPORT(SceLibc, 0xfffbe239, FILE *, vita_fopen, const char *path, const char *mode)
 {
     char buffer[512];
-    FILE *fp = fopen(host_path(path, buffer, sizeof(buffer)), mode);
+    const char *host_name = host_path(path, buffer, sizeof(buffer));
+    FILE *fp = fopen(host_name, mode);
+
+    if (!fp && path && mode && mode[0] == 'r' && !strchr(mode, '+')) {
+        char psarc_path[PATH_MAX];
+
+        if (host_psarc_materialize(host_name, psarc_path, sizeof(psarc_path)) == 0)
+            fp = fopen(psarc_path, mode);
+    }
 
     vita_track_host_file(fp);
 
     if (trace_fileio())
-        LOG("fopen(\"%s\", \"%s\") -> %p", path ? path : "(null)", mode ? mode : "(null)",
-            (void *)fp);
+        LOG("fopen(\"%s\", \"%s\") -> %p ra=%p", path ? path : "(null)",
+            mode ? mode : "(null)", (void *)fp, __builtin_return_address(0));
     return fp;
 }
 

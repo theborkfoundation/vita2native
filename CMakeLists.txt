@@ -61,6 +61,7 @@ add_link_options("-Wl,--no-gc-sections")
 add_executable(vita2native
     source/host/host_video_sdl.c
     source/host/host_fs.c
+    source/host/host_psarc.c
     source/host/host_gfx.c
     source/host/host_gfx_gl.c
     source/host/host_gfx_null.c
