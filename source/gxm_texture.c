@@ -1797,10 +1797,17 @@ static int decode_pvrt_level(uint8_t *dest, const uint8_t *input, SceGxmTextureF
                        base == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII2BPP;
     uint32_t pvrt2 = base == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII2BPP ||
                      base == SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII4BPP;
+    uint32_t min_width = two_bpp ? 16u : 8u;
     uint8_t *decoded;
 
     if (!info->layout_width || !info->layout_height)
         return -1;
+
+    /* PVRTC levels are power-of-two and unpadded, so decode straight into the
+       upload buffer instead of a full-size temporary. */
+    if (info->layout_width == info->width && info->layout_height == info->height &&
+        info->width >= min_width && info->height >= 8u)
+        return gxm_texture_decode_pvrtc(input, info->width, info->height, two_bpp, pvrt2, dest);
 
     decoded = malloc((size_t)info->layout_width * info->layout_height * 4);
     if (!decoded)

@@ -136,7 +136,10 @@ native 960x544 resolution. RGBA4444 textures upload as `GL_RGBA4` by default
 on the Mali blob, which cuts a 2048x2048 atlas upload from ~79 ms to ~49 ms;
 Panfrost and software renderers keep the RGBA8 path because their `GL_RGBA4`
 upload is several times slower. `VITA2NATIVE_RGBA4=1` and
-`VITA2NATIVE_NO_RGBA4=1` force either path for A/B measurements.
+`VITA2NATIVE_NO_RGBA4=1` force either path for A/B measurements. PVRTC-I 4bpp
+textures use a specialised decoder (the PowerVR SDK reference implementation
+stays for 2bpp and PVRTC-II): a 1024x1024 texture drops from ~425 ms to ~78 ms
+on the R36S. `VITA2NATIVE_NO_PVRTC_FAST=1` forces the reference decoder.
 
 The same ARM32 build also runs on an R36S handheld (Rockchip RK3326, Mali-G31
 through the proprietary Bifrost blob, 640x480 DSI panel). Output goes through

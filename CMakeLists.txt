@@ -67,6 +67,7 @@ add_executable(vita2native
     external/sqlite/sqlite3.c
     source/gxm_texture.c
     source/gxm_texture_pvrtc.cpp
+    source/gxm_texture_pvrtc_fast.c
     source/stb_image_impl.c
     source/stb_image_write_impl.c
     external/Vita3K/vita3k/renderer/src/texture/pvrt-dec.cpp
@@ -757,6 +758,7 @@ if(BUILD_TESTING)
         tests/texture_smoke.c
         source/gxm_texture.c
         source/gxm_texture_pvrtc.cpp
+        source/gxm_texture_pvrtc_fast.c
         external/Vita3K/vita3k/renderer/src/texture/pvrt-dec.cpp
     )
     target_include_directories(texture_smoke PRIVATE
@@ -777,6 +779,7 @@ if(BUILD_TESTING)
         source/host/host_fs.c
         source/gxm_texture.c
         source/gxm_texture_pvrtc.cpp
+        source/gxm_texture_pvrtc_fast.c
         external/Vita3K/vita3k/renderer/src/texture/pvrt-dec.cpp
         source/modules/SceGxm.c
         source/spirv_cross_glsl_es.cpp

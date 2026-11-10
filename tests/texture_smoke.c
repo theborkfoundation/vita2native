@@ -8,6 +8,7 @@
 #include <psp2/gxm.h>
 
 #include "gxm/texture.h"
+#include "gxm/texture_compressed.h"
 
 static uint32_t part1by1(uint32_t x)
 {
@@ -603,6 +604,109 @@ static void bench_decode_rgba4(SceGxmTextureFormat format, SceGxmTextureType typ
     free(data);
 }
 
+static void bench_pvrtc(uint32_t size, uint32_t two_bpp, const char *name)
+{
+    size_t packed = (size_t)size * size / (two_bpp ? 4u : 2u);
+    uint8_t *data = malloc(packed);
+    uint8_t *decoded = malloc((size_t)size * size * 4);
+    uint64_t started;
+    uint64_t elapsed;
+
+    if (!data || !decoded) {
+        fprintf(stderr, "bench: out of memory\n");
+        exit(1);
+    }
+
+    for (size_t i = 0; i < packed; i++)
+        data[i] = (uint8_t)((i * 2654435761u) >> 13);
+
+    for (int pass = 0; pass < 2; pass++) {
+        started = bench_now_ns();
+        assert(gxm_texture_decode_pvrtc(data, size, size, two_bpp, 0, decoded) == 0);
+        elapsed = bench_now_ns() - started;
+        printf("bench %s pass %d: %.1f ms (%.1f ns/pixel)\n", name, pass,
+               (double)elapsed / 1e6, (double)elapsed / ((double)size * size));
+        fflush(stdout);
+    }
+
+    free(decoded);
+    free(data);
+}
+
+static void test_pvrtc(void)
+{
+    static const struct {
+        uint32_t width;
+        uint32_t height;
+    } sizes[] = {
+        { 8, 8 },     { 16, 16 },   { 32, 32 },  { 64, 64 },   { 128, 128 },
+        { 8, 16 },    { 16, 8 },    { 32, 64 },  { 64, 32 },   { 128, 64 },
+        { 64, 128 },  { 256, 512 }, { 512, 256 }, { 1024, 512 }, { 512, 1024 },
+        { 1024, 1024 },
+    };
+    uint8_t *reference = malloc(1024u * 1024u * 4u);
+    uint8_t *fast = malloc(1024u * 1024u * 4u);
+    uint8_t *data = malloc(1024u * 1024u / 2u);
+    uint32_t seed = 0x12345678u;
+
+    assert(reference && fast && data);
+
+    for (size_t s = 0; s < sizeof(sizes) / sizeof(sizes[0]); s++) {
+        uint32_t width = sizes[s].width;
+        uint32_t height = sizes[s].height;
+        size_t packed = (size_t)width * height / 2u;
+        size_t bytes = (size_t)width * height * 4u;
+
+        for (int pattern = 0; pattern < 4; pattern++) {
+            for (size_t i = 0; i < packed; i++) {
+                if (pattern == 0) {
+                    seed = seed * 1664525u + 1013904223u;
+                    data[i] = (uint8_t)(seed >> 24);
+                } else if (pattern == 1) {
+                    data[i] = 0x00;
+                } else if (pattern == 2) {
+                    data[i] = 0xff;
+                } else {
+                    data[i] = (uint8_t)((i & 1u) ? 0xaa : 0x55);
+                }
+            }
+
+            memset(reference, 0xcc, bytes);
+            memset(fast, 0xcc, bytes);
+            assert(gxm_texture_decode_pvrtc_reference(data, width, height, 0, 0, reference) == 0);
+            assert(gxm_texture_decode_pvrtc(data, width, height, 0, 0, fast) == 0);
+            if (memcmp(reference, fast, bytes) != 0) {
+                size_t i;
+
+                for (i = 0; i < bytes; i++) {
+                    if (reference[i] != fast[i])
+                        break;
+                }
+                fprintf(stderr, "pvrtc mismatch: %ux%u pattern %d byte %zu (pixel %zu)\n", width,
+                        height, pattern, i, i / 4);
+                for (size_t p = 0; p < 16 && p < bytes / 4; p++) {
+                    fprintf(stderr, "  px %zu: ref %u %u %u %u fast %u %u %u %u\n", p,
+                            reference[p * 4 + 0], reference[p * 4 + 1], reference[p * 4 + 2],
+                            reference[p * 4 + 3], fast[p * 4 + 0], fast[p * 4 + 1],
+                            fast[p * 4 + 2], fast[p * 4 + 3]);
+                }
+                assert(0);
+            }
+        }
+    }
+
+    /* The gxm_texture entry point decodes straight into the destination for an
+       unpadded PVRTC level; check that path too. */
+    assert(gxm_texture_decode_rgba8(fast, data, 1024, 512, SCE_GXM_TEXTURE_FORMAT_PVRT4BPP_ABGR,
+                                    SCE_GXM_TEXTURE_LINEAR) == 0);
+    assert(gxm_texture_decode_pvrtc_reference(data, 1024, 512, 0, 0, reference) == 0);
+    assert(memcmp(reference, fast, 1024u * 512u * 4u) == 0);
+
+    free(data);
+    free(fast);
+    free(reference);
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && strcmp(argv[1], "--bench") == 0) {
@@ -617,6 +721,9 @@ int main(int argc, char **argv)
                            "u4 swizzled rgba4 abgr");
         bench_decode_rgba4(SCE_GXM_TEXTURE_FORMAT_U4U4U4U4_RGBA, SCE_GXM_TEXTURE_SWIZZLED,
                            "u4 swizzled rgba4 rgba");
+        bench_pvrtc(512, 0, "pvrtc4 512");
+        bench_pvrtc(1024, 0, "pvrtc4 1024");
+        bench_pvrtc(512, 1, "pvrtc2 512");
         bench_decode(SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, SCE_GXM_TEXTURE_SWIZZLED,
                      "u8 swizzled");
         return 0;
@@ -631,6 +738,7 @@ int main(int argc, char **argv)
     test_palette();
     test_tiled();
     test_compressed();
+    test_pvrtc();
     test_yuv();
 
     /* Format conversion: ABGR bytes -> RGBA8. */

@@ -15,6 +15,18 @@ extern "C" {
 int gxm_texture_decode_pvrtc(const void *data, uint32_t width, uint32_t height, uint32_t two_bpp,
                              uint32_t pvrt2, uint8_t *dest);
 
+/* Reference PowerVR SDK decoder. Used as the golden implementation by tests. */
+int gxm_texture_decode_pvrtc_reference(const void *data, uint32_t width, uint32_t height,
+                                       uint32_t two_bpp, uint32_t pvrt2, uint8_t *dest);
+
+/*
+ * Optimised PVRTC-I 4bpp decoder. Writes tightly packed RGBA8. Returns -1 when
+ * the input is not a power-of-two PVRTC-I 4bpp image, so callers can fall back
+ * to the reference decoder.
+ */
+int gxm_texture_decode_pvrtc4_fast(const void *data, uint32_t width, uint32_t height,
+                                   uint8_t *dest);
+
 #ifdef __cplusplus
 }
 #endif
