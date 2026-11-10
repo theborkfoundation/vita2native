@@ -824,6 +824,21 @@ segments_ready:
         info->data_addr = (void *)data_addr;
     }
 
+    /* VITA2NATIVE_DUMP_MAIN_DATA=<path> writes the main image's data segment. */
+    if (info && strcmp(info->name, "eboot") == 0) {
+        const char *dump_path = getenv("VITA2NATIVE_DUMP_MAIN_DATA");
+
+        if (dump_path && data_addr && data_size) {
+            FILE *file = fopen(dump_path, "wb");
+
+            if (file) {
+                fwrite((const void *)data_addr, 1, data_size, file);
+                fclose(file);
+                LOG("Dumped main image data to %s (%u bytes)", dump_path, data_size);
+            }
+        }
+    }
+
     return 0;
 
 err_free_data:

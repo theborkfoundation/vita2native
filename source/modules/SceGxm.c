@@ -1904,6 +1904,8 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
     const void *palette = (const void *)(uintptr_t)(texture->palette_addr << 6);
     static int force_level0 = -1;
     static int force_lit_shadow = -1;
+    static int trace_textures = -1;
+    static unsigned int trace_count;
     uint32_t hash;
 
     /* Diagnostic: ignore the mip chain so the scene can be compared against a
@@ -1914,6 +1916,8 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
         force_lit_shadow = getenv("VITA2NATIVE_FORCE_SHADOW_LIT") != NULL;
     if (force_level0)
         mip_count = 1;
+    if (trace_textures < 0)
+        trace_textures = getenv("VITA2NATIVE_TRACE_TEXTURES") != NULL;
     GxmTextureCache *cache;
     uint8_t *rgba = NULL;
     uint16_t *rgba4 = NULL;
@@ -1977,6 +1981,13 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
         return true;
     }
 
+    if (trace_textures && !cache && trace_count < 128) {
+        LOG("SceGxm: texture first frame %llu unit %u %ux%u fmt=0x%08x type=%d mips=%u data=%p",
+            (unsigned long long)g_gxm_frame, unit, width, height,
+            (uint32_t)gxm_texture_get_format(texture), (int)type, mip_count, data);
+        trace_count++;
+    }
+
     /*
      * Hashing a 2048x2048 texture costs several milliseconds, and a scene can
      * bind a dozen of them every frame. VITA2NATIVE_TEXTURE_HASH_INTERVAL=N
@@ -2005,6 +2016,11 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
         hash = gxm_texture_hash(texture, data);
         g_profile_hash_ns += gxm_time_ns() - hash_started;
         g_profile_hash_calls++;
+    }
+
+    if (trace_textures && !cache && trace_count < 128) {
+        LOG("SceGxm: texture hash frame %llu hash=%08x", (unsigned long long)g_gxm_frame, hash);
+        trace_count++;
     }
 
     if (cache && cache->hash == hash) {
@@ -2099,6 +2115,15 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
     started = gxm_time_ns();
     g_profile_uploads++;
     g_profile_upload_bytes += (uint64_t)width * height * (rgba4_upload ? 2u : 4u);
+
+    if (trace_textures && trace_count < 128) {
+        LOG("SceGxm: texture decode frame %llu unit %u %ux%u fmt=0x%08x type=%d mips=%u "
+            "rgba4=%d data=%p",
+            (unsigned long long)g_gxm_frame, unit, width, height,
+            (uint32_t)gxm_texture_get_format(texture), (int)type, mip_count, rgba4_upload ? 1 : 0,
+            data);
+        trace_count++;
+    }
 
     for (uint32_t face = 0; face < (cube ? 6u : 1u); face++) {
         for (uint32_t level = 0; level < mip_count; level++) {
@@ -2247,6 +2272,12 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
             }
 
             level_started = gxm_time_ns();
+            if (trace_textures && trace_count < 128) {
+                LOG("SceGxm: glTexImage2D frame %llu unit %u level %u %ux%u %s",
+                    (unsigned long long)g_gxm_frame, unit, (unsigned)level,
+                    (unsigned)info.width, (unsigned)info.height, rgba4_upload ? "RGBA4" : "RGBA8");
+                trace_count++;
+            }
             if (rgba4_upload)
                 g_gl->glTexImage2D(upload_target, (GLint)level, GL_RGBA4, (GLsizei)info.width,
                                    (GLsizei)info.height, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4,
@@ -5192,6 +5223,47 @@ static void gxm_blit_depth_stencil_to_msaa(SceGxmRenderTarget *rt)
     g_gl->glBindFramebuffer(GL_FRAMEBUFFER, rt->msaa_fbo);
 }
 
+/*
+ * Diagnostic: VITA2NATIVE_TRACE_DRAWS logs the scene/draw call sequence. It
+ * exists for titles that keep drawing without ever reaching sceGxmEndScene,
+ * where the EndScene-only frame trace shows nothing at all.
+ */
+static int gxm_trace_draws(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_TRACE_DRAWS") != NULL;
+    return enabled;
+}
+
+static void gxm_trace_draw(const char *what, const SceGxmContext *context, unsigned int prim,
+                           unsigned int count, unsigned int instances, const void *index_data)
+{
+    static unsigned int calls;
+    static unsigned int big;
+
+    if (!gxm_trace_draws())
+        return;
+
+    calls++;
+    if (calls > 32) {
+        if (count >= 1000000u) {
+            if (big++ >= 8)
+                return;
+        } else if (calls % 1000000u != 0) {
+            return;
+        }
+    }
+
+    LOG("SceGxm trace #%u %s frame %llu ctx %p prim %u count %u inst %u idx %p deferred %d "
+        "scene %d vp %p fp %p",
+        calls, what, (unsigned long long)g_gxm_frame, (const void *)context, prim, count, instances,
+        index_data, context ? (int)context->deferred : -1, context ? (int)context->in_scene : -1,
+        context ? (const void *)context->vertex_program : NULL,
+        context ? (const void *)context->fragment_program : NULL);
+}
+
 EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsigned int flags,
        const SceGxmRenderTarget *renderTarget, const SceGxmValidRegion *validRegion,
        SceGxmSyncObject *vertexSyncObject, SceGxmSyncObject *fragmentSyncObject,
@@ -5200,6 +5272,8 @@ EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsign
     (void)flags;
     (void)validRegion;
     (void)vertexSyncObject;
+
+    gxm_trace_draw("begin", context, 0, 0, 0, NULL);
 
     host_gpu_thread_enter(g_device);
 
@@ -5635,6 +5709,8 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
 
     (void)vertexNotification;
     (void)fragmentNotification;
+
+    gxm_trace_draw("end", context, 0, 0, 0, NULL);
 
     host_gpu_thread_enter(g_device);
 
@@ -8574,6 +8650,8 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
     GxmDrawState state;
     bool can_merge;
     uint64_t draw_started = gxm_time_ns();
+
+    gxm_trace_draw("draw", context, (unsigned int)primType, indexCount, instances, indexData);
 
     host_gpu_thread_enter(g_device);
 

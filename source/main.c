@@ -1053,6 +1053,21 @@ int main(int argc, char *argv[])
         g_main_image_rw = (uintptr_t)main_info.code_rw;
         g_main_image_size = jit.size;
 
+        /* VITA2NATIVE_DUMP_MAIN_CODE=<path> writes the relocated main image. */
+        {
+            const char *dump_path = getenv("VITA2NATIVE_DUMP_MAIN_CODE");
+
+            if (dump_path && main_info.code_rw && jit.size) {
+                FILE *file = fopen(dump_path, "wb");
+
+                if (file) {
+                    fwrite(main_info.code_rw, 1, jit.size, file);
+                    fclose(file);
+                    LOG("Dumped main image code to %s (%zu bytes)", dump_path, jit.size);
+                }
+            }
+        }
+
 #if defined(__arm__)
         /*
          * VITA2NATIVE_TRACE_TARGET=<vita address>[,<address>...] records the

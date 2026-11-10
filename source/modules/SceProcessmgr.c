@@ -8,6 +8,8 @@
 
 #include <pthread.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -148,6 +150,29 @@ EXPORT(SceProcessmgr, 0xEC8DDAAD, int, sceKernelCDialogSetLeaseLimit, int limit)
 
 EXPORT(SceProcessmgr, 0xEB6E50BB, int, sceKernelCallAbortHandler, void)
 {
+    fprintf(stderr, "vita2native: sceKernelCallAbortHandler called\n");
+
+    /*
+     * The guest reaches this helper through its own abort path, so guest
+     * return addresses are still live on the host stack. VITA2NATIVE_TRACE_ABORT
+     * prints them (odd values inside the JIT code range) to place a failing
+     * title.
+     */
+    if (getenv("VITA2NATIVE_TRACE_ABORT")) {
+        const uint32_t *slots = (const uint32_t *)__builtin_frame_address(0);
+        int shown = 0;
+
+        for (size_t i = 0; i < 256 && shown < 24; i++) {
+            uint32_t value = slots[i];
+
+            if (value < 0x90000000u || value >= 0xc0000000u || (value & 1u) == 0)
+                continue;
+            fprintf(stderr, "vita2native: abort caller[%u] = 0x%08x\n", (unsigned)i, value);
+            shown++;
+        }
+        fflush(stderr);
+    }
+
     return 0;
 }
 

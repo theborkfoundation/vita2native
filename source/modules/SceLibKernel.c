@@ -318,8 +318,12 @@ EXPORT(SceLibKernel, 0xA9283DD0, SceUID, sceIoDopen, const char *dirname)
     host_dirname = resolved;
 
     dir = opendir(host_dirname);
-    if (!dir)
+    if (!dir) {
+        if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+            LOG("sceIoDopen(\"%s\") failed: %s (host \"%s\")", dirname, strerror(errno),
+                host_dirname);
         return SCE_ERROR_ERRNO_ENODEV;
+    }
 
     vdir = malloc(sizeof(*vdir));
     if (!vdir) {
@@ -335,6 +339,9 @@ EXPORT(SceLibKernel, 0xA9283DD0, SceUID, sceIoDopen, const char *dirname)
     rwlockWriteLock(&g_vita_opened_dirs_lock);
     vita_opened_dirs_dict_set_at(g_vita_opened_dirs, vdir->uid, vdir);
     rwlockWriteUnlock(&g_vita_opened_dirs_lock);
+
+    if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+        LOG("sceIoDopen(\"%s\") -> uid=0x%x", dirname, vdir->uid);
 
     return vdir->uid;
 }
@@ -441,6 +448,9 @@ EXPORT(SceLibKernel, 0x9C8B6624, int, sceIoDread, SceUID fd, SceIoDirent *dirent
     stat_to_sce_iostat(&statbuf, &dirent->d_stat);
     strncpy(dirent->d_name, de->d_name, sizeof(dirent->d_name));
     dirent->d_private = NULL;
+
+    if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+        LOG("sceIoDread(0x%x) -> \"%s\"", fd, de->d_name);
 
     return 1;
 }
