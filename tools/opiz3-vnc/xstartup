@@ -19,10 +19,10 @@ fi
 
 : "${V2N_STATE_DIR:=$HOME/v2n-run}"
 : "${V2N_BIN:=$V2N_STATE_DIR/v2n-arm}"
-: "${V2N_APP:=$HOME/tests/apps/PCSE00322/eboot.bin}"
+: "${V2N_APP:=$HOME/tests/apps/PCSE01031/eboot.bin}"
 : "${V2N_LOG:=$V2N_STATE_DIR/vnc-game.log}"
 : "${V2N_WINDOW_SIZE:=${VNC_GEOMETRY:-960x544}}"
-: "${V2N_RENDER_SCALE:=0.6667}"
+: "${V2N_RENDER_SCALE:=1}"
 : "${V2N_FINISH_PER_FRAME:=1}"
 : "${V2N_FPS:=0}"
 : "${V2N_FPS_OVERLAY:=0}"
@@ -31,6 +31,7 @@ fi
 : "${V2N_PROFILE:=0}"
 : "${V2N_PROFILE_FRAME:=0}"
 : "${V2N_INPUT_DEBUG:=0}"
+: "${V2N_CRASH_CORE:=0}"
 : "${V2N_XDG_RUNTIME_DIR:=/run/user/1001}"
 : "${V2N_PULSE_SERVER:=unix:$V2N_XDG_RUNTIME_DIR/pulse/native}"
 : "${V2N_LD_LIBRARY_PATH:=/usr/lib/arm-linux-gnueabihf}"
@@ -54,5 +55,36 @@ export PULSE_SERVER="$V2N_PULSE_SERVER"
 [ "$V2N_PROFILE_FRAME" = 1 ] && export VITA2NATIVE_PROFILE_FRAME=1
 [ "$V2N_INPUT_DEBUG" = 1 ] && export VITA2NATIVE_INPUT_DEBUG=1
 
+# A crash is only useful if it leaves evidence: the kiosk restarts within a
+# couple of seconds and truncates V2N_LOG. Keep the log (and the core, when
+# V2N_CRASH_CORE is on) under a timestamped name before the session exits.
+if [ "$V2N_CRASH_CORE" = 1 ]; then
+    ulimit -c unlimited 2>/dev/null
+    export VITA2NATIVE_CRASH_CORE=1
+fi
+
 cd "$V2N_STATE_DIR" || exit 1
-exec setarch armv7l -R "$V2N_BIN" "$V2N_APP" > "$V2N_LOG" 2>&1
+
+# The kiosk restarts the whole session to stop the game, so the child has to
+# follow its shell. Without this it is reparented into the login session scope
+# when the X server exits and keeps running in the background.
+stopping=0
+setarch armv7l -R "$V2N_BIN" "$V2N_APP" > "$V2N_LOG" 2>&1 &
+game_pid=$!
+trap 'stopping=1; kill "$game_pid" 2>/dev/null' HUP INT TERM
+wait "$game_pid"
+status=$?
+trap - HUP INT TERM
+
+# Keep the log only when it holds crash evidence and the X server is still
+# alive. Stopping the kiosk kills the X server first, so the game's exit (and
+# any Mono thread that faults during teardown) is a shutdown consequence.
+if [ "$stopping" -eq 0 ] && [ "$status" -ne 0 ] &&
+   grep -q -e "vita2native: guest signal" -e "sceKernelCallAbortHandler called" \
+        "$V2N_LOG" 2>/dev/null &&
+   xdpyinfo >/dev/null 2>&1; then
+    stamp=$(date +%Y%m%d-%H%M%S)
+    cp "$V2N_LOG" "$V2N_STATE_DIR/crash-$stamp-$status.log" 2>/dev/null
+    [ -f core ] && mv core "core-$stamp" 2>/dev/null
+fi
+exit "$status"

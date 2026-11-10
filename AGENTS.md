@@ -56,3 +56,37 @@
   kernel caps the CPU at 1.296 GHz (from 1.512) and the GPU at 480/400 MHz (from
   520). Let the device cool for 2-3 minutes before benchmarking; the caps lift
   when the temperature drops.
+
+## Orange Pi Zero 3 (Ubuntu 24.04)
+
+- This image has **no desktop environment and no display manager**; do not try
+  to "remove XFCE". The game is shown through a TigerVNC X session that starts
+  the game directly (kiosk).
+- Work from `/home/bachnx/v2n-run`; the host binary is `v2n-arm`, the game is at
+  `/home/bachnx/tests/apps/PCSE01031/eboot.bin` (Chasm).
+- Deploy the normal `build/cmake-arm-rel/vita2native` build, then restart the
+  kiosk unit. It is enabled at boot and relaunches the game on exit:
+
+  ```sh
+  scp build/cmake-arm-rel/vita2native opiz3:/home/bachnx/v2n-run/v2n-arm.new
+  ssh opiz3 'mv ~/v2n-run/v2n-arm.new ~/v2n-run/v2n-arm && \
+    sudo systemctl restart tigervncserver@:1.service'
+  ```
+
+- `~/.vnc/xstartup` sources `~/.vnc/v2n.conf` and exports the runtime
+  environment itself; a login shell is not needed. Connect to
+  `vnc://<host>:5901`; the SDL window matches the VNC geometry (960x544).
+- Log: `/home/bachnx/v2n-run/vnc-game.log`. A crash is copied to
+  `crash-<stamp>-<status>.log` (and `core-<stamp>` when `V2N_CRASH_CORE=1`)
+  before the kiosk restarts.
+- `V2N_RENDER_SCALE=1` keeps the text readable at about 3.5 fps;
+  `0.6667` is faster but the font becomes unreadable.
+- The launcher kills its child when the session stops. Without that the game
+  is reparented into the login session scope and survives the X server.
+- Mono/PSM titles build paths with a Windows `\` separator
+  (`savedata0:Chasm/Saves\`); `host_fs_resolve_path` normalises it to `/`.
+  Without it the save enumeration fails and the game aborts with an unhandled
+  `System::Exception`.
+- `VITA2NATIVE_TRACE_ABORT=1` logs the guest call stack in
+  `sceKernelCallAbortHandler`, which is the quickest way to place an abort in
+  guest code.

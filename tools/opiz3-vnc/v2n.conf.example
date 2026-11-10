@@ -5,12 +5,13 @@
 # Paths
 V2N_STATE_DIR=/home/bachnx/v2n-run
 V2N_BIN=/home/bachnx/v2n-run/v2n-arm
-V2N_APP=/home/bachnx/tests/apps/PCSE00322/eboot.bin
+V2N_APP=/home/bachnx/tests/apps/PCSE01031/eboot.bin
 V2N_LOG=/home/bachnx/v2n-run/vnc-game.log
 
 # Display
 # V2N_WINDOW_SIZE=960x544   # defaults to the geometry in ~/.vnc/config
-V2N_RENDER_SCALE=0.6667
+# 1 is readable at ~3.5 fps; 0.6667 is faster but blurs the font.
+V2N_RENDER_SCALE=1
 V2N_FINISH_PER_FRAME=1
 
 # Debug knobs (1 = enabled)
@@ -21,6 +22,7 @@ V2N_AUDIO_DEBUG=0
 V2N_PROFILE=0
 V2N_PROFILE_FRAME=0
 V2N_INPUT_DEBUG=0
+V2N_CRASH_CORE=0
 
 # Runtime paths
 V2N_XDG_RUNTIME_DIR=/run/user/1001
