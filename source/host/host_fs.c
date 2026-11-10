@@ -191,6 +191,7 @@ const char *host_fs_app_dir(void)
 
 int host_fs_resolve_path(const char *vita_path, char *out, size_t out_size)
 {
+    char normalized[PATH_MAX];
     const char *colon;
     const char *slash;
     const char *rest;
@@ -200,6 +201,20 @@ int host_fs_resolve_path(const char *vita_path, char *out, size_t out_size)
 
     if (!vita_path || !out || out_size == 0)
         return -1;
+
+    /*
+     * Mono/PSM titles build paths with Windows separators ("savedata0:dir\\").
+     * The Vita filesystem accepts either, so normalise before resolving.
+     */
+    if (strlen(vita_path) >= sizeof(normalized))
+        return -1;
+    strcpy(normalized, vita_path);
+    for (char *p = normalized; *p; p++) {
+        if (*p == '\\')
+            *p = '/';
+    }
+    vita_path = normalized;
+
     /* Unity's Vita layer mounts the application root at this Fios mount
      * point and then addresses data through it. Alias it to app0:. */
     {
