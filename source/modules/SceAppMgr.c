@@ -15,6 +15,11 @@
 #include "fs.h"
 #include "module.h"
 
+EXPORT(SceAppMgr, 0xfff8f7f0, int, sceAppMgrIsGameProgram, void)
+{
+    return 1;
+}
+
 EXPORT(SceAppMgrUser, 0x5F00F261, int, sceAppMgrGetBudgetInfo, SceAppMgrBudgetInfo *info)
 {
     (void)info;
