@@ -23,7 +23,7 @@ SceCtrl OR).
 
   ```
   change buttons=0x00001000 lx=128 ly=128 rx=128 ry=128
-    SEL=0 STA=0 UP=0 RGT=0 DWN=0 LFT=0 L2=0 R2=0 L1=0 R1=0 TRI=1 CIR=0 CRO=0 SQR=0
+    SEL=0 STA=0 L3=0 R3=0 UP=0 RGT=0 DWN=0 LFT=0 L2=0 R2=0 L1=0 R1=0 TRI=1 CIR=0 CRO=0 SQR=0
   ```
 
 - Select+Start held for two seconds exits.
@@ -99,7 +99,10 @@ vita2native: SDL mapping ...GO-Super Gamepad,a:b0,b:b1,x:b2,y:b3,...
 | Triangle | `0x1000` | Circle | `0x2000` |
 | Cross | `0x4000` | Square | `0x8000` |
 
-Sticks report `0..255`, with `128` centered.
+Sticks report `0..255`, with `128` centered. Stick clicks report `L3`/`R3`
+(`0x0002`/`0x0004`) and highlight the ring around the corresponding stick. The
+R36S `Fn` key (`BTN_TRIGGER_HAPPY5`) is intentionally ignored; it is a firmware
+hotkey modifier, not a Vita button.
 
 ## How to read the result
 

@@ -20,7 +20,8 @@
  *   BTN_TL/TR and BTN_TL2/TR2   shoulders
  *   BTN_DPAD_UP/DOWN/LEFT/RIGHT
  *   BTN_SELECT/START            present on some device trees
- *   BTN_TRIGGER_HAPPY1..5       the R36S F1..F5 buttons
+ *   BTN_TRIGGER_HAPPY1..4       the R36S Select, Start, L3 and R3 buttons
+ *   BTN_TRIGGER_HAPPY5          the R36S Fn button (ignored)
  *   ABS_X/Y and ABS_RX/RY       sticks, roughly -1800..1800
  *
  * Keyboard arrow/ZXAS/QE/Enter/Backspace are mapped too, so the x86 builder VM
@@ -124,19 +125,19 @@ static unsigned int key_to_button(unsigned int code)
     case BTN_DPAD_RIGHT:
         return SCE_CTRL_RIGHT;
 
-    /* The R36S has no BTN_SELECT/BTN_START on some device trees; its Select
-       and Start buttons are wired as F1..F5 instead. Map the whole F range so
-       either pair works, and leave FN/F5 alongside Start. */
+    /* The R36S device tree labels these F1..F5, but the handheld wires them
+       as Select, Start, L3, R3 and Fn. Fn is a firmware hotkey modifier and
+       has no Vita equivalent, so it is not forwarded. */
     case BTN_TRIGGER_HAPPY1:
         return SCE_CTRL_SELECT;
     case BTN_TRIGGER_HAPPY2:
         return SCE_CTRL_START;
     case BTN_TRIGGER_HAPPY3:
-        return SCE_CTRL_SELECT;
+        return SCE_CTRL_L3;
     case BTN_TRIGGER_HAPPY4:
-        return SCE_CTRL_START;
+        return SCE_CTRL_R3;
     case BTN_TRIGGER_HAPPY5:
-        return SCE_CTRL_START;
+        return 0;
 
     /* Keyboard, for the builder VM and headless consoles. */
     case KEY_UP:

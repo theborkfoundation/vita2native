@@ -314,9 +314,10 @@ static void log_state(const char *tag)
 
     guest_printf("%s buttons=0x%08X lx=%u ly=%u rx=%u ry=%u\n", tag, b, g_pad.lx, g_pad.ly,
                  g_pad.rx, g_pad.ry);
-    guest_printf("  SEL=%u STA=%u UP=%u RGT=%u DWN=%u LFT=%u L2=%u R2=%u L1=%u R1=%u "
-                 "TRI=%u CIR=%u CRO=%u SQR=%u\n",
+    guest_printf("  SEL=%u STA=%u L3=%u R3=%u UP=%u RGT=%u DWN=%u LFT=%u L2=%u R2=%u "
+                 "L1=%u R1=%u TRI=%u CIR=%u CRO=%u SQR=%u\n",
                  (b & SCE_CTRL_SELECT) != 0, (b & SCE_CTRL_START) != 0,
+                 (b & SCE_CTRL_L3) != 0, (b & SCE_CTRL_R3) != 0,
                  (b & SCE_CTRL_UP) != 0, (b & SCE_CTRL_RIGHT) != 0, (b & SCE_CTRL_DOWN) != 0,
                  (b & SCE_CTRL_LEFT) != 0, (b & SCE_CTRL_L2) != 0, (b & SCE_CTRL_R2) != 0,
                  (b & SCE_CTRL_L1) != 0, (b & SCE_CTRL_R1) != 0, (b & SCE_CTRL_TRIANGLE) != 0,
@@ -335,6 +336,7 @@ void module_start(void)
     guest_printf("\nv2n ctrl test: controller mapping probe\n");
     guest_printf("bit legend: SEL=0x0001 STA=0x0008 UP=0x0010 RGT=0x0020 DWN=0x0040 "
                  "LFT=0x0080\n");
+    guest_printf("            L3=0x0002 R3=0x0004\n");
     guest_printf("            L2=0x0100 R2=0x0200 L1=0x0400 R1=0x0800 TRI=0x1000 "
                  "CIR=0x2000 CRO=0x4000 SQR=0x8000\n");
     guest_printf("sticks: 0..255, 128 = centered\n");

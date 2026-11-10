@@ -175,10 +175,12 @@ window (or SDL_QUIT) exits the emulator cleanly.
 
 The headless build always reads the pad directly from evdev
 (`/dev/input/event*`), which is the reliable path on the R36S: face buttons,
-D-pad, shoulders, `BTN_SELECT/START`, the F1–F5 buttons and both sticks. When
-evdev found a pad its buttons win over SDL's; otherwise SDL's buttons are ORed
-in. Axes come from SDL only when a controller is attached, so a keyboard-only
-session cannot overwrite the evdev stick values. Scripted input still works and
+D-pad, shoulders, the Select/Start/L3/R3 buttons (reported as
+`BTN_TRIGGER_HAPPY1..4`) and both sticks. The Fn key (`BTN_TRIGGER_HAPPY5`) is
+a firmware hotkey modifier and is ignored. When evdev found a pad its buttons
+win over SDL's; otherwise SDL's buttons are ORed in. Axes come from SDL only
+when a controller is attached, so a keyboard-only session cannot overwrite the
+evdev stick values. Scripted input still works and
 is ORed with both. `tools/ctrl_test` is a guest-side probe for this path: build
 it with `python3 tools/ctrl_test/build.py` and it draws the live pad state on a
 960x544 pane while logging every controller state change.
