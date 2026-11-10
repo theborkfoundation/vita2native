@@ -318,7 +318,10 @@ static SceUID create_thread(const char *name, SceKernelThreadEntry entry, int in
     ti->stack_size = stackSize;
     ti->attr = attr;
     ti->affinity_mask = 1;
-    ti->vita_tls = malloc(SCE_KERNEL_TLS_SIZE);
+    /* The TLS key area models .tbss: guest libc probes zero sentinels there
+       to decide whether its per-thread context needs initialising, so stale
+       heap contents make it call whatever those bytes happen to hold. */
+    ti->vita_tls = calloc(1, SCE_KERNEL_TLS_SIZE);
     mutexInit(&ti->signal_lock);
     condvarInit(&ti->signal_cond);
 
