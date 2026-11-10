@@ -1,0 +1,28 @@
+# Orange Pi Zero 3 VNC test bed settings.
+# Sourced by ~/.vnc/xstartup. Restart the VNC session after editing:
+#   vncserver -kill :1 && vncserver :1
+
+# Paths
+V2N_STATE_DIR=/home/bachnx/v2n-run
+V2N_BIN=/home/bachnx/v2n-run/v2n-arm
+V2N_APP=/home/bachnx/tests/apps/PCSE00322/eboot.bin
+V2N_LOG=/home/bachnx/v2n-run/vnc-game.log
+
+# Display
+# V2N_WINDOW_SIZE=960x544   # defaults to the geometry in ~/.vnc/config
+V2N_RENDER_SCALE=0.6667
+V2N_FINISH_PER_FRAME=1
+
+# Debug knobs (1 = enabled)
+V2N_FPS=1
+V2N_FPS_OVERLAY=1
+V2N_NGS_DEBUG=0
+V2N_AUDIO_DEBUG=0
+V2N_PROFILE=0
+V2N_PROFILE_FRAME=0
+V2N_INPUT_DEBUG=0
+
+# Runtime paths
+V2N_XDG_RUNTIME_DIR=/run/user/1001
+# V2N_PULSE_SERVER=unix:/run/user/1001/pulse/native
+# V2N_LD_LIBRARY_PATH=/usr/lib/arm-linux-gnueabihf

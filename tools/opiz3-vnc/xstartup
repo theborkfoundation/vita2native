@@ -1,0 +1,58 @@
+#!/bin/sh
+# TigerVNC xstartup for the Orange Pi Zero 3 test bed.
+#
+# There is no desktop environment: the VNC session runs the game directly.
+# Edit ~/.vnc/v2n.conf for paths and debug knobs; this file should rarely
+# change. The VNC screen geometry still comes from ~/.vnc/config.
+
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+
+V2N_CONF=${V2N_CONF:-$HOME/.vnc/v2n.conf}
+[ -r "$V2N_CONF" ] && . "$V2N_CONF"
+
+# Match the SDL window to the VNC geometry unless v2n.conf overrides it.
+VNC_GEOMETRY=
+if [ -r "$HOME/.vnc/config" ]; then
+    VNC_GEOMETRY=$(sed -n 's/^geometry=//p' "$HOME/.vnc/config" | head -n 1)
+fi
+
+: "${V2N_STATE_DIR:=$HOME/v2n-run}"
+: "${V2N_BIN:=$V2N_STATE_DIR/v2n-arm}"
+: "${V2N_APP:=$HOME/tests/apps/PCSE00322/eboot.bin}"
+: "${V2N_LOG:=$V2N_STATE_DIR/vnc-game.log}"
+: "${V2N_WINDOW_SIZE:=${VNC_GEOMETRY:-960x544}}"
+: "${V2N_RENDER_SCALE:=0.6667}"
+: "${V2N_FINISH_PER_FRAME:=1}"
+: "${V2N_FPS:=0}"
+: "${V2N_FPS_OVERLAY:=0}"
+: "${V2N_NGS_DEBUG:=0}"
+: "${V2N_AUDIO_DEBUG:=0}"
+: "${V2N_PROFILE:=0}"
+: "${V2N_PROFILE_FRAME:=0}"
+: "${V2N_INPUT_DEBUG:=0}"
+: "${V2N_XDG_RUNTIME_DIR:=/run/user/1001}"
+: "${V2N_PULSE_SERVER:=unix:$V2N_XDG_RUNTIME_DIR/pulse/native}"
+: "${V2N_LD_LIBRARY_PATH:=/usr/lib/arm-linux-gnueabihf}"
+
+export EGL_PLATFORM=surfaceless
+export SDL_VIDEODRIVER=x11
+export SDL_RENDER_DRIVER=software
+export VITA2NATIVE_SDL_WINDOWED=1
+export VITA2NATIVE_SDL_SIZE="$V2N_WINDOW_SIZE"
+export VITA2NATIVE_RENDER_SCALE="$V2N_RENDER_SCALE"
+export LD_LIBRARY_PATH="$V2N_LD_LIBRARY_PATH"
+export XDG_RUNTIME_DIR="$V2N_XDG_RUNTIME_DIR"
+export PULSE_SERVER="$V2N_PULSE_SERVER"
+
+[ "$V2N_FINISH_PER_FRAME" = 1 ] && export VITA2NATIVE_FINISH_PER_FRAME=1
+[ "$V2N_FPS" = 1 ] && export VITA2NATIVE_FPS=1
+[ "$V2N_FPS_OVERLAY" = 1 ] && export VITA2NATIVE_FPS_OVERLAY=1
+[ "$V2N_NGS_DEBUG" = 1 ] && export VITA2NATIVE_NGS_DEBUG=1
+[ "$V2N_AUDIO_DEBUG" = 1 ] && export VITA2NATIVE_AUDIO_DEBUG=1
+[ "$V2N_PROFILE" = 1 ] && export VITA2NATIVE_PROFILE=1
+[ "$V2N_PROFILE_FRAME" = 1 ] && export VITA2NATIVE_PROFILE_FRAME=1
+[ "$V2N_INPUT_DEBUG" = 1 ] && export VITA2NATIVE_INPUT_DEBUG=1
+
+cd "$V2N_STATE_DIR" || exit 1
+exec setarch armv7l -R "$V2N_BIN" "$V2N_APP" > "$V2N_LOG" 2>&1
