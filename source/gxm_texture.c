@@ -57,10 +57,42 @@ static uint32_t decode_morton2_x(uint32_t code)
     return compact_one_by_one(code >> 1);
 }
 
+static uint32_t spread_one_by_one(uint32_t value)
+{
+    value &= 0xffffu;
+    value = (value | (value << 8)) & 0x00ff00ffu;
+    value = (value | (value << 4)) & 0x0f0f0f0fu;
+    value = (value | (value << 2)) & 0x33333333u;
+    value = (value | (value << 1)) & 0x55555555u;
+    return value;
+}
+
+static uint32_t encode_morton2(uint32_t x, uint32_t y)
+{
+    return (spread_one_by_one(x) << 1) | spread_one_by_one(y);
+}
+
+/* Spread for the 0..31 tile coordinates used by the per-texel inner loop. */
+static const uint16_t spread5_table[32] = {
+    0,   1,   4,   5,   16,  17,  20,  21,  64,  65,  68,  69,  80,  81,  84,  85,
+    256, 257, 260, 261, 272, 273, 276, 277, 320, 321, 324, 325, 336, 337, 340, 341,
+};
+
+static inline uint32_t encode_morton2_low(uint32_t x, uint32_t y)
+{
+    return ((uint32_t)spread5_table[x & 31] << 1) | spread5_table[y & 31];
+}
+
+static bool is_power_of_two(uint32_t value)
+{
+    return value && !(value & (value - 1));
+}
+
 static uint32_t decode_morton2_y(uint32_t code)
 {
     return compact_one_by_one(code);
 }
+
 
 static uint8_t clamp_u8(int value)
 {
@@ -408,6 +440,61 @@ static float ufloat_to_float(uint32_t value, unsigned int exponent_bits, unsigne
                   (int)exponent - bias);
 }
 
+/*
+ * UNORM expansion dominates the decode time for the uncompressed 16-bit
+ * formats titles use for large atlases. The generic form below divides two
+ * 64-bit values per channel; on a Cortex-A35 that costs more than everything
+ * else in the loop (a 2048x2048 RGBA4444 texture took about four seconds).
+ * The widths that actually occur have exact integer answers, so keep them
+ * branch-friendly and table-driven.
+ */
+static const uint8_t unorm5_table[32] = {
+    0,   8,   16,  25,  33,  41,  49,  58,  66,  74,  82,  90,  99,  107, 115, 123,
+    132, 140, 148, 156, 165, 173, 181, 189, 197, 206, 214, 222, 230, 239, 247, 255,
+};
+
+static const uint8_t unorm6_table[64] = {
+    0,   4,   8,   12,  16,  20,  24,  28,  32,  36,  40,  45,  49,  53,  57,  61,
+    65,  69,  73,  77,  81,  85,  89,  93,  97,  101, 105, 109, 113, 117, 121, 125,
+    130, 134, 138, 142, 146, 150, 154, 158, 162, 166, 170, 174, 178, 182, 186, 190,
+    194, 198, 202, 206, 210, 215, 219, 223, 227, 231, 235, 239, 243, 247, 251, 255,
+};
+
+static uint8_t unorm_to_u8(uint32_t raw, uint32_t bits)
+{
+    switch (bits) {
+    case 0:
+        return 0;
+    case 1:
+        return raw ? 255 : 0;
+    case 2:
+        return (uint8_t)(raw * 85);
+    case 3:
+        return (uint8_t)((raw * 255 + 3) / 7);
+    case 4:
+        return (uint8_t)(raw * 17);
+    case 5:
+        return unorm5_table[raw & 31];
+    case 6:
+        return unorm6_table[raw & 63];
+    case 7:
+        return (uint8_t)((raw * 255 + 63) / 127);
+    case 8:
+        return (uint8_t)raw;
+    case 10:
+        return (uint8_t)((raw * 255u + 511u) / 1023u);
+    case 12:
+        return (uint8_t)((raw * 255u + 2047u) / 4095u);
+    case 16:
+        return (uint8_t)((raw * 255u + 32767u) / 65535u);
+    default: {
+        uint64_t maximum = bits >= 32 ? 0xffffffffull : ((1ull << bits) - 1);
+
+        return clamp_u8((int)(((uint64_t)raw * 255u + maximum / 2) / maximum));
+    }
+    }
+}
+
 static uint8_t component_to_u8(uint32_t raw, uint32_t bits, int kind)
 {
     switch (kind) {
@@ -451,16 +538,8 @@ static uint8_t component_to_u8(uint32_t raw, uint32_t bits, int kind)
         return clamp_u8((int)(ufloat_to_float(raw, 5, 6) * 255.0f + 0.5f));
 
     case KIND_UNORM:
-    default: {
-        uint64_t maximum;
-        uint64_t scaled;
-
-        if (bits == 0)
-            return 0;
-        maximum = bits >= 32 ? 0xffffffffull : ((1ull << bits) - 1);
-        scaled = ((uint64_t)raw * 255u + maximum / 2) / maximum;
-        return clamp_u8((int)scaled);
-    }
+    default:
+        return unorm_to_u8(raw, bits);
     }
 }
 
@@ -547,6 +626,7 @@ typedef struct {
     uint32_t bits;
     uint32_t swizzle;
     bool fast8;
+    bool fast4;     /* RGBA4444: four LUT-free nibbles per texel */
     uint8_t map[4]; /* index into values {r,g,b,a,255,0} */
 } TexelFormat;
 
@@ -610,6 +690,15 @@ static void texel_format_init(TexelFormat *tf, SceGxmTextureFormat format)
         if (tf->info.width[i] != 8 || tf->info.kind[i] != KIND_UNORM)
             tf->fast8 = false;
     }
+    tf->fast4 = count == 4 && tf->base == SCE_GXM_TEXTURE_BASE_FORMAT_U4U4U4U4;
+
+    if (count == 4) {
+        const char *letters = swizzle4_letters[tf->swizzle & 7];
+
+        for (uint32_t i = 0; i < 4; i++)
+            tf->map[i] = letter_map_index(letters, count, channels[i]);
+    }
+
     if (!tf->fast8)
         return;
 
@@ -627,13 +716,8 @@ static void texel_format_init(TexelFormat *tf, SceGxmTextureFormat format)
             tf->map[i] = letter_map_index(letters, count, channels[i]);
         break;
     }
-    default: {
-        const char *letters = swizzle4_letters[tf->swizzle & 7];
-
-        for (uint32_t i = 0; i < 4; i++)
-            tf->map[i] = letter_map_index(letters, count, channels[i]);
-        break;
-    }
+    default:
+        break; /* count 4: map was built above */
     }
 }
 
@@ -657,6 +741,23 @@ static int decode_texel_prepared(uint8_t out[4], const uint8_t *data, uint32_t i
             values[i] = p[count - 1 - i];
         values[4] = 255;
         values[5] = 0;
+
+        out[0] = values[tf->map[0]];
+        out[1] = values[tf->map[1]];
+        out[2] = values[tf->map[2]];
+        out[3] = values[tf->map[3]];
+        return 0;
+    }
+
+    if (tf->fast4) {
+        uint16_t half;
+        uint8_t values[4];
+
+        memcpy(&half, data + (size_t)index * 2, sizeof(half));
+        values[0] = (uint8_t)(((half >> 12) & 0xf) * 17u);
+        values[1] = (uint8_t)(((half >> 8) & 0xf) * 17u);
+        values[2] = (uint8_t)(((half >> 4) & 0xf) * 17u);
+        values[3] = (uint8_t)((half & 0xf) * 17u);
 
         out[0] = values[tf->map[0]];
         out[1] = values[tf->map[1]];
@@ -828,6 +929,239 @@ static int decode_texel_prepared(uint8_t out[4], const uint8_t *data, uint32_t i
     }
 
     return 0;
+}
+
+/*
+ * Dispatch once per texel but keep the common cases inline. Calling the
+ * generic decoder per texel cost about 50 ns/pixel on a 2048x2048 texture; the
+ * two fast paths below are a few cycles.
+ */
+static __attribute__((always_inline)) inline void decode_fast4_texel(uint8_t out[4],
+                                                                     const uint8_t *data,
+                                                                     uint32_t index,
+                                                                     const uint8_t map[4])
+{
+    uint16_t word;
+    uint8_t values[4];
+
+    memcpy(&word, data + (size_t)index * 2, sizeof(word));
+    values[0] = (uint8_t)(((word >> 12) & 0xf) * 17u);
+    values[1] = (uint8_t)(((word >> 8) & 0xf) * 17u);
+    values[2] = (uint8_t)(((word >> 4) & 0xf) * 17u);
+    values[3] = (uint8_t)((word & 0xf) * 17u);
+
+    out[0] = values[map[0]];
+    out[1] = values[map[1]];
+    out[2] = values[map[2]];
+    out[3] = values[map[3]];
+}
+
+static __attribute__((always_inline)) inline void decode_fast8_texel(uint8_t out[4],
+                                                                     const uint8_t *data,
+                                                                     uint32_t index,
+                                                                     const uint8_t map[4],
+                                                                     uint32_t count)
+{
+    uint8_t values[6];
+    const uint8_t *p = data + (size_t)index * count;
+
+    for (uint32_t i = 0; i < count; i++)
+        values[i] = p[count - 1 - i];
+    values[4] = 255;
+    values[5] = 0;
+
+    out[0] = values[map[0]];
+    out[1] = values[map[1]];
+    out[2] = values[map[2]];
+    out[3] = values[map[3]];
+}
+
+static __attribute__((always_inline)) inline int decode_level_texel(uint8_t out[4],
+                                                                    const uint8_t *input,
+                                                                    uint32_t index,
+                                                                    const TexelFormat *tf)
+{
+    if (tf->fast4) {
+        decode_fast4_texel(out, input, index, tf->map);
+        return 0;
+    }
+    if (tf->fast8) {
+        decode_fast8_texel(out, input, index, tf->map, tf->info.count);
+        return 0;
+    }
+
+    return decode_texel_prepared(out, input, index, tf);
+}
+
+/*
+ * The generic decoder is far too large to optimize well inside these loops:
+ * once every layout and format is inlined the compiler spills the counters to
+ * the stack and the inner loop costs tens of nanoseconds per texel. Keep the
+ * two formats that dominate large atlases in their own tiny functions.
+ *
+ * For RGBA4444 the channel map is fixed per texture, so expand a whole wire
+ * word to RGBA8 once. The inner loop then becomes one table load and one
+ * 32-bit store instead of four indexed stack reads. Texture uploads run on the
+ * rendering thread, so the shared table does not need locking.
+ */
+static uint32_t g_u4_lut[65536];
+static uint8_t g_u4_lut_map[4];
+static bool g_u4_lut_valid;
+
+static const uint32_t *u4_rgba_lut(const uint8_t map[4])
+{
+    if (!g_u4_lut_valid || memcmp(g_u4_lut_map, map, 4) != 0) {
+        for (uint32_t i = 0; i < 65536; i++) {
+            uint8_t values[4] = {
+                (uint8_t)(((i >> 12) & 0xf) * 17u),
+                (uint8_t)(((i >> 8) & 0xf) * 17u),
+                (uint8_t)(((i >> 4) & 0xf) * 17u),
+                (uint8_t)((i & 0xf) * 17u),
+            };
+
+            g_u4_lut[i] = (uint32_t)values[map[0]] | ((uint32_t)values[map[1]] << 8) |
+                          ((uint32_t)values[map[2]] << 16) | ((uint32_t)values[map[3]] << 24);
+        }
+        memcpy(g_u4_lut_map, map, 4);
+        g_u4_lut_valid = true;
+    }
+
+    return g_u4_lut;
+}
+static void decode_swizzled_tiles_fast4(uint8_t *dest, const uint8_t *input,
+                                        const GxmTextureLevel *info, uint32_t minimum, uint32_t k,
+                                        const uint8_t map[4])
+{
+    const uint32_t *lut = u4_rgba_lut(map);
+    uint32_t mask = minimum - 1;
+
+    for (uint32_t ty = 0; ty < info->layout_height; ty += 32) {
+        uint32_t height = info->height > ty ? info->height - ty : 0;
+
+        if (height > 32)
+            height = 32;
+
+        for (uint32_t tx = 0; tx < info->layout_width; tx += 32) {
+            uint32_t width = info->width > tx ? info->width - tx : 0;
+            uint32_t tile = encode_morton2((tx & mask) >> 5, (ty & mask) >> 5) << 10;
+
+            if (width > 32)
+                width = 32;
+            if (!width || !height)
+                continue;
+            if (info->layout_width >= info->layout_height)
+                tile |= (tx >> k) << (2 * k);
+            else
+                tile |= (ty >> k) << (2 * k);
+
+            for (uint32_t y = 0; y < height; y++) {
+                uint8_t *row = dest + ((ty + y) * info->width + tx) * 4;
+
+                for (uint32_t x = 0; x < width; x++) {
+                    uint32_t index = tile + encode_morton2_low(x, y);
+                    uint16_t word;
+                    uint32_t rgba;
+
+                    memcpy(&word, input + (size_t)index * 2, sizeof(word));
+                    rgba = lut[word];
+                    memcpy(row + x * 4, &rgba, sizeof(rgba));
+                }
+            }
+        }
+    }
+}
+
+static void decode_swizzled_tiles_fast8(uint8_t *dest, const uint8_t *input,
+                                        const GxmTextureLevel *info, uint32_t minimum, uint32_t k,
+                                        const uint8_t map[4], uint32_t count)
+{
+    uint32_t mask = minimum - 1;
+
+    for (uint32_t ty = 0; ty < info->layout_height; ty += 32) {
+        uint32_t height = info->height > ty ? info->height - ty : 0;
+
+        if (height > 32)
+            height = 32;
+
+        for (uint32_t tx = 0; tx < info->layout_width; tx += 32) {
+            uint32_t width = info->width > tx ? info->width - tx : 0;
+            uint32_t tile = encode_morton2((tx & mask) >> 5, (ty & mask) >> 5) << 10;
+
+            if (width > 32)
+                width = 32;
+            if (!width || !height)
+                continue;
+            if (info->layout_width >= info->layout_height)
+                tile |= (tx >> k) << (2 * k);
+            else
+                tile |= (ty >> k) << (2 * k);
+
+            for (uint32_t y = 0; y < height; y++) {
+                uint8_t *row = dest + ((ty + y) * info->width + tx) * 4;
+
+                for (uint32_t x = 0; x < width; x++) {
+                    uint32_t index = tile + encode_morton2_low(x, y);
+                    const uint8_t *p = input + (size_t)index * count;
+                    uint8_t values[6];
+
+                    for (uint32_t i = 0; i < count; i++)
+                        values[i] = p[count - 1 - i];
+                    values[4] = 255;
+                    values[5] = 0;
+
+                    row[x * 4 + 0] = values[map[0]];
+                    row[x * 4 + 1] = values[map[1]];
+                    row[x * 4 + 2] = values[map[2]];
+                    row[x * 4 + 3] = values[map[3]];
+                }
+            }
+        }
+    }
+}
+
+static void decode_linear_fast4(uint8_t *dest, const uint8_t *input, uint32_t width,
+                                uint32_t height, uint32_t layout_width, const uint8_t map[4])
+{
+    const uint32_t *lut = u4_rgba_lut(map);
+
+    for (uint32_t y = 0; y < height; y++) {
+        uint8_t *row = dest + (size_t)y * width * 4;
+        const uint8_t *source = input + (size_t)y * layout_width * 2;
+
+        for (uint32_t x = 0; x < width; x++) {
+            uint16_t word;
+            uint32_t rgba;
+
+            memcpy(&word, source + (size_t)x * 2, sizeof(word));
+            rgba = lut[word];
+            memcpy(row + x * 4, &rgba, sizeof(rgba));
+        }
+    }
+}
+
+static void decode_linear_fast8(uint8_t *dest, const uint8_t *input, uint32_t width,
+                                uint32_t height, uint32_t layout_width, const uint8_t map[4],
+                                uint32_t count)
+{
+    for (uint32_t y = 0; y < height; y++) {
+        uint8_t *row = dest + (size_t)y * width * 4;
+        const uint8_t *source = input + (size_t)y * layout_width * count;
+
+        for (uint32_t x = 0; x < width; x++) {
+            const uint8_t *p = source + (size_t)x * count;
+            uint8_t values[6];
+
+            for (uint32_t i = 0; i < count; i++)
+                values[i] = p[count - 1 - i];
+            values[4] = 255;
+            values[5] = 0;
+
+            row[x * 4 + 0] = values[map[0]];
+            row[x * 4 + 1] = values[map[1]];
+            row[x * 4 + 2] = values[map[2]];
+            row[x * 4 + 3] = values[map[3]];
+        }
+    }
 }
 
 static int decode_paletted_texel(uint8_t out[4], const uint8_t *data, uint32_t index,
@@ -1440,6 +1774,72 @@ static int decode_level_rgba8(uint8_t *dest, const uint8_t *input,
         if (!minimum)
             return -1;
 
+        /*
+         * Morton order makes the destination writes jump between rows: a
+         * 2048x2048 RGBA4444 texture spent most of its ~280 ms decode on cache
+         * misses alone. A 32x32 destination tile covers a contiguous 2 KiB
+         * source block (the low ten Morton bits), so walking tiles in
+         * destination order keeps both sides dense.
+         */
+        if ((type == SCE_GXM_TEXTURE_SWIZZLED || type == SCE_GXM_TEXTURE_CUBE) &&
+            info->layout_width >= 32 && info->layout_height >= 32 &&
+            is_power_of_two(info->layout_width) && is_power_of_two(info->layout_height)) {
+            uint32_t mask = minimum - 1;
+
+            if (!palette && texel.fast4) {
+                decode_swizzled_tiles_fast4(dest, input, info, minimum, k, texel.map);
+                return 0;
+            }
+            if (!palette && texel.fast8) {
+                decode_swizzled_tiles_fast8(dest, input, info, minimum, k, texel.map,
+                                            texel.info.count);
+                return 0;
+            }
+
+            for (uint32_t ty = 0; ty < info->layout_height; ty += 32) {
+                uint32_t height = info->height > ty ? info->height - ty : 0;
+
+                if (height > 32)
+                    height = 32;
+
+                for (uint32_t tx = 0; tx < info->layout_width; tx += 32) {
+                    uint32_t width = info->width > tx ? info->width - tx : 0;
+                    uint32_t tile = encode_morton2((tx & mask) >> 5, (ty & mask) >> 5) << 10;
+
+                    if (width > 32)
+                        width = 32;
+                    if (!width || !height)
+                        continue;
+
+                    /* Rectangular swizzles append the bits above the square
+                       part linearly, so fold them in once per tile. */
+                    if (info->layout_width >= info->layout_height)
+                        tile |= (tx >> k) << (2 * k);
+                    else
+                        tile |= (ty >> k) << (2 * k);
+
+                    for (uint32_t y = 0; y < height; y++) {
+                        for (uint32_t x = 0; x < width; x++) {
+                            uint32_t index = tile + encode_morton2_low(x, y);
+
+                            if (palette) {
+                                if (decode_paletted_texel(
+                                        &dest[((ty + y) * info->width + tx + x) * 4], input, index,
+                                        base, swizzle, palette) != 0)
+                                    return -1;
+                            } else if (decode_level_texel(
+                                           &dest[((ty + y) * info->width + tx + x) * 4], input,
+                                           index, &texel) != 0) {
+                                return -1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            return 0;
+        }
+
         for (uint32_t i = 0; i < count; i++) {
             uint32_t x = decode_morton2_x(i) & (minimum - 1);
             uint32_t y = decode_morton2_y(i) & (minimum - 1);
@@ -1457,8 +1857,8 @@ static int decode_level_rgba8(uint8_t *dest, const uint8_t *input,
                 if (decode_paletted_texel(&dest[(y * info->width + x) * 4], input, i, base,
                                           swizzle, palette) != 0)
                     return -1;
-            } else if (decode_texel_prepared(&dest[(y * info->width + x) * 4], input, i,
-                                             &texel) != 0) {
+            } else if (decode_level_texel(&dest[(y * info->width + x) * 4], input, i,
+                                          &texel) != 0) {
                 return -1;
             }
         }
@@ -1478,8 +1878,8 @@ static int decode_level_rgba8(uint8_t *dest, const uint8_t *input,
                     if (decode_paletted_texel(&dest[(y * info->width + x) * 4], input, index,
                                               base, swizzle, palette) != 0)
                         return -1;
-                } else if (decode_texel_prepared(&dest[(y * info->width + x) * 4], input, index,
-                                                 &texel) != 0) {
+                } else if (decode_level_texel(&dest[(y * info->width + x) * 4], input, index,
+                                              &texel) != 0) {
                     return -1;
                 }
             }
@@ -1489,6 +1889,16 @@ static int decode_level_rgba8(uint8_t *dest, const uint8_t *input,
     }
 
     /* Linear and linear-strided layouts. */
+    if (!palette && texel.fast4) {
+        decode_linear_fast4(dest, input, info->width, info->height, info->layout_width, texel.map);
+        return 0;
+    }
+    if (!palette && texel.fast8) {
+        decode_linear_fast8(dest, input, info->width, info->height, info->layout_width,
+                            texel.map, texel.info.count);
+        return 0;
+    }
+
     for (uint32_t y = 0; y < info->height; y++) {
         for (uint32_t x = 0; x < info->width; x++) {
             uint32_t index = y * info->layout_width + x;
@@ -1497,8 +1907,8 @@ static int decode_level_rgba8(uint8_t *dest, const uint8_t *input,
                 if (decode_paletted_texel(&dest[(y * info->width + x) * 4], input, index, base,
                                           swizzle, palette) != 0)
                     return -1;
-            } else if (decode_texel_prepared(&dest[(y * info->width + x) * 4], input, index,
-                                             &texel) != 0) {
+            } else if (decode_level_texel(&dest[(y * info->width + x) * 4], input, index,
+                                          &texel) != 0) {
                 return -1;
             }
         }

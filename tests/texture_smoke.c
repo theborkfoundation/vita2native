@@ -1,7 +1,9 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <psp2/gxm.h>
 
@@ -192,6 +194,55 @@ static void test_swizzled_mips(void)
     (void)expected;
 }
 
+/* The decoder walks swizzled levels in 32x32 destination tiles. A tile maps to
+   one contiguous source block, so this also covers the rectangular layouts
+   whose extra bits sit above the square Morton part. */
+static void check_swizzled_tiles(uint32_t width, uint32_t height)
+{
+    enum { MAX_DIM = 64 };
+    uint16_t data[MAX_DIM * MAX_DIM];
+    uint8_t decoded[MAX_DIM * MAX_DIM * 4];
+    SceGxmTextureInner texture;
+    uint32_t minimum = width < height ? width : height;
+    uint32_t k = log2_of(minimum);
+
+    memset(data, 0, sizeof(data));
+    for (uint32_t y = 0; y < height; y++) {
+        for (uint32_t x = 0; x < width; x++) {
+            uint32_t r = (x + 1) & 0xf;
+            uint32_t g = (y + 2) & 0xf;
+            uint32_t b = (x + y + 3) & 0xf;
+            uint32_t a = (x * 3 + y + 4) & 0xf;
+
+            /* U4U4U4U4_ABGR: word [A4 B4 G4 R4], R in the low nibble. */
+            data[encode_morton(x, y, minimum, k)] =
+                (uint16_t)((a << 12) | (b << 8) | (g << 4) | r);
+        }
+    }
+
+    init_texture(&texture, data, SCE_GXM_TEXTURE_FORMAT_U4U4U4U4_ABGR, width, height, 1,
+                 SCE_GXM_TEXTURE_SWIZZLED);
+    assert(gxm_texture_decode_level_at(decoded, &texture, data, 0, 0) == 0);
+
+    for (uint32_t y = 0; y < height; y++) {
+        for (uint32_t x = 0; x < width; x++) {
+            const uint8_t *pixel = &decoded[(y * width + x) * 4];
+
+            assert(pixel[0] == (((x + 1) & 0xf) * 17));
+            assert(pixel[1] == (((y + 2) & 0xf) * 17));
+            assert(pixel[2] == (((x + y + 3) & 0xf) * 17));
+            assert(pixel[3] == (((x * 3 + y + 4) & 0xf) * 17));
+        }
+    }
+}
+
+static void test_swizzled_tiles(void)
+{
+    check_swizzled_tiles(64, 32);
+    check_swizzled_tiles(32, 64);
+    check_swizzled_tiles(64, 64);
+}
+
 static void test_linear_strided(void)
 {
     uint8_t data[2 * 8];
@@ -369,11 +420,109 @@ static void test_yuv(void)
     }
 }
 
-int main(void)
+static uint64_t bench_now_ns(void)
 {
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static void bench_baseline(uint8_t *src, uint8_t *dst, uint32_t w, uint32_t h)
+{
+    uint64_t started;
+    uint64_t elapsed;
+    size_t bytes = (size_t)w * h * 4;
+    volatile uint32_t sink = 0;
+
+    started = bench_now_ns();
+    memcpy(dst, src, bytes);
+    elapsed = bench_now_ns() - started;
+    sink += dst[0] + dst[bytes - 1];
+    printf("bench memcpy: %.1f ms (%.1f ns/pixel)\n", (double)elapsed / 1e6,
+           (double)elapsed / (w * h));
+
+    started = bench_now_ns();
+    for (uint32_t i = 0; i < w * h; i++) {
+        uint16_t word;
+
+        memcpy(&word, src + (size_t)i * 2, sizeof(word));
+        dst[(size_t)i * 4 + 0] = (uint8_t)((word & 0xf) * 17u);
+        dst[(size_t)i * 4 + 1] = (uint8_t)(((word >> 4) & 0xf) * 17u);
+        dst[(size_t)i * 4 + 2] = (uint8_t)(((word >> 8) & 0xf) * 17u);
+        dst[(size_t)i * 4 + 3] = (uint8_t)(((word >> 12) & 0xf) * 17u);
+    }
+    elapsed = bench_now_ns() - started;
+    sink += dst[(size_t)(w * h - 1) * 4 + 3];
+    printf("bench inline u4: %.1f ms (%.1f ns/pixel) %u\n", (double)elapsed / 1e6,
+           (double)elapsed / (w * h), sink);
+    fflush(stdout);
+}
+
+static void bench_linear_baseline(void)
+{
+    enum { W = 2048, H = 2048 };
+    uint8_t *src = malloc((size_t)W * H * 4);
+    uint8_t *dst = malloc((size_t)W * H * 4);
+
+    if (!src || !dst) {
+        fprintf(stderr, "bench: out of memory\n");
+        exit(1);
+    }
+    for (size_t i = 0; i < (size_t)W * H * 4; i++)
+        src[i] = (uint8_t)((i * 2654435761u) >> 16);
+
+    bench_baseline(src, dst, W, H);
+    free(dst);
+    free(src);
+}
+
+static void bench_decode(SceGxmTextureFormat format, SceGxmTextureType type, const char *name)
+{
+    enum { W = 2048, H = 2048 };
+    uint8_t *data = malloc((size_t)W * H * 4);
+    uint8_t *decoded = malloc((size_t)W * H * 4);
+    uint64_t started;
+    uint64_t elapsed;
+
+    if (!data || !decoded) {
+        fprintf(stderr, "bench: out of memory\n");
+        exit(1);
+    }
+
+    for (size_t i = 0; i < (size_t)W * H * 4; i++)
+        data[i] = (uint8_t)((i * 2654435761u) >> 16);
+
+    for (int pass = 0; pass < 2; pass++) {
+        started = bench_now_ns();
+        assert(gxm_texture_decode_rgba8(decoded, data, W, H, format, type) == 0);
+        elapsed = bench_now_ns() - started;
+        printf("bench %s pass %d: %.1f ms (%.1f ns/pixel)\n", name, pass,
+               (double)elapsed / 1e6, (double)elapsed / (W * H));
+        fflush(stdout);
+    }
+
+    free(decoded);
+    free(data);
+}
+
+int main(int argc, char **argv)
+{
+    if (argc > 1 && strcmp(argv[1], "--bench") == 0) {
+        bench_linear_baseline();
+        bench_decode(SCE_GXM_TEXTURE_FORMAT_U4U4U4U4_ABGR, SCE_GXM_TEXTURE_LINEAR,
+                     "u4 linear");
+        bench_decode(SCE_GXM_TEXTURE_FORMAT_U4U4U4U4_ABGR, SCE_GXM_TEXTURE_SWIZZLED,
+                     "u4 swizzled");
+        bench_decode(SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, SCE_GXM_TEXTURE_SWIZZLED,
+                     "u8 swizzled");
+        return 0;
+    }
+
     test_swizzle4();
     test_packed();
     test_swizzled_mips();
+    test_swizzled_tiles();
     test_linear_strided();
     test_palette();
     test_tiled();
