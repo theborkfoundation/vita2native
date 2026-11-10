@@ -371,7 +371,7 @@ static void callback_push(RVoice *voice, uint32_t module_id, uint32_t reason, ui
     callback->reason_ptr = (void *)reason_ptr;
 }
 
-static void callback_finished(RVoice *voice)
+static void callback_finished(RVoice *voice, uint32_t module_id)
 {
     RCallback *callback;
 
@@ -384,7 +384,7 @@ static void callback_finished(RVoice *voice)
     callback->user_data = voice->finished_user;
     callback->voice = (uint32_t)((voice - g_voices) << 4) | 0x4e470003u;
     callback->rack = voice->rack;
-    callback->module_id = 0;
+    callback->module_id = module_id;
     callback->reason = 0;
     callback->reason2 = 0;
     callback->reason_ptr = NULL;
@@ -527,6 +527,13 @@ void ngs_render_voice_resume(uint32_t voice)
         v->paused = false;
 }
 
+bool ngs_render_voice_finished(uint32_t voice)
+{
+    RVoice *v = voice_at(voice);
+
+    return v && v->used && v->finished;
+}
+
 void ngs_render_voice_callbacks(uint32_t voice, void *module_callback, void *module_user,
                                 void *finished_callback, void *finished_user)
 {
@@ -645,8 +652,10 @@ static void at9_next_buffer(RVoice *v, const RAt9Params *params)
         params->buffers[next].bytes <= 0 || !v->module_callback) {
         v->finished = true;
         v->playing = false;
+        if (ngs_render_trace())
+            fprintf(stderr, "SceNgs: at9 voice %u end of data\n", (uint32_t)(v - g_voices));
         callback_push(v, NGS_R_MODULE_AT9, NGS_R_CB_END_OF_DATA, 0, NULL);
-        callback_finished(v);
+        callback_finished(v, NGS_R_MODULE_AT9);
         return;
     }
 
@@ -713,7 +722,7 @@ static bool at9_step(RVoice *v)
         v->finished = true;
         v->playing = false;
         callback_push(v, NGS_R_MODULE_AT9, NGS_R_CB_END_OF_DATA, 0, NULL);
-        callback_finished(v);
+        callback_finished(v, NGS_R_MODULE_AT9);
         return false;
     }
 
@@ -773,8 +782,10 @@ static void player_next_buffer(RVoice *v, const RPlayerParams *params)
         params->buffers[next].bytes <= 0 || !v->module_callback) {
         v->finished = true;
         v->playing = false;
+        if (ngs_render_trace())
+            fprintf(stderr, "SceNgs: player voice %u end of data\n", (uint32_t)(v - g_voices));
         callback_push(v, NGS_R_MODULE_PLAYER, NGS_R_CB_END_OF_DATA, 0, NULL);
-        callback_finished(v);
+        callback_finished(v, NGS_R_MODULE_PLAYER);
         return;
     }
 
@@ -1134,6 +1145,10 @@ void ngs_render_dispatch_callbacks(void)
         info.callback_reason2 = job->reason2;
         info.callback_ptr = job->reason_ptr;
         info.user_data = job->user_data;
+
+        if (ngs_render_trace() && job->reason == NGS_R_CB_END_OF_DATA)
+            fprintf(stderr, "SceNgs: callback voice %u module %u end-of-data\n", job->voice,
+                    job->module_id);
 
         if (ngs_render_trace()) {
             static unsigned int logged;

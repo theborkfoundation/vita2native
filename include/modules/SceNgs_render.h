@@ -40,6 +40,7 @@ void ngs_render_voice_key_off(uint32_t voice);
 void ngs_render_voice_kill(uint32_t voice);
 void ngs_render_voice_pause(uint32_t voice);
 void ngs_render_voice_resume(uint32_t voice);
+bool ngs_render_voice_finished(uint32_t voice);
 void ngs_render_voice_callbacks(uint32_t voice, void *module_callback, void *module_user,
                                 void *finished_callback, void *finished_user);
 void ngs_render_patch_add(uint32_t patch, uint32_t source, uint32_t dest, int output_index,

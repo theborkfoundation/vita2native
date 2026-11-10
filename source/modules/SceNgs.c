@@ -813,7 +813,16 @@ EXPORT(SceNgs, 0x5551410D, int32_t, sceNgsVoiceGetInfo, SceNgsHVoice voice_handl
     memset(info, 0, sizeof(*info));
     if (!voice->initialized)
         info->voice_state = SCE_NGS_VOICE_STATE_AVAILABLE;
-    else if (voice->keyed_off)
+    else if (ngs_render_voice_finished(voice_handle)) {
+        if (ngs_trace_enabled() && voice->playing) {
+            static unsigned int logged;
+
+            if (logged++ < 20)
+                fprintf(stderr, "SceNgs: voice %u finished, reporting available\n",
+                        voice_handle);
+        }
+        info->voice_state = SCE_NGS_VOICE_STATE_AVAILABLE;
+    } else if (voice->keyed_off)
         info->voice_state = SCE_NGS_VOICE_STATE_KEY_OFF;
     else if (voice->paused)
         info->voice_state = SCE_NGS_VOICE_STATE_PAUSED;
