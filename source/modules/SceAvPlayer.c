@@ -1,9 +1,10 @@
 /*
  * SceAvPlayer: synthetic video playback.
  *
- * The host has no H.264 decoder, so the player presents a generated 30 fps
- * 960x544 test pattern and silent 48 kHz stereo audio. Applications exercise
- * their normal frame-pulling and timing code; the pixels are not the file's.
+ * The host has no H.264 decoder, so the player presents a single black
+ * 960x544 I420 frame at 30 fps and silent 48 kHz stereo audio. Applications
+ * exercise their normal frame-pulling and timing code; the pixels are not the
+ * file's.
  */
 #include <stdbool.h>
 #include <stdint.h>
@@ -34,13 +35,13 @@ typedef struct {
     bool video_enabled;
     bool audio_enabled;
     bool have_source;
+    bool video_filled;
     int trick_speed;
     uint64_t position_ns;
     uint64_t resume_ns;
     uint64_t jump_ms;
     uint64_t last_video_ns;
     uint64_t last_audio_ns;
-    uint32_t frame_index;
     uint8_t *video_buffer;
     uint8_t *audio_buffer;
     SceAvPlayerMemReplacement memory;
@@ -100,45 +101,13 @@ static void player_check_end(AvPlayer *player)
 
 static void player_fill_video(AvPlayer *player)
 {
-    /* RGB value of eight colour bars, converted to I420 below. */
-    static const uint8_t bars[8][3] = {
-        { 255, 255, 255 }, { 255, 255, 0 }, { 0, 255, 255 }, { 0, 255, 0 },
-        { 255, 0, 255 },   { 255, 0, 0 },   { 0, 0, 255 },   { 0, 0, 0 },
-    };
-    uint8_t *y_plane = player->video_buffer;
-    uint8_t *v_plane = y_plane + AVPLAYER_Y_SIZE;
-    uint8_t *u_plane = v_plane + AVPLAYER_UV_SIZE;
-    uint32_t band = (player->frame_index * 8) % (AVPLAYER_HEIGHT + 64);
+    if (player->video_filled)
+        return;
 
-    /*
-     * The player hands YUV420P to the guest, which uploads it as three
-     * textures and converts in its shader; RGBA here renders as noise.
-     */
-    for (uint32_t y = 0; y < AVPLAYER_HEIGHT; y++) {
-        bool in_band = y >= band && y < band + 48;
-
-        for (uint32_t x = 0; x < AVPLAYER_WIDTH; x++) {
-            const uint8_t *rgb = bars[x * 8 / AVPLAYER_WIDTH];
-            float r = rgb[0], g = rgb[1], b = rgb[2];
-            float luma = 0.299f * r + 0.587f * g + 0.114f * b;
-
-            if (in_band)
-                luma = 235.0f;
-            y_plane[y * AVPLAYER_WIDTH + x] = (uint8_t)(luma + 0.5f);
-        }
-    }
-
-    for (uint32_t y = 0; y < AVPLAYER_HEIGHT / 2; y++) {
-        for (uint32_t x = 0; x < AVPLAYER_WIDTH / 2; x++) {
-            const uint8_t *rgb = bars[(x * 2) * 8 / AVPLAYER_WIDTH];
-            float r = rgb[0], g = rgb[1], b = rgb[2];
-
-            u_plane[y * (AVPLAYER_WIDTH / 2) + x] =
-                (uint8_t)(-0.169f * r - 0.331f * g + 0.5f * b + 128.0f + 0.5f);
-            v_plane[y * (AVPLAYER_WIDTH / 2) + x] =
-                (uint8_t)(0.5f * r - 0.419f * g - 0.081f * b + 128.0f + 0.5f);
-        }
-    }
+    /* Limited-range I420 black: Y = 16, chroma = 128. */
+    memset(player->video_buffer, 16, AVPLAYER_Y_SIZE);
+    memset(player->video_buffer + AVPLAYER_Y_SIZE, 128, 2 * AVPLAYER_UV_SIZE);
+    player->video_filled = true;
 }
 
 EXPORT(SceAvPlayer, 0x4C847ADF, SceAvPlayerHandle, sceAvPlayerInit, SceAvPlayerInitData *data)
@@ -425,7 +394,6 @@ EXPORT(SceAvPlayer, 0x8BC3221B, SceBool, sceAvPlayerGetVideoData, SceAvPlayerHan
 
     player_fill_video(player);
     player->last_video_ns = now;
-    player->frame_index++;
 
     memset(info, 0, sizeof(*info));
     info->pData = player->video_buffer;

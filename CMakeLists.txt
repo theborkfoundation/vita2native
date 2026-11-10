@@ -145,6 +145,7 @@ add_executable(vita2native
     source/modules/SceNetCtl.c
     source/minimp3_impl.c
     source/modules/SceNgs.c
+    source/modules/SceNgs_render.c
     source/modules/ScePower.c
     source/modules/SceRtc.c
     source/modules/SceSharedFb.c
@@ -675,8 +676,23 @@ if(BUILD_TESTING)
     add_executable(ngs_smoke
         tests/ngs_smoke.c
         source/modules/SceNgs.c
+        source/modules/SceNgs_render.c
+        external/Vita3K/external/LibAtrac9/C/src/band_extension.c
+        external/Vita3K/external/LibAtrac9/C/src/bit_allocation.c
+        external/Vita3K/external/LibAtrac9/C/src/bit_reader.c
+        external/Vita3K/external/LibAtrac9/C/src/decinit.c
+        external/Vita3K/external/LibAtrac9/C/src/decoder.c
+        external/Vita3K/external/LibAtrac9/C/src/huffCodes.c
+        external/Vita3K/external/LibAtrac9/C/src/imdct.c
+        external/Vita3K/external/LibAtrac9/C/src/libatrac9.c
+        external/Vita3K/external/LibAtrac9/C/src/quantization.c
+        external/Vita3K/external/LibAtrac9/C/src/scale_factors.c
+        external/Vita3K/external/LibAtrac9/C/src/tables.c
+        external/Vita3K/external/LibAtrac9/C/src/unpack.c
+        external/Vita3K/external/LibAtrac9/C/src/utility.c
     )
-    target_include_directories(ngs_smoke PRIVATE include)
+    target_include_directories(ngs_smoke PRIVATE include
+        external/Vita3K/external/LibAtrac9/C/src)
     target_compile_definitions(ngs_smoke PRIVATE _GNU_SOURCE=1)
     target_link_libraries(ngs_smoke PRIVATE pthread)
     add_test(NAME ngs_smoke COMMAND ngs_smoke)

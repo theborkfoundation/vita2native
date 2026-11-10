@@ -84,11 +84,13 @@ A GLES 3.x GPU device (EGL surfaceless + pbuffer) is created at startup when the
 libraries are available; otherwise a null backend is used. GXM is translated to
 GLES 3.x: GXP shaders through Vita3K's recompiler, render targets, textures,
 depth/stencil, MSAA and the transfer calls. `SceAudioOut`/`SceAudioIn`,
+`SceNgs` (ATRAC9 voices, the PCM/HEVAG player and the master buss mixer),
 MP3/ATRAC9/AAC decoding, JPEG encode/decode, `SceNet`/`SceHttp`/`SceSsl`,
 `SceSqlite`, `ScePgf`, `SceTouch`, `SceCommonDialog` (with an on-screen
-overlay), a synthetic camera and `SceAvPlayer` (generated 30 fps video and
-silent audio) and the kernel/thread surface are implemented. AAC uses the
-bundled FAAD2 decoder; CELP decoding and encrypted SELF files are not supported.
+overlay), a synthetic camera and `SceAvPlayer` (a static black 30 fps I420
+frame and silent audio) and the kernel/thread surface are implemented. AAC uses
+the bundled FAAD2 decoder; CELP decoding and encrypted SELF files are not
+supported.
 
 Guest code runs natively in the host process; there is no sandbox or isolation.
 

@@ -1,46 +1,73 @@
 # TODO
 
-## Audio: implement SceNgs rendering
+## Audio: SceNgs rendering
 
-**Priority:** low.
+**Priority:** high.
 
-**Status:** Game audio is silent. The SDL/ALSA output path is verified working;
-the guest submits all-zero sample buffers to `SceAudio`.
+**Status:** implemented. `source/modules/SceNgs_render.c` renders the graph the
+titles use: ATRAC9 voices, the HEVAG/PCM player (Simple voices), patch volume
+matrices, buffer switch/end-of-data callbacks and the master buss output. The
+guest pulls mixed S16 frames with `sceNgsVoiceGetStateData` and feeds
+`sceAudioOutOutput`; `VITA2NATIVE_AUDIO_DEBUG=1` now reports non-zero peaks and
+Angry Birds Trilogy plays menu music and effects on the R36S.
 
-### Evidence
+### Remaining gaps
 
-- Angry Birds Trilogy imports `SceNgs` (NID `0xb01598d9`); it does not import
-  `SceAtrac` or `SceAudiodec`.
-- `source/modules/SceNgs.c` is a bookkeeping stub whose rendering is silent.
-- With `VITA2NATIVE_AUDIO_DEBUG=1`, every port reports `peak 0` while the
-  mixer consumes ~48,000 frames/s:
-  `SceAudio: port 0 calls 190 peak 0 vol 32768/32768 pending 1536 played 97280`
-- R36S output path confirmed: SDL uses ALSA at 48 kHz, S16 stereo; the rk817
-  mixer is `Playback Path = SPK_HP`; `aplay` of a 440 Hz test WAV is clean.
-- `SceAvPlayer`'s audio stub also returns zeroed buffers, so movie audio is
-  silent by design. The audible crackle is downstream of the guest silence
-  (amp/ALSA artifacts), not game content.
-
-### Plan
-
-1. Add call tracing to `source/modules/SceNgs.c` behind a dedicated env var
-   (for example `VITA2NATIVE_NGS_DEBUG`) logging systems, racks, voice
-   definitions, modules/presets, patches, and pull/push buffers. Use it on
-   Angry Birds to determine the minimal graph that must render.
-2. Port the Vita3K NGS engine:
-   - `external/Vita3K/vita3k/ngs/` — engine, definitions, scheduler and the
-     AT9 voice module (~3.2k lines).
-   - `external/Vita3K/vita3k/modules/SceNgsUser/SceNgs.cpp` — the guest API
-     glue (~1.1k lines).
-   - Requires a shim for Vita3K's `MemState`/`Ptr` translation and scheduler,
-     wired to vita2native's guest memory.
-3. Verify music and effects in Angry Birds Trilogy, then re-run the four-title
-   regression (Flappy Bird, VitaShell, SuDokuL, PixelChess).
+- The EQ/envelope/pauser/filter modules after the source module are
+  pass-through. Presets and their parameter blocks are ignored. ABT does not
+  call `sceNgsVoiceSetPreset`, but other titles may.
+- Only the master buss output is mixed; chained non-master busses and the
+  extra Simple/ATRAC9 outputs are ignored.
+- HEVAG/PCM sources are resampled to the system rate with linear interpolation;
+  ATRAC9 is assumed to be 48 kHz.
+- `SceAvPlayer` audio still returns zeroed buffers, so movie audio is silent by
+  design.
 
 ### Notes
 
-- `SceAudio` currently queues 4 device buffers per port
-  (`source/modules/SceAudio.c`); diagnostics are gated by
-  `VITA2NATIVE_AUDIO_DEBUG`.
-- The texture-cache byte budget (`source/modules/SceGxm.c`) and the removed
-  `sceNpCheckCallback` log are unrelated to this item.
+- `SceAudio` queues 4 device buffers per port (`source/modules/SceAudio.c`);
+  diagnostics are gated by `VITA2NATIVE_AUDIO_DEBUG`.
+- NGS tracing (`VITA2NATIVE_NGS_DEBUG=1`) logs the graph, parameter dumps,
+  master peaks and callbacks.
+
+## Rendering: remaining load-time work
+
+**Priority:** medium.
+
+### Parallel texture decode
+
+Decode runs synchronously on the GXM thread while the GPU is idle. Split
+swizzled U4 and PVRTC4 levels into destination-row bands across a small worker
+pool (2-3 threads). Expected 1.8-2.5x on the 2048x2048 U4 (~53 ms cooled) and
+PVRTC 1024x1024 (~78 ms) decodes. The GL upload stays serial. Keep an
+environment switch for A/B and do not parallelise levels below ~512x512.
+
+### Async decode-ahead
+
+A larger follow-up: start the decode when `sceGxmSetFragmentTexture` is called
+and fence before the draw, or upload on a shared-context worker thread. This
+can overlap decode/upload with guest work, but needs request tracking, guest
+memory safety and cache-eviction ordering. Only attempt after the band-split
+pool has been measured.
+
+### 2bpp PVRTC decode
+
+The optimised decoder only covers PVRTC-I 4bpp. 2bpp and PVRTC-II still use the
+PowerVR SDK reference (~187 ns/pixel on the Orange Pi). Extend the fast decoder
+only if a title is measured using those formats.
+
+### Texture re-decode on cache eviction
+
+The texture cache is byte-bounded and re-decodes evicted atlases on later
+frames (previously seen at frames 4153/4155/4289/4308, ~160 ms each). Options:
+raise the budget on devices with enough RAM, drop mip levels from the cache
+footprint, or persist decoded textures on disk keyed by content hash. Measure
+first whether the current level-load path still evicts.
+
+### Orange Pi test-box stability
+
+Angry Birds level loads hard-hang the Orange Pi (SSH banner times out, memory
+watchdog cannot run) with `VITA2NATIVE_TEXTURE_CACHE_MB=128` and no
+`VITA2NATIVE_FINISH_PER_FRAME`. The R36S survives the same path. If the Pi is
+used for in-game testing again, run it with `VITA2NATIVE_FINISH_PER_FRAME=1`
+and a cgroup memory cap, and keep logs on disk rather than tmpfs.

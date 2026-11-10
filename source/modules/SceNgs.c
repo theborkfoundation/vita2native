@@ -16,16 +16,19 @@
 #include "ngs_types.h"
 
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "module.h"
+#include "modules/SceNgs_render.h"
 
 #define NGS_MAX_OBJECTS      1024
 #define NGS_HANDLE_BASE      0x4e470000u
 #define NGS_HANDLE_KIND_MASK 0x0000000fu
 #define NGS_HANDLE_SLOT_MASK 0x000003ffu
 #define NGS_LOCK_SIZE        0x1000
+#define VOICE_DEF_BASE       0x4e471000u
 
 enum {
     NGS_KIND_NONE = 0,
@@ -52,11 +55,17 @@ typedef struct {
 
     const void *definition;
     void *user_data;
-    void *callback; /* rack-release, finished or module callback */
+    void *callback; /* rack-release or params-error callback */
     void *callback_user_data;
+    void *module_callback;
+    void *module_callback_user;
+    void *finished_callback;
+    void *finished_user;
 
     void *locked_params;
+    void *params_shadow;
     uint32_t locked_module;
+    uint8_t lock_active;
 
     uint32_t source; /* patch endpoints */
     uint32_t dest;
@@ -68,6 +77,21 @@ typedef struct {
 
 static NgsObject g_objects[NGS_MAX_OBJECTS];
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int ngs_trace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_NGS_DEBUG") != NULL;
+    return enabled;
+}
+
+#define NGS_TRACE(...)                                                                             \
+    do {                                                                                           \
+        if (ngs_trace_enabled())                                                                   \
+            fprintf(stderr, "SceNgs: " __VA_ARGS__);                                               \
+    } while (0)
 
 #define NGS_ENTER() pthread_mutex_lock(&g_lock)
 
@@ -121,6 +145,11 @@ static void ngs_free(uint32_t handle, int kind)
         return;
 
     free(object->locked_params);
+    free(object->params_shadow);
+    object->locked_params = NULL;
+    object->params_shadow = NULL;
+    if (kind == NGS_KIND_VOICE)
+        ngs_render_voice_remove(handle);
     memset(object, 0, sizeof(*object));
 }
 
@@ -374,6 +403,13 @@ EXPORT(SceNgs, 0xD668B49C, int32_t, sceNgsPatchCreateRouting,
     }
 
     *patch_handle = handle;
+    ngs_render_patch_add(handle, patch_info->source_voice, patch_info->destination_voice,
+                         patch_info->source_output_index, sub_index,
+                         patch_info->destination_input_index);
+    NGS_TRACE("patch create %u: voice %u out %d/%d -> voice %u in %d\n", handle,
+              patch_info->source_voice, patch_info->source_output_index,
+              patch_info->source_output_sub_index, patch_info->destination_voice,
+              patch_info->destination_input_index);
     NGS_LEAVE(0);
 }
 
@@ -419,6 +455,7 @@ EXPORT(SceNgs, 0xD0C9AE5A, int32_t, sceNgsPatchRemoveRouting, SceNgsHPatch patch
     if (!ngs_lookup(patch_handle, NGS_KIND_PATCH))
         NGS_LEAVE(SCE_NGS_ERROR_INVALID_HANDLE);
 
+    ngs_render_patch_remove(patch_handle);
     ngs_free(patch_handle, NGS_KIND_PATCH);
     NGS_LEAVE(0);
 }
@@ -444,6 +481,10 @@ EXPORT(SceNgs, 0x477318C0, int32_t, sceNgsRackGetRequiredMemorySize, SceNgsHSynS
         voices = 256;
 
     *size = (uint32_t)(0x400 + voices * 0x200 + 0xf) & ~0xfu;
+    NGS_TRACE("rack required size: def %p voices %d channels %d patches/in %d patches/out %d -> %u\n",
+              (void *)description->voice_definition, description->voice_count,
+              description->channels_per_voice, description->max_patches_per_input,
+              description->patches_per_output, *size);
     NGS_LEAVE(0);
 }
 
@@ -469,6 +510,11 @@ EXPORT(SceNgs, 0x0A92E4EC, int32_t, sceNgsRackInit, SceNgsHSynSystem system,
     voices = (uint32_t)description->voice_count;
     if (voices > 256)
         NGS_LEAVE(SCE_NGS_ERROR_INVALID_PARAM);
+
+    NGS_TRACE("rack init system %u def %p mem %p/%u voices %d channels %d patches/in %d patches/out %d\n",
+              system, (void *)description->voice_definition, info ? info->data : NULL,
+              info ? info->size : 0, description->voice_count, description->channels_per_voice,
+              description->max_patches_per_input, description->patches_per_output);
 
     rack = ngs_alloc(NGS_KIND_RACK);
     if (!rack)
@@ -497,6 +543,14 @@ EXPORT(SceNgs, 0x0A92E4EC, int32_t, sceNgsRackInit, SceNgsHSynSystem system,
         voice_object->channels = (uint8_t)description->channels_per_voice;
         voice_object->patches_per_output = description->patches_per_output;
         voice_object->definition = description->voice_definition;
+        {
+            int buss = (int)((uintptr_t)description->voice_definition - VOICE_DEF_BASE);
+
+            if (buss < 0 || buss >= NGS_BUSS_NORMAL_PLAYER + 1)
+                buss = NGS_BUSS_SIMPLE;
+            ngs_render_voice_add(voice, rack, buss, description->channels_per_voice);
+        }
+        NGS_TRACE("  rack voice %u index %u -> %u\n", rack, i, voice);
     }
 
     *rack_handle = rack;
@@ -524,6 +578,7 @@ EXPORT(SceNgs, 0xFE1A98E9, int32_t, sceNgsRackGetVoiceHandle, SceNgsHRack rack_h
         if (object->used && object->kind == NGS_KIND_VOICE && object->parent == rack_handle &&
             object->index == index) {
             *voice_handle = ngs_handle(i, NGS_KIND_VOICE);
+            NGS_TRACE("rack get voice %u index %u -> %u\n", rack_handle, index, *voice_handle);
             NGS_LEAVE(0);
         }
     }
@@ -581,6 +636,9 @@ EXPORT(SceNgs, 0x6CE8B36F, int32_t, sceNgsSystemGetRequiredMemorySize,
         voices = 256;
 
     *size = (0x1000 + racks * 0x200 + voices * 0x100 + 0xf) & ~0xfu;
+    NGS_TRACE("system required size: racks %d voices %d granularity %d rate %d -> %u\n",
+              params->max_racks, params->max_voices, params->granularity, params->sample_rate,
+              *size);
     return 0;
 }
 
@@ -602,6 +660,12 @@ EXPORT(SceNgs, 0xED14CF4A, int32_t, sceNgsSystemInit, void *memspace, uint32_t m
     if (!handle)
         NGS_LEAVE(SCE_NGS_ERROR_OUT_OF_ASSETS);
 
+    ngs_render_reset();
+    ngs_render_configure(params->granularity, params->sample_rate);
+
+    NGS_TRACE("system init mem %p size %u racks %d voices %d granularity %d rate %d -> %u\n",
+              memspace, memspace_size, params->max_racks, params->max_voices, params->granularity,
+              params->sample_rate, handle);
     *system = handle;
     NGS_LEAVE(0);
 }
@@ -671,8 +735,19 @@ EXPORT(SceNgs, 0x684F080C, int32_t, sceNgsSystemUpdate, SceNgsHSynSystem system)
     if (!ngs_lookup(system, NGS_KIND_SYSTEM))
         NGS_LEAVE(SCE_NGS_ERROR_INVALID_HANDLE);
 
-    /* Callbacks are queued by the real mixer; this host renders silence. */
-    NGS_LEAVE(0);
+    /* Callbacks are queued by the real mixer; render one granularity here. */
+    {
+        static unsigned int updates;
+
+        if (ngs_trace_enabled() && (updates < 8 || (updates % 1000) == 0))
+            fprintf(stderr, "SceNgs: system update %u (#%u)\n", system, updates);
+        updates++;
+    }
+
+    ngs_render_update();
+    pthread_mutex_unlock(&g_lock);
+    ngs_render_dispatch_callbacks();
+    return 0;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -698,29 +773,29 @@ EXPORT(SceNgs, 0x9AB87E71, int32_t, sceNgsVoiceBypassModule, SceNgsHVoice voice_
 #define VOICE_DEF(nid, name, slot)                                                                 \
     EXPORT(SceNgs, nid, const SceNgsVoiceDefinition *, name, void)                                 \
     {                                                                                              \
+        NGS_TRACE("voice definition " #name " -> %p\n",                                          \
+                  (void *)(uintptr_t)(VOICE_DEF_BASE + (slot)));                                   \
         return (const SceNgsVoiceDefinition *)(uintptr_t)(VOICE_DEF_BASE + (slot));                \
     }
 
-#define VOICE_DEF_BASE 0x4e471000u
-
-VOICE_DEF(0x14EF65A0, sceNgsVoiceDefGetAtrac9Voice, 0x01)
-VOICE_DEF(0x0E0ACB68, sceNgsVoiceDefGetCompressorBuss, 0x02)
-VOICE_DEF(0x1AF83512, sceNgsVoiceDefGetCompressorSideChainBuss, 0x03)
-VOICE_DEF(0x4D705E3E, sceNgsVoiceDefGetDelayBuss, 0x04)
-VOICE_DEF(0xAAD90DEB, sceNgsVoiceDefGetDistortionBuss, 0x05)
-VOICE_DEF(0xF6B68C31, sceNgsVoiceDefGetEnvelopeBuss, 0x06)
-VOICE_DEF(0xF964120E, sceNgsVoiceDefGetEqBuss, 0x07)
-VOICE_DEF(0x79A121D1, sceNgsVoiceDefGetMasterBuss, 0x08)
-VOICE_DEF(0xE0AC8776, sceNgsVoiceDefGetMixerBuss, 0x09)
-VOICE_DEF(0x214485D6, sceNgsVoiceDefGetPauserBuss, 0x0a)
-VOICE_DEF(0xFBE515D4, sceNgsVoiceDefGetPitchShiftBuss, 0x0b)
-VOICE_DEF(0x9DCF50F5, sceNgsVoiceDefGetReverbBuss, 0x0c)
-VOICE_DEF(0x1F51C2BA, sceNgsVoiceDefGetSasEmuVoice, 0x0d)
-VOICE_DEF(0xCD63A2BF, sceNgsVoiceDefGetScreamAtrac9Voice, 0x0e)
-VOICE_DEF(0xCE53BC33, sceNgsVoiceDefGetScreamVoice, 0x0f)
-VOICE_DEF(0x45CF2A73, sceNgsVoiceDefGetSimpleAtrac9Voice, 0x10)
-VOICE_DEF(0x0D5399CF, sceNgsVoiceDefGetSimpleVoice, 0x11)
-VOICE_DEF(0xE9B572B7, sceNgsVoiceDefGetTemplate1, 0x12)
+VOICE_DEF(0x14EF65A0, sceNgsVoiceDefGetAtrac9Voice, NGS_BUSS_ATRAC9)
+VOICE_DEF(0x0E0ACB68, sceNgsVoiceDefGetCompressorBuss, NGS_BUSS_COMPRESSOR)
+VOICE_DEF(0x1AF83512, sceNgsVoiceDefGetCompressorSideChainBuss, NGS_BUSS_SIDE_CHAIN)
+VOICE_DEF(0x4D705E3E, sceNgsVoiceDefGetDelayBuss, NGS_BUSS_DELAY)
+VOICE_DEF(0xAAD90DEB, sceNgsVoiceDefGetDistortionBuss, NGS_BUSS_DISTORTION)
+VOICE_DEF(0xF6B68C31, sceNgsVoiceDefGetEnvelopeBuss, NGS_BUSS_ENVELOPE)
+VOICE_DEF(0xF964120E, sceNgsVoiceDefGetEqBuss, NGS_BUSS_EQUALIZATION)
+VOICE_DEF(0x79A121D1, sceNgsVoiceDefGetMasterBuss, NGS_BUSS_MASTER)
+VOICE_DEF(0xE0AC8776, sceNgsVoiceDefGetMixerBuss, NGS_BUSS_MIXER)
+VOICE_DEF(0x214485D6, sceNgsVoiceDefGetPauserBuss, NGS_BUSS_PAUSER)
+VOICE_DEF(0xFBE515D4, sceNgsVoiceDefGetPitchShiftBuss, NGS_BUSS_PITCH_SHIFT)
+VOICE_DEF(0x9DCF50F5, sceNgsVoiceDefGetReverbBuss, NGS_BUSS_REVERB)
+VOICE_DEF(0x1F51C2BA, sceNgsVoiceDefGetSasEmuVoice, NGS_BUSS_SAS_EMULATION)
+VOICE_DEF(0xCD63A2BF, sceNgsVoiceDefGetScreamAtrac9Voice, NGS_BUSS_SCREAM_ATRAC9)
+VOICE_DEF(0xCE53BC33, sceNgsVoiceDefGetScreamVoice, NGS_BUSS_SCREAM)
+VOICE_DEF(0x45CF2A73, sceNgsVoiceDefGetSimpleAtrac9Voice, NGS_BUSS_SIMPLE_ATRAC9)
+VOICE_DEF(0x0D5399CF, sceNgsVoiceDefGetSimpleVoice, NGS_BUSS_SIMPLE)
+VOICE_DEF(0xE9B572B7, sceNgsVoiceDefGetTemplate1, NGS_BUSS_SIMPLE)
 
 EXPORT(SceNgs, 0x5551410D, int32_t, sceNgsVoiceGetInfo, SceNgsHVoice voice_handle,
        SceNgsVoiceInfo *info)
@@ -750,6 +825,15 @@ EXPORT(SceNgs, 0x5551410D, int32_t, sceNgsVoiceGetInfo, SceNgsHVoice voice_handl
     info->num_outputs = 1;
     info->num_patches_per_output =
         voice->patches_per_output > 0 ? (uint32_t)voice->patches_per_output : 1;
+
+    {
+        int buss = (int)((uintptr_t)voice->definition - VOICE_DEF_BASE);
+
+        if (buss >= 0 && buss <= NGS_BUSS_NORMAL_PLAYER) {
+            info->num_modules = (uint32_t)ngs_render_module_count(buss);
+            info->num_outputs = (uint32_t)ngs_render_output_count(buss);
+        }
+    }
 
     NGS_LEAVE(0);
 }
@@ -837,8 +921,20 @@ EXPORT(SceNgs, 0xC9B8C0B4, int32_t, sceNgsVoiceGetStateData, SceNgsHVoice voice_
         NGS_LEAVE(SCE_NGS_ERROR_INVALID_PARAM);
 
     (void)module;
-    if (memory)
-        memset(memory, 0, mem_size);
+    ngs_render_get_state(voice_handle, module, memory, mem_size);
+
+    if (ngs_trace_enabled()) {
+        static unsigned int calls;
+
+        if (calls < 8) {
+            const int16_t *samples = memory;
+
+            fprintf(stderr, "SceNgs: get state data voice %u module %u size %u samples %d %d %d %d\n",
+                    voice_handle, module, mem_size, samples ? samples[0] : 0,
+                    samples ? samples[1] : 0, samples ? samples[2] : 0, samples ? samples[3] : 0);
+        }
+        calls++;
+    }
 
     NGS_LEAVE(0);
 }
@@ -858,6 +954,9 @@ EXPORT(SceNgs, 0x1DDBEBEB, int32_t, sceNgsVoiceInit, SceNgsHVoice voice_handle,
     voice->playing = 0;
     voice->paused = 0;
     voice->keyed_off = 0;
+
+    NGS_TRACE("voice init %u preset %p flags 0x%x\n", voice_handle, (const void *)preset,
+              init_flags);
 
     if (init_flags & SCE_NGS_VOICE_INIT_CALLBACKS) {
         voice->callback = NULL;
@@ -891,6 +990,8 @@ EXPORT(SceNgs, 0xBB13373D, int32_t, sceNgsVoiceKeyOff, SceNgsHVoice voice_handle
     voice->initialized = 1;
     voice->keyed_off = 1;
     voice->paused = 0;
+    ngs_render_voice_key_off(voice_handle);
+    NGS_TRACE("voice key off %u\n", voice_handle);
     NGS_LEAVE(0);
 }
 
@@ -907,6 +1008,7 @@ EXPORT(SceNgs, 0x0E291AAD, int32_t, sceNgsVoiceKill, SceNgsHVoice voice_handle)
     voice->playing = 0;
     voice->paused = 0;
     voice->keyed_off = 0;
+    ngs_render_voice_kill(voice_handle);
     NGS_LEAVE(0);
 }
 
@@ -923,19 +1025,29 @@ EXPORT(SceNgs, 0xAB6BEF8F, int32_t, sceNgsVoiceLockParams, SceNgsHVoice voice_ha
         NGS_LEAVE(SCE_NGS_ERROR_INVALID_HANDLE);
     if (!params_buffer)
         NGS_LEAVE(SCE_NGS_ERROR_INVALID_PARAM);
-    if (voice->locked_params)
+    if (voice->lock_active)
         NGS_LEAVE(SCE_NGS_ERROR_RESOURCE_LOCKED);
 
     (void)params_interface_id;
 
-    buffer = calloc(1, NGS_LOCK_SIZE);
-    if (!buffer)
-        NGS_LEAVE(SCE_NGS_ERROR_INTERNAL_ALLOC);
+    if (!voice->locked_params) {
+        voice->locked_params = calloc(1, NGS_LOCK_SIZE);
+        if (!voice->locked_params)
+            NGS_LEAVE(SCE_NGS_ERROR_INTERNAL_ALLOC);
+    }
 
-    voice->locked_params = buffer;
+    buffer = voice->locked_params;
+    if (voice->params_shadow)
+        memcpy(buffer, voice->params_shadow, NGS_LOCK_SIZE);
+    else
+        memset(buffer, 0, NGS_LOCK_SIZE);
+
     voice->locked_module = module;
+    voice->lock_active = 1;
     params_buffer->data = buffer;
     params_buffer->size = NGS_LOCK_SIZE;
+    NGS_TRACE("voice lock params %u module %u id 0x%x -> %p/%u\n", voice_handle, module,
+              (unsigned)params_interface_id, buffer, NGS_LOCK_SIZE);
     NGS_LEAVE(0);
 }
 
@@ -954,6 +1066,9 @@ static int32_t ngs_voice_patch_set_volume_impl(SceNgsHPatch patch_handle, int32_
         NGS_LEAVE(SCE_NGS_ERROR_INVALID_PARAM);
 
     patch->matrix[output_channel][input_channel] = volume;
+    ngs_render_patch_volume(patch_handle, (const float(*)[2])patch->matrix);
+    NGS_TRACE("patch volume %u [%d][%d] = %f\n", patch_handle, output_channel, input_channel,
+              (double)volume);
     NGS_LEAVE(0);
 }
 
@@ -990,6 +1105,9 @@ EXPORT(SceNgs, 0xBD6F57F0, int32_t, sceNgsVoicePatchSetVolumes, SceNgsHPatch pat
     for (int32_t i = 0; i < volume_count && i < SCE_NGS_MAX_SYSTEM_CHANNELS; i++)
         patch->matrix[output_channel][i] = volumes[i];
 
+    ngs_render_patch_volume(patch_handle, (const float(*)[2])patch->matrix);
+    NGS_TRACE("patch volumes %u [%d] = %f %f\n", patch_handle, output_channel,
+              (double)volumes[0], volume_count > 1 ? (double)volumes[1] : 0.0);
     NGS_LEAVE(0);
 }
 
@@ -1007,6 +1125,10 @@ EXPORT(SceNgs, 0xA0F5402D, int32_t, sceNgsVoicePatchSetVolumesMatrix, SceNgsHPat
         NGS_LEAVE(SCE_NGS_ERROR_INVALID_PARAM);
 
     memcpy(patch->matrix, matrix->matrix, sizeof(patch->matrix));
+    ngs_render_patch_volume(patch_handle, matrix->matrix);
+    NGS_TRACE("patch matrix %u: %f %f / %f %f\n", patch_handle, (double)matrix->matrix[0][0],
+              (double)matrix->matrix[0][1], (double)matrix->matrix[1][0],
+              (double)matrix->matrix[1][1]);
     NGS_LEAVE(0);
 }
 
@@ -1021,6 +1143,7 @@ EXPORT(SceNgs, 0xD7786E99, int32_t, sceNgsVoicePause, SceNgsHVoice voice_handle)
         NGS_LEAVE(SCE_NGS_ERROR_INVALID_HANDLE);
 
     voice->paused = 1;
+    ngs_render_voice_pause(voice_handle);
     NGS_LEAVE(0);
 }
 
@@ -1038,6 +1161,8 @@ EXPORT(SceNgs, 0xFA0A0F34, int32_t, sceNgsVoicePlay, SceNgsHVoice voice_handle)
     voice->playing = 1;
     voice->paused = 0;
     voice->keyed_off = 0;
+    ngs_render_voice_play(voice_handle);
+    NGS_TRACE("voice play %u\n", voice_handle);
     NGS_LEAVE(0);
 }
 
@@ -1052,6 +1177,7 @@ EXPORT(SceNgs, 0x54CFB981, int32_t, sceNgsVoiceResume, SceNgsHVoice voice_handle
         NGS_LEAVE(SCE_NGS_ERROR_INVALID_HANDLE);
 
     voice->paused = 0;
+    ngs_render_voice_resume(voice_handle);
     NGS_LEAVE(0);
 }
 
@@ -1066,8 +1192,12 @@ EXPORT(SceNgs, 0x17A6F564, int32_t, sceNgsVoiceSetFinishedCallback, SceNgsHVoice
     if (!voice)
         NGS_LEAVE(SCE_NGS_ERROR_INVALID_HANDLE);
 
-    voice->callback = (void *)callback;
-    voice->callback_user_data = user_data;
+    voice->finished_callback = (void *)callback;
+    voice->finished_user = user_data;
+    ngs_render_voice_callbacks(voice_handle, voice->module_callback, voice->module_callback_user,
+                               voice->finished_callback, voice->finished_user);
+    NGS_TRACE("voice set finished callback %u cb %p user %p\n", voice_handle, (void *)callback,
+              user_data);
     NGS_LEAVE(0);
 }
 
@@ -1082,9 +1212,12 @@ EXPORT(SceNgs, 0x24E909A8, int32_t, sceNgsVoiceSetModuleCallback, SceNgsHVoice v
     if (!voice)
         NGS_LEAVE(SCE_NGS_ERROR_INVALID_HANDLE);
 
-    (void)module;
-    voice->callback = (void *)callback;
-    voice->callback_user_data = user_data;
+    voice->module_callback = (void *)callback;
+    voice->module_callback_user = user_data;
+    ngs_render_voice_callbacks(voice_handle, voice->module_callback, voice->module_callback_user,
+                               voice->finished_callback, voice->finished_user);
+    NGS_TRACE("voice set module callback %u module %u cb %p user %p\n", voice_handle, module,
+              (void *)callback, user_data);
     NGS_LEAVE(0);
 }
 
@@ -1099,10 +1232,41 @@ EXPORT(SceNgs, 0xFB8174B1, int32_t, sceNgsVoiceSetParamsBlock, SceNgsHVoice voic
         NGS_LEAVE(SCE_NGS_ERROR_INVALID_PARAM);
 
     (void)param_data;
-    (void)size;
 
     if (error_count)
         *error_count = 0;
+
+    if (param_data && size) {
+        const uint8_t *cursor = (const uint8_t *)param_data;
+        const uint8_t *end = cursor + size;
+
+        while (cursor + sizeof(SceNgsModuleParamHeader) + sizeof(SceNgsParamsDescriptor) <= end) {
+            const SceNgsModuleParamHeader *header = (const SceNgsModuleParamHeader *)cursor;
+            const SceNgsParamsDescriptor *descriptor =
+                (const SceNgsParamsDescriptor *)(header + 1);
+
+            if (descriptor->size > (uint32_t)(end - cursor) || descriptor->size < sizeof(*descriptor))
+                break;
+            if (header->module_index == 0)
+                ngs_render_voice_params(voice_handle, 0, descriptor, descriptor->size);
+            cursor += sizeof(*header) + descriptor->size;
+        }
+    }
+
+    if (ngs_trace_enabled()) {
+        const SceNgsParamsDescriptor *descr =
+            param_data ? (const SceNgsParamsDescriptor *)(param_data + 1) : NULL;
+        const uint32_t *words = (const uint32_t *)descr;
+
+        fprintf(stderr,
+                "SceNgs: set params block voice %u size %u module %d channel %d descr 0x%x/%u\n",
+                voice_handle, size, param_data ? param_data->module_index : -1,
+                param_data ? param_data->channel_index : -1, descr ? (unsigned)descr->id : 0,
+                descr ? descr->size : 0);
+        if (descr && descr->size >= 32)
+            fprintf(stderr, "SceNgs:   params: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                    words[2], words[3], words[4], words[5], words[6], words[7], words[8], words[9]);
+    }
 
     NGS_LEAVE(0);
 }
@@ -1116,6 +1280,11 @@ EXPORT(SceNgs, 0x8A88E665, int32_t, sceNgsVoiceSetPreset, SceNgsHVoice voice_han
         NGS_LEAVE(SCE_NGS_ERROR_INVALID_HANDLE);
 
     (void)voice_preset;
+    NGS_TRACE("voice set preset %u preset %p data %d/%u bypass %d/%u\n", voice_handle,
+              (const void *)voice_preset, voice_preset ? voice_preset->preset_data_offset : -1,
+              voice_preset ? voice_preset->preset_data_size : 0,
+              voice_preset ? voice_preset->bypass_flags_offset : -1,
+              voice_preset ? voice_preset->bypass_flags_count : 0);
     NGS_LEAVE(0);
 }
 
@@ -1130,13 +1299,37 @@ EXPORT(SceNgs, 0x3D46D8A7, int32_t, sceNgsVoiceUnlockParams, SceNgsHVoice voice_
     if (!voice)
         NGS_LEAVE(SCE_NGS_ERROR_INVALID_HANDLE);
 
-    if (!voice->locked_params)
+    if (!voice->lock_active)
         NGS_LEAVE(SCE_NGS_ERROR_INVALID_STATE);
     if (voice->locked_module != module)
         NGS_LEAVE(SCE_NGS_ERROR_INVALID_PARAM);
 
-    free(voice->locked_params);
-    voice->locked_params = NULL;
+    if (ngs_trace_enabled()) {
+        const uint32_t *words = voice->locked_params;
+
+        NGS_TRACE("voice unlock params %u module %u\n", voice_handle, module);
+        if (words) {
+            for (int row = 0; row < 3; row++)
+                fprintf(stderr,
+                        "SceNgs:   %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                        words[row * 8 + 0], words[row * 8 + 1], words[row * 8 + 2],
+                        words[row * 8 + 3], words[row * 8 + 4], words[row * 8 + 5],
+                        words[row * 8 + 6], words[row * 8 + 7]);
+        }
+    }
+
+    if (!voice->params_shadow)
+        voice->params_shadow = calloc(1, NGS_LOCK_SIZE);
+    if (voice->params_shadow)
+        memcpy(voice->params_shadow, voice->locked_params, NGS_LOCK_SIZE);
+
+    if (module == 0 && voice->locked_params) {
+        const SceNgsParamsDescriptor *descriptor = voice->locked_params;
+
+        if (descriptor->size >= sizeof(*descriptor) && descriptor->size <= NGS_LOCK_SIZE)
+            ngs_render_voice_params(voice_handle, module, voice->locked_params, descriptor->size);
+    }
+    voice->lock_active = 0;
     NGS_LEAVE(0);
 }
 
