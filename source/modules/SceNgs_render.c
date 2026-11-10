@@ -19,6 +19,7 @@
 
 #include <assert.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -82,17 +83,22 @@ typedef struct {
     float playback_scalar;
     int32_t lead_in;
     int32_t limit;
+    int32_t start_bytes;
     int8_t channels;
     int8_t channel_map[2];
     int8_t type;
     int8_t res;
     int8_t start_buffer;
     int8_t padding[2];
-    int32_t reserved;
 } RPlayerParams;
 
 static_assert(sizeof(RAt9Params) == 96, "AT9 parameter layout");
 static_assert(sizeof(RPlayerParams) == 84, "player parameter layout");
+static_assert(offsetof(RPlayerParams, channels) == 76, "player channels offset");
+static_assert(offsetof(RPlayerParams, type) == 79, "player type offset");
+static_assert(offsetof(RPlayerParams, start_bytes) == 72, "player start_bytes offset");
+static_assert(offsetof(RAt9Params, channels) == 88, "AT9 channels offset");
+static_assert(offsetof(RAt9Params, config) == 92, "AT9 config offset");
 
 typedef struct {
     bool used;
@@ -471,6 +477,16 @@ void ngs_render_voice_play(uint32_t voice)
     v->at9_superframe_left = 0;
     v->player_buffer = 0;
     v->player_position = 0;
+    if ((v->buss == NGS_BUSS_SIMPLE || v->buss == NGS_BUSS_NORMAL_PLAYER) && v->params_valid &&
+        v->params[0] == 0xe6 && v->params[1] == 0x5c) {
+        RPlayerParams params;
+
+        memcpy(&params, v->params, sizeof(params));
+        if (params.start_buffer >= 0 && params.start_buffer < NGS_R_PLAYER_MAX_BUFFERS)
+            v->player_buffer = params.start_buffer;
+        if (params.start_bytes > 0)
+            v->player_position = (uint32_t)params.start_bytes;
+    }
     v->player_loop = 0;
     v->resample_position = 0.0;
     memset(v->adpcm, 0, sizeof(v->adpcm));
@@ -852,9 +868,11 @@ static bool player_step(RVoice *v)
 
         if (logged < 8) {
             fprintf(stderr,
-                    "SceNgs: player voice %u freq %.0f ch %d type %d bytes %d pos %u\n",
-                    (uint32_t)(v - g_voices), (double)params.playback_frequency, channels,
-                    params.type, buffer->bytes, v->player_position);
+                    "SceNgs: player %u freq %.0f scalar %.3f ch %d type %d "
+                    "start %d/%u bytes %d pos %u\n",
+                    (uint32_t)(v - g_voices), (double)params.playback_frequency,
+                    (double)params.playback_scalar, channels, params.type, params.start_buffer,
+                    (unsigned)params.start_bytes, buffer->bytes, v->player_position);
             logged++;
         }
     }
@@ -886,7 +904,9 @@ static bool player_step(RVoice *v)
             available = 64;
 
         if (channels == 1) {
-            for (uint32_t index = 0; index < available && samples + 28 <= 1024; index++) {
+            uint32_t index = 0;
+
+            while (index < available && samples + 28 <= 1024) {
                 float mono[28];
 
                 hevag_decode_frame(input + index * 16, v->adpcm[0], mono);
@@ -895,8 +915,9 @@ static bool player_step(RVoice *v)
                     frames[(samples + i) * 2 + 1] = mono[i];
                 }
                 samples += 28;
+                index++;
             }
-            v->player_position += available * 16u;
+            v->player_position += index * 16u;
         } else {
             uint32_t index = 0;
 
@@ -940,8 +961,10 @@ static bool voice_render(RVoice *v, float *out, uint32_t frames)
 
         if (v->params_valid && v->params[0] == 0xe6 && v->params[1] == 0x5c) {
             memcpy(&params, v->params, sizeof(params));
-            if (params.playback_frequency > 0.0f)
-                ratio = (double)params.playback_frequency / (double)g_sample_rate;
+            if (params.playback_frequency > 0.0f && params.playback_frequency <= 192000.0f &&
+                params.playback_scalar > 0.0f && params.playback_scalar <= 10.0f)
+                ratio = (double)params.playback_frequency * (double)params.playback_scalar /
+                        (double)g_sample_rate;
         }
     }
 
