@@ -148,9 +148,21 @@ uint32_t gxm_texture_base_bits(SceGxmTextureFormat format)
     case SCE_GXM_TEXTURE_BASE_FORMAT_UBC1:
     case SCE_GXM_TEXTURE_BASE_FORMAT_UBC4:
     case SCE_GXM_TEXTURE_BASE_FORMAT_SBC4:
+        return 4;
+
+    /* PVRTC is 2 or 4 bits per pixel, not the 4/16 the groups below imply. */
     case SCE_GXM_TEXTURE_BASE_FORMAT_PVRT2BPP:
     case SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII2BPP:
-        return 4;
+        return 2;
+
+    /* 16 bytes per 4x4 block: DXT3/DXT5/BC5 and PVRTC 4bpp. */
+    case SCE_GXM_TEXTURE_BASE_FORMAT_UBC2:
+    case SCE_GXM_TEXTURE_BASE_FORMAT_UBC3:
+    case SCE_GXM_TEXTURE_BASE_FORMAT_UBC5:
+    case SCE_GXM_TEXTURE_BASE_FORMAT_SBC5:
+    case SCE_GXM_TEXTURE_BASE_FORMAT_PVRT4BPP:
+    case SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII4BPP:
+        return 8;
 
     case SCE_GXM_TEXTURE_BASE_FORMAT_U4U4U4U4:
     case SCE_GXM_TEXTURE_BASE_FORMAT_U8U3U3U2:
@@ -163,8 +175,6 @@ uint32_t gxm_texture_base_bits(SceGxmTextureFormat format)
     case SCE_GXM_TEXTURE_BASE_FORMAT_S16:
     case SCE_GXM_TEXTURE_BASE_FORMAT_F16:
     case SCE_GXM_TEXTURE_BASE_FORMAT_YUV422:
-    case SCE_GXM_TEXTURE_BASE_FORMAT_PVRT4BPP:
-    case SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII4BPP:
         return 16;
 
     case SCE_GXM_TEXTURE_BASE_FORMAT_U8U8U8:
@@ -191,12 +201,6 @@ uint32_t gxm_texture_base_bits(SceGxmTextureFormat format)
     case SCE_GXM_TEXTURE_BASE_FORMAT_YUV420P2:
     case SCE_GXM_TEXTURE_BASE_FORMAT_YUV420P3:
         return 12;
-
-    case SCE_GXM_TEXTURE_BASE_FORMAT_UBC2:
-    case SCE_GXM_TEXTURE_BASE_FORMAT_UBC3:
-    case SCE_GXM_TEXTURE_BASE_FORMAT_UBC5:
-    case SCE_GXM_TEXTURE_BASE_FORMAT_SBC5:
-        return 32;
 
     case SCE_GXM_TEXTURE_BASE_FORMAT_F16F16F16F16:
     case SCE_GXM_TEXTURE_BASE_FORMAT_U16U16U16U16:
