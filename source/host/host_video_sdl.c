@@ -630,16 +630,12 @@ static unsigned int keyboard_button_mask(const unsigned char *keys, int numkeys)
     return mask;
 }
 
-static uint8_t sdl_axis_to_vita(int value, bool invert)
+static uint8_t sdl_axis_to_vita(int value)
 {
     int converted;
 
     /* SDL sticks are -32768..32767 with negative = up/left; Vita axes are
-       0..255 with 255 = up/left. Invert before scaling so the centre stays
-       exactly 128 instead of 127. */
-    if (invert)
-        value = -value;
-
+       0..255 with 0 = up/left and 128 = center. */
     converted = (int)(((long long)(value + 32768) * 255 + 32767) / 65535);
     if (converted < 0)
         converted = 0;
@@ -802,7 +798,7 @@ static void video_sample_input(HostVideo *video)
                 if (x)
                     lx = x > 0 ? 255 : 0;
                 if (y)
-                    ly = y > 0 ? 255 : 0;
+                    ly = y > 0 ? 0 : 255;
             }
         }
     }
@@ -845,13 +841,13 @@ static void video_sample_input(HostVideo *video)
             buttons |= SCE_CTRL_R2;
 
         lx = sdl_axis_to_vita(
-            api->game_controller_get_axis(video->controller, SDL_CONTROLLER_AXIS_LEFTX), false);
+            api->game_controller_get_axis(video->controller, SDL_CONTROLLER_AXIS_LEFTX));
         ly = sdl_axis_to_vita(
-            api->game_controller_get_axis(video->controller, SDL_CONTROLLER_AXIS_LEFTY), true);
+            api->game_controller_get_axis(video->controller, SDL_CONTROLLER_AXIS_LEFTY));
         rx = sdl_axis_to_vita(
-            api->game_controller_get_axis(video->controller, SDL_CONTROLLER_AXIS_RIGHTX), false);
+            api->game_controller_get_axis(video->controller, SDL_CONTROLLER_AXIS_RIGHTX));
         ry = sdl_axis_to_vita(
-            api->game_controller_get_axis(video->controller, SDL_CONTROLLER_AXIS_RIGHTY), true);
+            api->game_controller_get_axis(video->controller, SDL_CONTROLLER_AXIS_RIGHTY));
     } else if (video->joystick && api->joystick_get_button && api->joystick_get_axis) {
         active = true;
         for (int button = 0; button <= 13; button++) {
@@ -860,10 +856,10 @@ static void video_sample_input(HostVideo *video)
         }
         /* Linux gamepad axes are X, Y, RX, RY in this order. Triggers are
            buttons on generic pads, so they need no axis handling here. */
-        lx = sdl_axis_to_vita(api->joystick_get_axis(video->joystick, 0), false);
-        ly = sdl_axis_to_vita(api->joystick_get_axis(video->joystick, 1), true);
-        rx = sdl_axis_to_vita(api->joystick_get_axis(video->joystick, 2), false);
-        ry = sdl_axis_to_vita(api->joystick_get_axis(video->joystick, 3), true);
+        lx = sdl_axis_to_vita(api->joystick_get_axis(video->joystick, 0));
+        ly = sdl_axis_to_vita(api->joystick_get_axis(video->joystick, 1));
+        rx = sdl_axis_to_vita(api->joystick_get_axis(video->joystick, 2));
+        ry = sdl_axis_to_vita(api->joystick_get_axis(video->joystick, 3));
     }
 
     pthread_mutex_lock(&video->lock);

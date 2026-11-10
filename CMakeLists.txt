@@ -307,6 +307,7 @@ if(BUILD_TESTING)
     add_executable(ctrl_script_smoke
         tests/ctrl_script_smoke.c
         source/modules/SceCtrl_null.c
+        source/modules/SceCtrl_common.c
         source/modules/SceCtrl_script.c
         source/host/host_video_sdl.c
     )

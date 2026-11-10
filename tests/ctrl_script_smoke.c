@@ -54,7 +54,11 @@ static int expect(unsigned int frame, unsigned int buttons)
 
 int main(void)
 {
-    if (setenv("VITA2NATIVE_CTRL_SCRIPT", "0:down,2:,3:cross+start,5:r1,7:", 1) != 0) {
+    SceCtrlData pad;
+    SceCtrlPadInputMode mode;
+
+    if (setenv("VITA2NATIVE_CTRL_SCRIPT", "0:down,2:,3:cross+start,5:r1,7:,22:cross+start,24:",
+               1) != 0) {
         fprintf(stderr, "setenv failed\n");
         return 1;
     }
@@ -63,6 +67,35 @@ int main(void)
         expect(2, 0) != 0 || expect(4, SCE_CTRL_CROSS | SCE_CTRL_START) != 0 ||
         expect(6, SCE_CTRL_R1) != 0 || expect(7, 0) != 0 || expect(20, 0) != 0)
         return 1;
+
+    if (sceCtrlPeekBufferPositive(2, &pad, 1) != SCE_CTRL_ERROR_NO_DEVICE) {
+        fprintf(stderr, "port 2 did not report NO_DEVICE\n");
+        return 1;
+    }
+
+    g_frame = 22;
+    if (sceCtrlPeekBufferNegative(0, &pad, 1) < 0) {
+        fprintf(stderr, "negative peek failed\n");
+        return 1;
+    }
+    if (pad.buttons != ~(SCE_CTRL_CROSS | SCE_CTRL_START)) {
+        fprintf(stderr, "negative buttons 0x%08x, expected 0x%08x\n", pad.buttons,
+                ~(SCE_CTRL_CROSS | SCE_CTRL_START));
+        return 1;
+    }
+
+    if (sceCtrlGetSamplingMode(&mode) != 0 || mode != SCE_CTRL_MODE_DIGITAL) {
+        fprintf(stderr, "default sampling mode %d\n", mode);
+        return 1;
+    }
+    if (sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG) != SCE_CTRL_MODE_DIGITAL) {
+        fprintf(stderr, "set sampling mode did not return the old mode\n");
+        return 1;
+    }
+    if (sceCtrlSetSamplingMode((SceCtrlPadInputMode)99) != SCE_CTRL_ERROR_INVALID_ARG) {
+        fprintf(stderr, "invalid sampling mode was accepted\n");
+        return 1;
+    }
 
     printf("ctrl_script_smoke: ok\n");
     return 0;

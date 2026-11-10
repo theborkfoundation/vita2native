@@ -171,7 +171,7 @@ static unsigned int key_to_button(unsigned int code)
     }
 }
 
-static uint8_t axis_to_vita(int value, const struct input_absinfo *range, bool invert)
+static uint8_t axis_to_vita(int value, const struct input_absinfo *range)
 {
     int span = range->maximum - range->minimum;
     int converted;
@@ -184,8 +184,6 @@ static uint8_t axis_to_vita(int value, const struct input_absinfo *range, bool i
         value = range->maximum;
 
     converted = (int)(((long long)(value - range->minimum) * 255 + span / 2) / span);
-    if (invert)
-        converted = 255 - converted;
 
     return (uint8_t)converted;
 }
@@ -195,16 +193,16 @@ static void update_axis(unsigned int code, const struct input_absinfo *range, in
     pthread_mutex_lock(&g_lock);
     switch (code) {
     case ABS_X:
-        g_lx = axis_to_vita(value, range, false);
+        g_lx = axis_to_vita(value, range);
         break;
     case ABS_Y:
-        g_ly = axis_to_vita(value, range, true);
+        g_ly = axis_to_vita(value, range);
         break;
     case ABS_RX:
-        g_rx = axis_to_vita(value, range, false);
+        g_rx = axis_to_vita(value, range);
         break;
     case ABS_RY:
-        g_ry = axis_to_vita(value, range, true);
+        g_ry = axis_to_vita(value, range);
         break;
     default:
         break;
@@ -330,7 +328,8 @@ EXPORT(SceCtrl, 0xA9C3CED6, int, sceCtrlPeekBufferPositive, int port, SceCtrlDat
     unsigned int script_buttons;
     SceCtrlData sample;
 
-    (void)port;
+    if (port < 0 || port > 1)
+        return SCE_CTRL_ERROR_NO_DEVICE;
 
     if (!pad_data || count <= 0)
         return -1;

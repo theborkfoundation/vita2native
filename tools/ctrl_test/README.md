@@ -99,7 +99,8 @@ vita2native: SDL mapping ...GO-Super Gamepad,a:b0,b:b1,x:b2,y:b3,...
 | Triangle | `0x1000` | Circle | `0x2000` |
 | Cross | `0x4000` | Square | `0x8000` |
 
-Sticks report `0..255`, with `128` centered. Stick clicks report `L3`/`R3`
+Sticks report `0..255`, with `128` centered; `0` is up/left and `255` is
+down/right. Stick clicks report `L3`/`R3`
 (`0x0002`/`0x0004`) and highlight the ring around the corresponding stick. The
 R36S `Fn` key (`BTN_TRIGGER_HAPPY5`) is intentionally ignored; it is a firmware
 hotkey modifier, not a Vita button.

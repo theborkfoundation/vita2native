@@ -18,7 +18,7 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool g_initialized;
 static bool g_input_debug;
 
-static uint8_t axis_to_vita(int value, bool invert)
+static uint8_t axis_to_vita(int value)
 {
     int converted;
 
@@ -28,8 +28,6 @@ static uint8_t axis_to_vita(int value, bool invert)
         value = 32767;
 
     converted = (value + 32768) >> 8;
-    if (invert)
-        converted = 255 - converted;
 
     return (uint8_t)converted;
 }
@@ -135,7 +133,8 @@ EXPORT(SceCtrl, 0xA9C3CED6, int, sceCtrlPeekBufferPositive, int port, SceCtrlDat
     uint8_t lx = 128, ly = 128, rx = 128, ry = 128;
     SceCtrlData sample;
 
-    (void)port;
+    if (port < 0 || port > 1)
+        return SCE_CTRL_ERROR_NO_DEVICE;
 
     if (!pad_data || count <= 0)
         return -1;
@@ -161,10 +160,10 @@ EXPORT(SceCtrl, 0xA9C3CED6, int, sceCtrlPeekBufferPositive, int port, SceCtrlDat
 
     if (g_controller) {
         buttons |= controller_buttons(g_controller);
-        lx = axis_to_vita(SDL_GameControllerGetAxis(g_controller, SDL_CONTROLLER_AXIS_LEFTX), false);
-        ly = axis_to_vita(SDL_GameControllerGetAxis(g_controller, SDL_CONTROLLER_AXIS_LEFTY), true);
-        rx = axis_to_vita(SDL_GameControllerGetAxis(g_controller, SDL_CONTROLLER_AXIS_RIGHTX), false);
-        ry = axis_to_vita(SDL_GameControllerGetAxis(g_controller, SDL_CONTROLLER_AXIS_RIGHTY), true);
+        lx = axis_to_vita(SDL_GameControllerGetAxis(g_controller, SDL_CONTROLLER_AXIS_LEFTX));
+        ly = axis_to_vita(SDL_GameControllerGetAxis(g_controller, SDL_CONTROLLER_AXIS_LEFTY));
+        rx = axis_to_vita(SDL_GameControllerGetAxis(g_controller, SDL_CONTROLLER_AXIS_RIGHTX));
+        ry = axis_to_vita(SDL_GameControllerGetAxis(g_controller, SDL_CONTROLLER_AXIS_RIGHTY));
     }
 
     sample.buttons = buttons;

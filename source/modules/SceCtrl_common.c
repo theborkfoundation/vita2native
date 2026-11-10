@@ -19,22 +19,32 @@ static SceCtrlPadInputMode g_sampling_mode_ext = SCE_CTRL_MODE_DIGITAL;
 
 EXPORT(SceCtrl, 0xA497B150, int, sceCtrlSetSamplingMode, SceCtrlPadInputMode mode)
 {
+    SceCtrlPadInputMode old = g_sampling_mode;
+
+    if (mode < SCE_CTRL_MODE_DIGITAL || mode > SCE_CTRL_MODE_ANALOG_WIDE)
+        return SCE_CTRL_ERROR_INVALID_ARG;
+
     g_sampling_mode = mode;
 
-    return 0;
+    return old;
 }
 
 EXPORT(SceCtrl, 0xB1DC4378, int, sceCtrlSetSamplingModeExt, SceCtrlPadInputMode mode)
 {
+    SceCtrlPadInputMode old = g_sampling_mode_ext;
+
+    if (mode < SCE_CTRL_MODE_DIGITAL || mode > SCE_CTRL_MODE_ANALOG_WIDE)
+        return SCE_CTRL_ERROR_INVALID_ARG;
+
     g_sampling_mode_ext = mode;
 
-    return 0;
+    return old;
 }
 
 EXPORT(SceCtrl, 0xEC752AAF, int, sceCtrlGetSamplingMode, SceCtrlPadInputMode *mode)
 {
     if (!mode)
-        return -1;
+        return SCE_CTRL_ERROR_INVALID_ARG;
 
     *mode = g_sampling_mode;
 
@@ -44,7 +54,7 @@ EXPORT(SceCtrl, 0xEC752AAF, int, sceCtrlGetSamplingMode, SceCtrlPadInputMode *mo
 EXPORT(SceCtrl, 0xBD27F830, int, sceCtrlGetSamplingModeExt, SceCtrlPadInputMode *mode)
 {
     if (!mode)
-        return -1;
+        return SCE_CTRL_ERROR_INVALID_ARG;
 
     *mode = g_sampling_mode_ext;
 
@@ -213,8 +223,15 @@ EXPORT(SceCtrl, 0xE2D99296, int, sceCtrlReadBufferPositiveExt, int port, SceCtrl
 EXPORT(SceCtrl, 0x104ED1A7, int, sceCtrlPeekBufferNegative, int port, SceCtrlData *pad_data,
        int count)
 {
-    /* Negative buffers report released inputs; the pad backend has none. */
-    return sceCtrlPeekBufferPositive(port, pad_data, count);
+    /* Negative buffers report released inputs, i.e. the inverted button mask. */
+    int ret = sceCtrlPeekBufferPositive(port, pad_data, count);
+
+    if (ret > 0 && pad_data) {
+        for (int i = 0; i < ret; i++)
+            pad_data[i].buttons = ~pad_data[i].buttons;
+    }
+
+    return ret;
 }
 
 EXPORT(SceCtrl, 0x15F96FB0, int, sceCtrlReadBufferNegative, int port, SceCtrlData *pad_data,

@@ -241,7 +241,7 @@ static void draw_stick(int cx, int cy, int radius, int axis_x, int axis_y, int p
                        const char *label)
 {
     int px = cx + ((axis_x - 128) * (radius - 12)) / 128;
-    int py = cy - ((axis_y - 128) * (radius - 12)) / 128;
+    int py = cy + ((axis_y - 128) * (radius - 12)) / 128;
 
     fill_circle(cx, cy, radius, rgb(30, 38, 48));
     circle_outline(cx, cy, radius, 2, pressed ? COL_BORDER_DOWN : COL_BORDER);
@@ -339,7 +339,7 @@ void module_start(void)
     guest_printf("            L3=0x0002 R3=0x0004\n");
     guest_printf("            L2=0x0100 R2=0x0200 L1=0x0400 R1=0x0800 TRI=0x1000 "
                  "CIR=0x2000 CRO=0x4000 SQR=0x8000\n");
-    guest_printf("sticks: 0..255, 128 = centered\n");
+    guest_printf("sticks: 0..255, 128 = centered, 0 = up/left\n");
     guest_printf("starting display so the host SDL thread samples its input source too\n");
 
     g_fb.size = sizeof(g_fb);
