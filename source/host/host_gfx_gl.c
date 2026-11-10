@@ -18,6 +18,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "display.h"
 #include "frame_profile.h"
 #include "host_gfx_gl.h"
 #include "host_gfx_internal.h"
@@ -175,22 +176,7 @@ static void *open_egl(const char *const *names)
 /* True when presentation should go straight to KMS instead of an X11 window. */
 static bool gles_kms_requested(void)
 {
-    static int cached = -1;
-    const char *driver;
-
-    if (cached >= 0)
-        return cached != 0;
-
-    cached = 0;
-    if (getenv("VITA2NATIVE_DIRECT_PRESENT")) {
-        driver = getenv("SDL_VIDEODRIVER");
-        if (getenv("VITA2NATIVE_KMS_PRESENT") || (driver && strstr(driver, "kmsdrm")))
-            cached = 1;
-        else if (!getenv("DISPLAY") && !getenv("WAYLAND_DISPLAY"))
-            cached = 1;
-    }
-
-    return cached != 0;
+    return host_display_uses_kms();
 }
 
 #define LOAD_GL(g, type, name)                                                                     \

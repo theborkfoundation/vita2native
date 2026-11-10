@@ -11,6 +11,7 @@
 
 #define MAX_GUEST_LIBRARIES 64
 #define MAX_GUEST_DEPENDENTS 32
+#define SCE_LIBC_NID 0xbe43bb07u
 
 typedef struct {
     bool used;
@@ -114,15 +115,13 @@ void module_unregister_guest_libraries(void *owner)
 }
 
 /*
- * The host mspace shim backs every session with the host heap and ignores the
- * region the guest reserved. Titles that mix the imported mspace calls with
- * their own statically linked dlmalloc (Unity does) then hand host pointers to
- * a foreign allocator, so allow handing the whole family to the guest module.
+ * The host mspace wrappers and a title's own dlmalloc can disagree about chunk
+ * metadata (Unity links its own copy). Prefer the guest libc's implementation
+ * when the title ships one; until the module is loaded, and for titles without
+ * it, the host dlmalloc-backed wrappers are the fallback.
  */
-static bool skip_host_mspace(uint32_t func_nid)
+static bool is_mspace_func(uint32_t func_nid)
 {
-    static int enabled = -1;
-
     static const uint32_t nids[] = {
         0xcef7c575, /* mspace_create */
         0x30cbbc66, /* mspace_destroy */
@@ -134,11 +133,6 @@ static bool skip_host_mspace(uint32_t func_nid)
         0x7ad7a737, /* mspace_malloc_usable_size */
         0xf355f381, /* mspace_is_heap_empty */
     };
-
-    if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_NO_HOST_MSPACE") != NULL;
-    if (!enabled)
-        return false;
 
     for (size_t i = 0; i < ARRAY_SIZE(nids); i++) {
         if (nids[i] == func_nid)
@@ -155,7 +149,7 @@ static int prefer_guest_exports(uint32_t lib_nid)
     if (enabled < 0)
         enabled = getenv("VITA2NATIVE_PREFER_GUEST_EXPORTS") != NULL;
     if (enabled)
-        return lib_nid != 0xbe43bb07;
+        return lib_nid != SCE_LIBC_NID;
 
     /* SceLibc stays on the host: Sony's libc module_start expects a real
        Vita kernel and aborts before publishing anything usable here. For Fios
@@ -220,11 +214,15 @@ const void *module_get_func_export(uint32_t lib_nid, uint32_t func_nid, void *im
             return result;
     }
 
-    if (!skip_host_mspace(func_nid)) {
-        result = host_func_export(lib_nid, func_nid);
+    if (lib_nid == SCE_LIBC_NID && is_mspace_func(func_nid)) {
+        result = guest_func_export(lib_nid, func_nid, importer);
         if (result)
             return result;
     }
+
+    result = host_func_export(lib_nid, func_nid);
+    if (result)
+        return result;
 
     if (!prefer_guest_exports(lib_nid))
         return guest_func_export(lib_nid, func_nid, importer);

@@ -75,6 +75,15 @@ Vita device paths are remapped below `vita2native/`:
 | `savedata0:/...` | `vita2native/savedata/...` |
 | `os0:`, `vs0:` | `vita2native/system/...` |
 
+On KMS/DRM targets set `SDL_VIDEODRIVER=kmsdrm`; presentation then attaches EGL
+directly to the scanout plane, with no extra flag. On X11/Wayland the SDL
+renderer presents the frame instead.
+
+`SceNetCtl` reports the console offline by default so titles take their offline
+fallback. Set `VITA2NATIVE_NETWORK=1` to report the host's real network state.
+Guest `mspace_*` imports automatically prefer the title's own `libc.suprx` when
+it exports them, falling back to the host implementation otherwise.
+
 ## Current status
 
 CPU-rendered homebrew runs: ELF loading, relocations, import patching, threads,

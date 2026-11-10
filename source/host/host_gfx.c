@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "display.h"
 #include "host_gfx_internal.h"
 
 struct HostGpuMemBlock {
@@ -31,7 +32,7 @@ HostGpuDevice host_gpu_create(const HostGpuConfig *config)
      * Panfrost, and a caller-supplied PAN_MESA_DEBUG wins. Direct presentation
      * removes the readback, so it keeps the faster tiled layout.
      */
-    if (!getenv("VITA2NATIVE_DIRECT_PRESENT") && !getenv("PAN_MESA_DEBUG"))
+    if (!host_display_uses_kms() && !getenv("PAN_MESA_DEBUG"))
         setenv("PAN_MESA_DEBUG", "linear", 0);
 
     device = host_gfx_gl_create(config);

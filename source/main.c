@@ -8,6 +8,11 @@
 #include <sys/stat.h>
 #include <time.h>
 
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
+#include "display.h"
 #include "fs.h"
 #include "gfx.h"
 #include "host.h"
@@ -941,6 +946,12 @@ int main(int argc, char *argv[])
     LoadedModuleInfo main_info;
     int ret;
 
+#if defined(__GLIBC__)
+    /* Keep the 32-bit address space and RSS in check on handhelds. This used
+       to be a launcher setting (MALLOC_ARENA_MAX=2). */
+    mallopt(M_ARENA_MAX, 2);
+#endif
+
     if (argc > 1) {
         for (int i = 1; i < argc; i++) {
             if (strcmp(argv[i], "--headless") == 0)
@@ -952,11 +963,13 @@ int main(int argc, char *argv[])
 
 #if defined(VITA2NATIVE_HEADLESS_BUILD)
     /* The display backend presents through SDL, so the GLES context is always
-       offscreen. Direct GPU presentation is the exception: it needs a
-       window-capable EGL display for the SDL window. */
-    g_headless = getenv("VITA2NATIVE_DIRECT_PRESENT") == NULL;
+       offscreen. Direct GPU presentation is the exception: a KMS target needs
+       a window-capable EGL display for the scanout surface. */
+    if (!g_headless)
+        g_headless = !host_display_uses_kms();
 #else
-    if (!g_headless && !getenv("DISPLAY") && !getenv("WAYLAND_DISPLAY"))
+    if (!g_headless && !host_display_uses_kms() && !getenv("DISPLAY") &&
+        !getenv("WAYLAND_DISPLAY"))
         g_headless = true;
 #endif
 

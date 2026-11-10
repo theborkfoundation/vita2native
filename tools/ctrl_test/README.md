@@ -53,7 +53,6 @@ ssh -t opiz3
 cd /tmp/v2n-run
 env DISPLAY=:1 SDL_VIDEODRIVER=x11 SDL_RENDER_DRIVER=software \
     VITA2NATIVE_SDL_WINDOWED=1 VITA2NATIVE_SDL_SIZE=960x544 \
-    VITA2NATIVE_NO_HOST_MSPACE=1 VITA2NATIVE_NO_NETWORK=1 \
     LD_LIBRARY_PATH=/usr/lib/arm-linux-gnueabihf \
     setarch armv7l -R ./v2n-arm ./ctrl_test.elf
 ```
@@ -72,7 +71,6 @@ ssh -t r36s
 cd /home/ark/v2n-run
 sudo pkill -9 -x uinput_pad
 env MALLOC_ARENA_MAX=2 SDL_VIDEODRIVER=dummy \
-    VITA2NATIVE_NO_HOST_MSPACE=1 VITA2NATIVE_NO_NETWORK=1 \
     VITA2NATIVE_INPUT_DEBUG=1 \
     LD_LIBRARY_PATH=/usr/lib/arm-linux-gnueabihf \
     setarch armv7l -R ./v2n-arm ./ctrl_test.elf

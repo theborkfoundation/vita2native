@@ -23,6 +23,7 @@
 #include <time.h>
 
 #include "config.h"
+#include "display.h"
 #include "frame_profile.h"
 #include "fs.h"
 #include "gfx.h"
@@ -5611,11 +5612,7 @@ static int gxm_skip_readback(void)
 
 static int gxm_direct_present_enabled(void)
 {
-    static int enabled = -1;
-
-    if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_DIRECT_PRESENT") != NULL;
-    return enabled;
+    return host_display_uses_kms();
 }
 
 /* Lets the same-thread present overlap be disabled for A/B comparisons. */
