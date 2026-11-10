@@ -19,6 +19,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <psp2/types.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -26,6 +27,7 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "fs.h"
 #include "host_psarc.h"
@@ -396,6 +398,31 @@ EXPORT(SceLibc, 0x5b9bb802, void, vita_free, void *block)
     if (trace_alloc())
         LOG("free(%p)", block);
 
+    free(block);
+}
+
+/*
+ * C++ allocation operators. Native C++ titles import these from SceLibstdcxx;
+ * leaving them unresolved makes every `new` return NULL. Pair them with the
+ * same host allocator as malloc/free.
+ */
+EXPORT(SceLibstdcxx, 0xf99ed5ac, void *, _Znwj, size_t size)
+{
+    return malloc(size ? size : 1);
+}
+
+EXPORT(SceLibstdcxx, 0xe7fb2bf4, void *, _Znaj, size_t size)
+{
+    return malloc(size ? size : 1);
+}
+
+EXPORT(SceLibstdcxx, 0x72293931, void, _ZdlPv, void *block)
+{
+    free(block);
+}
+
+EXPORT(SceLibstdcxx, 0x91b0dc47, void, _ZdaPv, void *block)
+{
     free(block);
 }
 
@@ -1026,6 +1053,21 @@ EXPORT(SceLibc, 0xa7cbe4a6, void, vita_qsort, void *base, size_t count, size_t s
 EXPORT(SceLibc, 0x826bbbaf, void, vita_exit, int status)
 {
     exit(status);
+}
+
+EXPORT(SceLibc, 0xc082ca03, clock_t, vita_clock, void)
+{
+    return clock();
+}
+
+EXPORT(SceLibc, 0x20fe0fff, void, vita_abort, void)
+{
+    LOG("abort() called");
+    fflush(NULL);
+
+    /* Let the crash handler print the guest stack and produce a core. */
+    raise(SIGABRT);
+    _exit(128 + SIGABRT);
 }
 
 /* ------------------------------------------------------------------------- */
