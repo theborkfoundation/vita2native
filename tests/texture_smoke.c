@@ -243,6 +243,73 @@ static void test_swizzled_tiles(void)
     check_swizzled_tiles(64, 64);
 }
 
+/* The native path must produce exactly the RGBA8 nibbles packed into
+   GL_UNSIGNED_SHORT_4_4_4_4 order (R in bits 12-15). */
+static void test_rgba4_native(void)
+{
+    enum { W = 64, H = 32 };
+    uint16_t data[W * H];
+    uint8_t rgba8[W * H * 4];
+    uint16_t rgba4[W * H];
+    SceGxmTextureInner texture;
+    uint32_t minimum = 32;
+    uint32_t k = 5;
+
+    for (uint32_t y = 0; y < H; y++) {
+        for (uint32_t x = 0; x < W; x++) {
+            uint32_t r = (x + 1) & 0xf;
+            uint32_t g = (y + 2) & 0xf;
+            uint32_t b = (x + y + 3) & 0xf;
+            uint32_t a = (x * 3 + y + 4) & 0xf;
+
+            data[encode_morton(x, y, minimum, k)] =
+                (uint16_t)((a << 12) | (b << 8) | (g << 4) | r);
+        }
+    }
+
+    init_texture(&texture, data, SCE_GXM_TEXTURE_FORMAT_U4U4U4U4_ABGR, W, H, 1,
+                 SCE_GXM_TEXTURE_SWIZZLED);
+    assert(gxm_texture_can_decode_rgba4(&texture));
+    assert(gxm_texture_decode_level_at(rgba8, &texture, data, 0, 0) == 0);
+    assert(gxm_texture_decode_level_rgba4(rgba4, &texture, 0, 0) == 0);
+
+    for (uint32_t i = 0; i < W * H; i++) {
+        uint16_t expected = (uint16_t)(((rgba8[i * 4 + 0] / 17u) << 12) |
+                                       ((rgba8[i * 4 + 1] / 17u) << 8) |
+                                       ((rgba8[i * 4 + 2] / 17u) << 4) |
+                                       (rgba8[i * 4 + 3] / 17u));
+
+        assert(rgba4[i] == expected);
+    }
+
+    /* 4x1 linear: [A B G R] -> RGBA4 words. */
+    {
+        static const uint16_t words[4] = { 0x1234, 0x5678, 0x9abc, 0xdef0 };
+        uint16_t decoded[4];
+
+        assert(gxm_texture_decode_rgba4(decoded, words, 4, 1,
+                                        SCE_GXM_TEXTURE_FORMAT_U4U4U4U4_ABGR,
+                                        SCE_GXM_TEXTURE_LINEAR) == 0);
+        assert(decoded[0] == 0x4321);
+        assert(decoded[1] == 0x8765);
+        assert(decoded[2] == 0xcba9);
+        assert(decoded[3] == 0x0fed);
+    }
+
+    /* Only U4U4U4U4 on the RGBA8 gamma path is excluded. */
+    {
+        SceGxmTextureInner other;
+
+        init_texture(&other, data, SCE_GXM_TEXTURE_FORMAT_U8_R, 1, 1, 1, SCE_GXM_TEXTURE_LINEAR);
+        assert(!gxm_texture_can_decode_rgba4(&other));
+
+        init_texture(&other, data, SCE_GXM_TEXTURE_FORMAT_U4U4U4U4_ABGR, 1, 1, 1,
+                     SCE_GXM_TEXTURE_LINEAR);
+        other.gamma_mode = 1;
+        assert(!gxm_texture_can_decode_rgba4(&other));
+    }
+}
+
 static void test_linear_strided(void)
 {
     uint8_t data[2 * 8];
@@ -506,6 +573,36 @@ static void bench_decode(SceGxmTextureFormat format, SceGxmTextureType type, con
     free(data);
 }
 
+static void bench_decode_rgba4(SceGxmTextureFormat format, SceGxmTextureType type,
+                               const char *name)
+{
+    enum { W = 2048, H = 2048 };
+    uint8_t *data = malloc((size_t)W * H * 4);
+    uint16_t *decoded = malloc((size_t)W * H * 2);
+    uint64_t started;
+    uint64_t elapsed;
+
+    if (!data || !decoded) {
+        fprintf(stderr, "bench: out of memory\n");
+        exit(1);
+    }
+
+    for (size_t i = 0; i < (size_t)W * H * 4; i++)
+        data[i] = (uint8_t)((i * 2654435761u) >> 16);
+
+    for (int pass = 0; pass < 2; pass++) {
+        started = bench_now_ns();
+        assert(gxm_texture_decode_rgba4(decoded, data, W, H, format, type) == 0);
+        elapsed = bench_now_ns() - started;
+        printf("bench %s pass %d: %.1f ms (%.1f ns/pixel)\n", name, pass,
+               (double)elapsed / 1e6, (double)elapsed / (W * H));
+        fflush(stdout);
+    }
+
+    free(decoded);
+    free(data);
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && strcmp(argv[1], "--bench") == 0) {
@@ -514,6 +611,12 @@ int main(int argc, char **argv)
                      "u4 linear");
         bench_decode(SCE_GXM_TEXTURE_FORMAT_U4U4U4U4_ABGR, SCE_GXM_TEXTURE_SWIZZLED,
                      "u4 swizzled");
+        bench_decode_rgba4(SCE_GXM_TEXTURE_FORMAT_U4U4U4U4_ABGR, SCE_GXM_TEXTURE_LINEAR,
+                           "u4 linear rgba4");
+        bench_decode_rgba4(SCE_GXM_TEXTURE_FORMAT_U4U4U4U4_ABGR, SCE_GXM_TEXTURE_SWIZZLED,
+                           "u4 swizzled rgba4 abgr");
+        bench_decode_rgba4(SCE_GXM_TEXTURE_FORMAT_U4U4U4U4_RGBA, SCE_GXM_TEXTURE_SWIZZLED,
+                           "u4 swizzled rgba4 rgba");
         bench_decode(SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, SCE_GXM_TEXTURE_SWIZZLED,
                      "u8 swizzled");
         return 0;
@@ -523,6 +626,7 @@ int main(int argc, char **argv)
     test_packed();
     test_swizzled_mips();
     test_swizzled_tiles();
+    test_rgba4_native();
     test_linear_strided();
     test_palette();
     test_tiled();

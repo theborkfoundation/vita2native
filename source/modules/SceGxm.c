@@ -1747,9 +1747,9 @@ static uint64_t gxm_texture_cache_budget(void)
 }
 
 static uint64_t gxm_texture_estimate_bytes(uint32_t width, uint32_t height, uint32_t mip_count,
-                                           bool cube)
+                                           bool cube, uint32_t texel_bytes)
 {
-    uint64_t bytes = (uint64_t)width * height * 4u;
+    uint64_t bytes = (uint64_t)width * height * texel_bytes;
 
     if (mip_count > 1)
         bytes += bytes / 3u;
@@ -1915,9 +1915,11 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
         mip_count = 1;
     GxmTextureCache *cache;
     uint8_t *rgba = NULL;
+    uint16_t *rgba4 = NULL;
     float *f32 = NULL;
     bool float_upload;
     bool depth_texture;
+    bool rgba4_upload;
     uint64_t started;
     uint64_t decode_ns = 0;
     uint64_t upload_ns = 0;
@@ -2018,13 +2020,42 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
         return true;
     }
 
+    /* RGBA4444 textures are uploaded at half the size by writing GL_RGBA4
+       words directly. Panfrost (and software renderers) implement that upload
+       path by expanding every texel on the CPU, which is eight times slower
+       than the RGBA8 upload, so keep them on the old path. The Mali vendor
+       blob has a native RGBA4 path and cuts the upload of a 2048x2048 atlas
+       from ~79 ms to ~49 ms. The texture dump diagnostics need RGBA8 pixels,
+       so they also disable the native path. */
+    rgba4_upload = gxm_texture_can_decode_rgba4(texture);
+    if (rgba4_upload) {
+        static int enabled = -1;
+
+        if (enabled < 0) {
+            const char *renderer = host_gpu_description(host_gpu_current());
+
+            if (getenv("VITA2NATIVE_RGBA4"))
+                enabled = 1;
+            else if (getenv("VITA2NATIVE_NO_RGBA4") ||
+                     getenv("VITA2NATIVE_DUMP_TEXTURES") ||
+                     getenv("VITA2NATIVE_DUMP_TEXTURE_MIPS"))
+                enabled = 0;
+            else
+                enabled = strstr(renderer, "Panfrost") == NULL &&
+                          strstr(renderer, "llvmpipe") == NULL &&
+                          strstr(renderer, "softpipe") == NULL;
+        }
+        if (!enabled)
+            rgba4_upload = false;
+    }
+
     if (cache) {
         /* Same key, different content: re-upload into the same slot. */
         gxm_texture_cache_evict(cache);
         cache->target = target;
     } else {
-        cache = gxm_texture_cache_alloc(
-            gxm_texture_estimate_bytes(width, height, mip_count, cube));
+        cache = gxm_texture_cache_alloc(gxm_texture_estimate_bytes(
+            width, height, mip_count, cube, rgba4_upload ? 2u : 4u));
         cache->target = target;
     }
 
@@ -2046,10 +2077,12 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
                        (float_textures && base == SCE_GXM_TEXTURE_BASE_FORMAT_F32);
     }
 
-    rgba = float_upload ? NULL : malloc((size_t)width * height * 4);
+    rgba = float_upload || rgba4_upload ? NULL : malloc((size_t)width * height * 4);
     if (float_upload)
         f32 = malloc((size_t)width * height * sizeof(float));
-    if (float_upload ? !f32 : !rgba) {
+    if (rgba4_upload)
+        rgba4 = malloc((size_t)width * height * 2);
+    if (float_upload ? !f32 : (rgba4_upload ? !rgba4 : !rgba)) {
         if (cache->tex) {
             gxm_forget_texture(cache->tex);
             g_gl->glDeleteTextures(1, &cache->tex);
@@ -2058,12 +2091,13 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
         g_bound_texture[unit] = 0;
         g_gl->glBindTexture(target, 0);
         free(f32);
+        free(rgba4);
         return false;
     }
 
     started = gxm_time_ns();
     g_profile_uploads++;
-    g_profile_upload_bytes += (uint64_t)width * height * 4;
+    g_profile_upload_bytes += (uint64_t)width * height * (rgba4_upload ? 2u : 4u);
 
     for (uint32_t face = 0; face < (cube ? 6u : 1u); face++) {
         for (uint32_t level = 0; level < mip_count; level++) {
@@ -2110,39 +2144,48 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
             }
 
             level_started = gxm_time_ns();
-            if (gxm_texture_decode_level_at(rgba, texture, data, face, level) != 0) {
-                static uint32_t warned_formats[8];
-                uint32_t format = (uint32_t)gxm_texture_get_format(texture);
-                bool warned = false;
+            {
+                int decode_result = rgba4_upload ? gxm_texture_decode_level_rgba4(
+                                                       rgba4, texture, face, level)
+                                                 : gxm_texture_decode_level_at(rgba, texture, data,
+                                                                               face, level);
 
-                for (uint32_t i = 0; i < ARRAY_SIZE(warned_formats); i++) {
-                    if (warned_formats[i] == format)
-                        warned = true;
-                }
-                if (!warned) {
+                if (decode_result != 0) {
+                    static uint32_t warned_formats[8];
+                    uint32_t format = (uint32_t)gxm_texture_get_format(texture);
+                    bool warned = false;
+
                     for (uint32_t i = 0; i < ARRAY_SIZE(warned_formats); i++) {
-                        if (!warned_formats[i]) {
-                            warned_formats[i] = format;
-                            break;
-                        }
+                        if (warned_formats[i] == format)
+                            warned = true;
                     }
-                    LOG("SceGxm: texture decode failed: fmt=0x%08x type=%d %ux%u layout %ux%u face %u level %u",
-                        format, (int)gxm_texture_get_type(texture), (unsigned)info.width,
-                        (unsigned)info.height, (unsigned)info.layout_width,
-                        (unsigned)info.layout_height, face, level);
+                    if (!warned) {
+                        for (uint32_t i = 0; i < ARRAY_SIZE(warned_formats); i++) {
+                            if (!warned_formats[i]) {
+                                warned_formats[i] = format;
+                                break;
+                            }
+                        }
+                        LOG("SceGxm: texture decode failed: fmt=0x%08x type=%d %ux%u layout %ux%u face %u level %u",
+                            format, (int)gxm_texture_get_type(texture), (unsigned)info.width,
+                            (unsigned)info.height, (unsigned)info.layout_width,
+                            (unsigned)info.layout_height, face, level);
+                    }
+                    free(rgba);
+                    free(rgba4);
+                    gxm_forget_texture(cache->tex);
+                    g_gl->glDeleteTextures(1, &cache->tex);
+                    memset(cache, 0, sizeof(*cache));
+                    g_bound_texture[unit] = 0;
+                    g_gl->glBindTexture(target, 0);
+                    return false;
                 }
-                free(rgba);
-                gxm_forget_texture(cache->tex);
-                g_gl->glDeleteTextures(1, &cache->tex);
-                memset(cache, 0, sizeof(*cache));
-                g_bound_texture[unit] = 0;
-                g_gl->glBindTexture(target, 0);
-                return false;
             }
             decode_ns += gxm_time_ns() - level_started;
 
-            if (force_lit_shadow && (uint32_t)gxm_texture_get_format(texture) == 0x13000000u &&
-                info.width == 512 && info.height == 512)
+            if (!rgba4_upload && force_lit_shadow &&
+                (uint32_t)gxm_texture_get_format(texture) == 0x13000000u && info.width == 512 &&
+                info.height == 512)
                 memset(rgba, 0xFF, (size_t)info.width * info.height * 4);
 
             if (cube)
@@ -2203,13 +2246,19 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
             }
 
             level_started = gxm_time_ns();
-            g_gl->glTexImage2D(upload_target, (GLint)level, GL_RGBA8, (GLsizei)info.width,
-                               (GLsizei)info.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+            if (rgba4_upload)
+                g_gl->glTexImage2D(upload_target, (GLint)level, GL_RGBA4, (GLsizei)info.width,
+                                   (GLsizei)info.height, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4,
+                                   rgba4);
+            else
+                g_gl->glTexImage2D(upload_target, (GLint)level, GL_RGBA8, (GLsizei)info.width,
+                                   (GLsizei)info.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
             upload_ns += gxm_time_ns() - level_started;
         }
     }
 
     free(rgba);
+    free(rgba4);
     free(f32);
 
     if (getenv("VITA2NATIVE_TRACE_TEXTURES") || gxm_time_ns() - started >= 50000000ull) {
@@ -2256,7 +2305,8 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
     cache->palette = palette;
     cache->width = width;
     cache->height = height;
-    cache->bytes = gxm_texture_estimate_bytes(width, height, mip_count, cube);
+    cache->bytes = gxm_texture_estimate_bytes(width, height, mip_count, cube,
+                                              rgba4_upload ? 2u : 4u);
     g_texture_cache_bytes += cache->bytes;
     cache->format = (uint32_t)gxm_texture_get_format(texture);
     cache->mip_count = mip_count;

@@ -1028,6 +1028,92 @@ static const uint32_t *u4_rgba_lut(const uint8_t map[4])
 
     return g_u4_lut;
 }
+
+/*
+ * The same trick for a GL_RGBA4 upload: a wire word maps to one 16-bit word
+ * (R in bits 12-15). A 64K-entry table would fit the whole word, but the
+ * random lookups miss L2 on every texel; two 256-entry tables indexed by the
+ * wire bytes stay in L1 and cover every channel map (each source nibble lives
+ * entirely in one byte, and constants are byte-independent).
+ */
+typedef struct {
+    uint16_t hi[256];
+    uint16_t lo[256];
+} U4Rgba4Tables;
+
+typedef enum {
+    U4_RGBA4_COPY,    /* wire nibble order already matches GL */
+    U4_RGBA4_SWAP,    /* ABGR wire order: reverse the nibbles */
+    U4_RGBA4_GENERIC, /* arbitrary mapping through the byte tables */
+} U4Rgba4Mode;
+
+static U4Rgba4Tables g_u4_rgba4_tables;
+static uint8_t g_u4_rgba4_map[4];
+static bool g_u4_rgba4_valid;
+
+static const U4Rgba4Tables *u4_rgba4_tables(const uint8_t map[4])
+{
+    if (!g_u4_rgba4_valid || memcmp(g_u4_rgba4_map, map, 4) != 0) {
+        memset(&g_u4_rgba4_tables, 0, sizeof(g_u4_rgba4_tables));
+
+        for (uint32_t byte = 0; byte < 256; byte++) {
+            uint16_t hi = 0;
+            uint16_t lo = 0;
+
+            for (uint32_t c = 0; c < 4; c++) {
+                uint8_t index = map[c];
+                uint32_t dst = 12 - c * 4;
+                uint32_t value;
+
+                if (index >= 4) {
+                    value = index == 4 ? 0xfu : 0u;
+                    hi |= (uint16_t)(value << dst);
+                    lo |= (uint16_t)(value << dst);
+                } else if (index < 2) {
+                    value = (byte >> (index == 0 ? 4 : 0)) & 0xf;
+                    hi |= (uint16_t)(value << dst);
+                } else {
+                    value = (byte >> (index == 2 ? 4 : 0)) & 0xf;
+                    lo |= (uint16_t)(value << dst);
+                }
+            }
+
+            g_u4_rgba4_tables.hi[byte] = hi;
+            g_u4_rgba4_tables.lo[byte] = lo;
+        }
+        memcpy(g_u4_rgba4_map, map, 4);
+        g_u4_rgba4_valid = true;
+    }
+
+    return &g_u4_rgba4_tables;
+}
+
+static U4Rgba4Mode u4_rgba4_mode(const uint8_t map[4])
+{
+    if (map[0] == 0 && map[1] == 1 && map[2] == 2 && map[3] == 3)
+        return U4_RGBA4_COPY;
+    if (map[0] == 3 && map[1] == 2 && map[2] == 1 && map[3] == 0)
+        return U4_RGBA4_SWAP;
+    return U4_RGBA4_GENERIC;
+}
+
+static __attribute__((always_inline)) inline uint16_t u4_rgba4_reverse_nibbles(uint16_t word)
+{
+    return (uint16_t)(((word & 0x000fu) << 12) | ((word & 0x00f0u) << 4) |
+                      ((word & 0x0f00u) >> 4) | ((word & 0xf000u) >> 12));
+}
+
+static __attribute__((always_inline)) inline uint16_t u4_rgba4_convert(uint16_t word,
+                                                                       U4Rgba4Mode mode,
+                                                                       const U4Rgba4Tables *tables)
+{
+    if (mode == U4_RGBA4_COPY)
+        return word;
+    if (mode == U4_RGBA4_SWAP)
+        return u4_rgba4_reverse_nibbles(word);
+    return (uint16_t)(tables->hi[word >> 8] | tables->lo[word & 0xff]);
+}
+
 static void decode_swizzled_tiles_fast4(uint8_t *dest, const uint8_t *input,
                                         const GxmTextureLevel *info, uint32_t minimum, uint32_t k,
                                         const uint8_t map[4])
@@ -1162,6 +1248,121 @@ static void decode_linear_fast8(uint8_t *dest, const uint8_t *input, uint32_t wi
             row[x * 4 + 3] = values[map[3]];
         }
     }
+}
+
+/*
+ * Destination-row order beats destination-tile order for RGBA4: a tile walk
+ * writes 32 rows (one page apart) in lockstep, which thrashes the write
+ * combining buffers, while this walk streams each output row sequentially.
+ * The source blocks are re-read once per row, but they stay in L2 for the
+ * 32-row band, so DRAM traffic is unchanged.
+ */
+static void decode_swizzled_rows_fast4_rgba4(uint16_t *dest, const uint8_t *input,
+                                             const GxmTextureLevel *info, uint32_t minimum,
+                                             uint32_t k, U4Rgba4Mode mode,
+                                             const U4Rgba4Tables *tables)
+{
+    uint32_t mask = minimum - 1;
+
+    for (uint32_t ty = 0; ty < info->layout_height; ty += 32) {
+        uint32_t height = info->height > ty ? info->height - ty : 0;
+
+        if (height > 32)
+            height = 32;
+
+        for (uint32_t y = 0; y < height; y += (mode == U4_RGBA4_COPY ? 2 : 1)) {
+            uint16_t *row = dest + (size_t)(ty + y) * info->width;
+            uint32_t spread_y = spread5_table[y & 31];
+            uint32_t rows = mode == U4_RGBA4_COPY && y + 1 < height ? 2 : 1;
+
+            for (uint32_t tx = 0; tx < info->layout_width; tx += 32) {
+                uint32_t width = info->width > tx ? info->width - tx : 0;
+                uint32_t tile = encode_morton2((tx & mask) >> 5, (ty & mask) >> 5) << 10;
+
+                if (width > 32)
+                    width = 32;
+                if (!width)
+                    continue;
+                if (info->layout_width >= info->layout_height)
+                    tile |= (tx >> k) << (2 * k);
+                else
+                    tile |= (ty >> k) << (2 * k);
+
+                if (mode == U4_RGBA4_COPY) {
+                    /* For even y, spread(y + 1) is spread(y) + 1, so the next
+                       row's texel is the adjacent 16-bit word. Reading a pair
+                       fills a source cache line with two destination rows. */
+                    if (rows == 2) {
+                        for (uint32_t x = 0; x < width; x++) {
+                            uint32_t index = tile + spread_y +
+                                             ((uint32_t)spread5_table[x & 31] << 1);
+                            uint32_t pair;
+
+                            memcpy(&pair, input + (size_t)index * 2, sizeof(pair));
+                            row[tx + x] = (uint16_t)(pair & 0xffffu);
+                            row[info->width + tx + x] = (uint16_t)(pair >> 16);
+                        }
+                    } else {
+                        for (uint32_t x = 0; x < width; x++) {
+                            uint32_t index = tile + spread_y +
+                                             ((uint32_t)spread5_table[x & 31] << 1);
+
+                            memcpy(&row[tx + x], input + (size_t)index * 2, sizeof(uint16_t));
+                        }
+                    }
+                } else if (mode == U4_RGBA4_SWAP) {
+                    for (uint32_t x = 0; x < width; x++) {
+                        uint32_t index = tile + spread_y + ((uint32_t)spread5_table[x & 31] << 1);
+                        uint16_t word;
+
+                        memcpy(&word, input + (size_t)index * 2, sizeof(word));
+                        row[tx + x] = u4_rgba4_reverse_nibbles(word);
+                    }
+                } else {
+                    for (uint32_t x = 0; x < width; x++) {
+                        uint32_t index = tile + spread_y + ((uint32_t)spread5_table[x & 31] << 1);
+                        uint16_t word;
+
+                        memcpy(&word, input + (size_t)index * 2, sizeof(word));
+                        row[tx + x] = (uint16_t)(tables->hi[word >> 8] | tables->lo[word & 0xff]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void decode_linear_fast4_rgba4(uint16_t *dest, const uint8_t *input, uint32_t width,
+                                      uint32_t height, uint32_t layout_width, U4Rgba4Mode mode,
+                                      const U4Rgba4Tables *tables)
+{
+    for (uint32_t y = 0; y < height; y++) {
+        uint16_t *row = dest + (size_t)y * width;
+        const uint8_t *source = input + (size_t)y * layout_width * 2;
+
+        if (mode == U4_RGBA4_COPY) {
+            memcpy(row, source, (size_t)width * 2);
+            continue;
+        }
+
+        for (uint32_t x = 0; x < width; x++) {
+            uint16_t word;
+
+            memcpy(&word, source + (size_t)x * 2, sizeof(word));
+            row[x] = u4_rgba4_convert(word, mode, tables);
+        }
+    }
+}
+
+static __attribute__((always_inline)) inline void decode_fast4_texel_rgba4(uint16_t *out,
+                                                                           const uint8_t *data,
+                                                                           uint32_t index,
+                                                                           const U4Rgba4Tables *tables)
+{
+    uint16_t word;
+
+    memcpy(&word, data + (size_t)index * 2, sizeof(word));
+    *out = (uint16_t)(tables->hi[word >> 8] | tables->lo[word & 0xff]);
 }
 
 static int decode_paletted_texel(uint8_t out[4], const uint8_t *data, uint32_t index,
@@ -1917,6 +2118,79 @@ static int decode_level_rgba8(uint8_t *dest, const uint8_t *input,
     return 0;
 }
 
+static int decode_level_rgba4(uint16_t *dest, const uint8_t *input, SceGxmTextureType type,
+                              SceGxmTextureFormat format, const GxmTextureLevel *info)
+{
+    uint32_t base = base_format(format);
+    TexelFormat texel;
+    U4Rgba4Mode mode;
+    const U4Rgba4Tables *tables;
+
+    if (base != SCE_GXM_TEXTURE_BASE_FORMAT_U4U4U4U4)
+        return -1;
+
+    texel_format_init(&texel, format);
+    if (!texel.fast4)
+        return -1;
+
+    mode = u4_rgba4_mode(texel.map);
+    tables = u4_rgba4_tables(texel.map);
+
+    if (type == SCE_GXM_TEXTURE_SWIZZLED || type == SCE_GXM_TEXTURE_CUBE || is_arbitrary(type)) {
+        uint32_t minimum = info->layout_width < info->layout_height ? info->layout_width
+                                                                    : info->layout_height;
+        uint32_t k = highest_bit(minimum);
+        uint32_t count = info->layout_width * info->layout_height;
+
+        if (!minimum)
+            return -1;
+
+        if ((type == SCE_GXM_TEXTURE_SWIZZLED || type == SCE_GXM_TEXTURE_CUBE) &&
+            info->layout_width >= 32 && info->layout_height >= 32 &&
+            is_power_of_two(info->layout_width) && is_power_of_two(info->layout_height)) {
+            decode_swizzled_rows_fast4_rgba4(dest, input, info, minimum, k, mode, tables);
+            return 0;
+        }
+
+        for (uint32_t i = 0; i < count; i++) {
+            uint32_t x = decode_morton2_x(i) & (minimum - 1);
+            uint32_t y = decode_morton2_y(i) & (minimum - 1);
+            uint32_t upper = (i >> (2 * k)) << k;
+
+            if (info->layout_width >= info->layout_height)
+                x |= upper;
+            else
+                y |= upper;
+
+            if (x >= info->width || y >= info->height)
+                continue;
+
+            decode_fast4_texel_rgba4(&dest[y * info->width + x], input, i, tables);
+        }
+
+        return 0;
+    }
+
+    if (type == SCE_GXM_TEXTURE_TILED) {
+        uint32_t tiles_per_row = info->layout_width >> 5;
+
+        for (uint32_t y = 0; y < info->height; y++) {
+            for (uint32_t x = 0; x < info->width; x++) {
+                uint32_t tile = (x >> 5) + tiles_per_row * (y >> 5);
+                uint32_t index = (tile << 10) | (x & 31) | ((y & 31) << 5);
+
+                decode_fast4_texel_rgba4(&dest[y * info->width + x], input, index, tables);
+            }
+        }
+
+        return 0;
+    }
+
+    decode_linear_fast4_rgba4(dest, input, info->width, info->height, info->layout_width, mode,
+                              tables);
+    return 0;
+}
+
 int gxm_texture_decode_level_at(uint8_t *dest, const SceGxmTextureInner *texture, const void *data,
                                 uint32_t face, uint32_t level)
 {
@@ -2022,6 +2296,44 @@ int gxm_texture_decode_level_rgba8(uint8_t *dest, const SceGxmTextureInner *text
     return gxm_texture_decode_level_at(dest, texture, gxm_texture_get_data(texture), face, level);
 }
 
+bool gxm_texture_can_decode_rgba4(const SceGxmTextureInner *texture)
+{
+    SceGxmTextureFormat format;
+
+    /* Gamma decode is a per-channel 8-bit table; keeping those textures on the
+       RGBA8 path avoids quantising the corrected values to four bits. */
+    if (!texture || texture->gamma_mode)
+        return false;
+
+    format = (SceGxmTextureFormat)gxm_texture_get_format(texture);
+    return base_format(format) == SCE_GXM_TEXTURE_BASE_FORMAT_U4U4U4U4;
+}
+
+int gxm_texture_decode_level_rgba4_at(uint16_t *dest, const SceGxmTextureInner *texture,
+                                      const void *data, uint32_t face, uint32_t level)
+{
+    SceGxmTextureType type;
+    SceGxmTextureFormat format;
+    GxmTextureLevel info;
+
+    if (!dest || !texture || !data)
+        return -1;
+    if (gxm_texture_get_level(texture, face, level, &info) != 0)
+        return -1;
+
+    type = (SceGxmTextureType)gxm_texture_get_type(texture);
+    format = (SceGxmTextureFormat)gxm_texture_get_format(texture);
+
+    return decode_level_rgba4(dest, (const uint8_t *)data + info.offset, type, format, &info);
+}
+
+int gxm_texture_decode_level_rgba4(uint16_t *dest, const SceGxmTextureInner *texture, uint32_t face,
+                                   uint32_t level)
+{
+    return gxm_texture_decode_level_rgba4_at(dest, texture, gxm_texture_get_data(texture), face,
+                                             level);
+}
+
 int gxm_texture_decode_rgba8(uint8_t *dest, const void *src, uint32_t width, uint32_t height,
                              SceGxmTextureFormat format, SceGxmTextureType type)
 {
@@ -2052,4 +2364,36 @@ int gxm_texture_decode_rgba8(uint8_t *dest, const void *src, uint32_t width, uin
     info.size = (uint32_t)(((uint64_t)info.layout_width * info.layout_height * bits + 7) / 8);
 
     return decode_level_rgba8(dest, (const uint8_t *)src, &texture, type, format, &info);
+}
+
+int gxm_texture_decode_rgba4(uint16_t *dest, const void *src, uint32_t width, uint32_t height,
+                             SceGxmTextureFormat format, SceGxmTextureType type)
+{
+    SceGxmTextureInner texture;
+    GxmTextureLevel info;
+    uint32_t bits = gxm_texture_base_bits(format);
+
+    if (!dest || !src || !width || !height || !bits)
+        return -1;
+
+    memset(&texture, 0, sizeof(texture));
+    texture.base_format = (base_format(format) >> 24) & 0x1f;
+    texture.format0 = (format & 0x80000000u) >> 31;
+    texture.swizzle_format = (format >> 12) & 7;
+    texture.normalize_mode = 1;
+    texture.mip_count = 0;
+
+    memset(&info, 0, sizeof(info));
+    info.width = width;
+    info.height = height;
+    if (type == SCE_GXM_TEXTURE_SWIZZLED || type == SCE_GXM_TEXTURE_CUBE) {
+        info.layout_width = width;
+        info.layout_height = height;
+    } else {
+        info.layout_width = align_up(width, 8);
+        info.layout_height = height;
+    }
+    info.size = (uint32_t)(((uint64_t)info.layout_width * info.layout_height * bits + 7) / 8);
+
+    return decode_level_rgba4(dest, (const uint8_t *)src, type, format, &info);
 }

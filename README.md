@@ -132,7 +132,11 @@ measures the driver in isolation. `VITA2NATIVE_NO_DRAW_UNIFORMS=1` and
 present overlap paths for A/B measurements. `VITA2NATIVE_RENDER_SCALE=0.5`
 renders the 3D scene at half resolution and upscales it on present; on the
 Mali-G31 that roughly halves GPU time, which is the dominant cost at the
-native 960x544 resolution.
+native 960x544 resolution. RGBA4444 textures upload as `GL_RGBA4` by default
+on the Mali blob, which cuts a 2048x2048 atlas upload from ~79 ms to ~49 ms;
+Panfrost and software renderers keep the RGBA8 path because their `GL_RGBA4`
+upload is several times slower. `VITA2NATIVE_RGBA4=1` and
+`VITA2NATIVE_NO_RGBA4=1` force either path for A/B measurements.
 
 The same ARM32 build also runs on an R36S handheld (Rockchip RK3326, Mali-G31
 through the proprietary Bifrost blob, 640x480 DSI panel). Output goes through
