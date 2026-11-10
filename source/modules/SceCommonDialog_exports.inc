@@ -45,11 +45,7 @@ EXPORT_FUNC(SceCommonDialog, 0xA8682304, dialog_result_not_running) /* sceNpSnsF
 EXPORT_FUNC(SceCommonDialog, 0x147650E8, dialog_status_none) /* sceNpSnsFacebookDialogGetStatus */
 EXPORT_FUNC(SceCommonDialog, 0x6821F09B, dialog_init_unsupported) /* sceNpSnsFacebookDialogInit */
 EXPORT_FUNC(SceCommonDialog, 0xDE1F3928, dialog_ok) /* sceNpSnsFacebookDialogTerm */
-EXPORT_FUNC(SceCommonDialog, 0xDC346979, dialog_ok) /* sceNpTrophySetupDialogAbort */
-EXPORT_FUNC(SceCommonDialog, 0xE37069D5, dialog_result_not_running) /* sceNpTrophySetupDialogGetResult */
-EXPORT_FUNC(SceCommonDialog, 0xC3A59547, dialog_status_none) /* sceNpTrophySetupDialogGetStatus */
-EXPORT_FUNC(SceCommonDialog, 0x9E2C02C9, dialog_init_unsupported) /* sceNpTrophySetupDialogInit */
-EXPORT_FUNC(SceCommonDialog, 0xA81082DD, dialog_ok) /* sceNpTrophySetupDialogTerm */
+
 EXPORT_FUNC(SceCommonDialog, 0x4B125581, dialog_ok) /* scePhotoImportDialogAbort */
 EXPORT_FUNC(SceCommonDialog, 0xD855414C, dialog_result_not_running) /* scePhotoImportDialogGetResult */
 EXPORT_FUNC(SceCommonDialog, 0x032206D8, dialog_status_none) /* scePhotoImportDialogGetStatus */

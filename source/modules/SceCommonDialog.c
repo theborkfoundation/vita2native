@@ -32,6 +32,11 @@ static uint64_t g_msg_start_ns;
 static unsigned int g_msg_presents;
 static unsigned int g_msg_updates;
 
+static bool g_trophy_dialog_active;
+static bool g_trophy_dialog_done;
+static int g_trophy_dialog_result;
+static uint64_t g_trophy_start_ns;
+
 static bool g_ime_active;
 static bool g_ime_done;
 static SceWChar16 *g_ime_buffer;
@@ -116,6 +121,16 @@ static void ime_update_done(void)
         g_ime_done = true;
 }
 
+/* The system prepares trophy data while this dialog is up. */
+static void trophy_update_done(void)
+{
+    if (g_trophy_dialog_active && !g_trophy_dialog_done &&
+        host_monotonic_ns() - g_trophy_start_ns >= 200000000ull) {
+        g_trophy_dialog_done = true;
+        g_trophy_dialog_result = SCE_COMMON_DIALOG_RESULT_OK;
+    }
+}
+
 EXPORT(SceCommonDialog, 0x90530F2F, int, sceCommonDialogUpdate, const SceCommonDialogUpdateParam *param)
 {
     (void)param;
@@ -126,6 +141,7 @@ EXPORT(SceCommonDialog, 0x90530F2F, int, sceCommonDialogUpdate, const SceCommonD
         g_ime_updates++;
     msg_update_done();
     ime_update_done();
+    trophy_update_done();
 
     return 0;
 }
@@ -134,9 +150,10 @@ EXPORT(SceCommonDialog, 0x043A353E, int, sceCommonDialogIsRunning, void)
 {
     msg_update_done();
     ime_update_done();
+    trophy_update_done();
 
     return ((g_msg_dialog_active && !g_msg_dialog_done) ||
-            (g_ime_active && !g_ime_done))
+            (g_ime_active && !g_ime_done) || (g_trophy_dialog_active && !g_trophy_dialog_done))
                ? 1
                : 0;
 }
@@ -151,6 +168,77 @@ EXPORT(SceCommonDialog, 0xBECD35C8, int, sceCommonDialogSetConfigParam,
 {
     (void)param;
 
+    return 0;
+}
+
+/*
+ * Trophy setup dialog. Titles commonly call Init, poll GetStatus until it
+ * reports FINISHED, then read GetResult and call Term. Finishing immediately
+ * (like Vita3K with options=0) keeps that sequence from spinning forever;
+ * there is no system UI to show here.
+ */
+EXPORT(SceCommonDialog, 0x9E2C02C9, int, sceNpTrophySetupDialogInit, const void *param)
+{
+    if (!param)
+        return SCE_COMMON_DIALOG_ERROR_NULL;
+    if ((g_msg_dialog_active && !g_msg_dialog_done) ||
+        (g_ime_active && !g_ime_done) || g_trophy_dialog_active)
+        return SCE_COMMON_DIALOG_ERROR_BUSY;
+
+    g_trophy_dialog_active = true;
+    g_trophy_dialog_done = false;
+    g_trophy_dialog_result = SCE_COMMON_DIALOG_RESULT_OK;
+    g_trophy_start_ns = host_monotonic_ns();
+
+    if (getenv("VITA2NATIVE_INPUT_DEBUG")) {
+        fprintf(stderr, "vita2native: TrophySetupDialog init\n");
+        fflush(stderr);
+    }
+
+    return 0;
+}
+
+EXPORT(SceCommonDialog, 0xC3A59547, int, sceNpTrophySetupDialogGetStatus, void)
+{
+    trophy_update_done();
+
+    if (!g_trophy_dialog_active)
+        return SCE_COMMON_DIALOG_STATUS_NONE;
+    return g_trophy_dialog_done ? SCE_COMMON_DIALOG_STATUS_FINISHED
+                                : SCE_COMMON_DIALOG_STATUS_RUNNING;
+}
+
+EXPORT(SceCommonDialog, 0xE37069D5, int, sceNpTrophySetupDialogGetResult, void *result)
+{
+    trophy_update_done();
+
+    if (!g_trophy_dialog_active || !g_trophy_dialog_done)
+        return SCE_COMMON_DIALOG_ERROR_NOT_FINISHED;
+    if (result)
+        ((int *)result)[0] = g_trophy_dialog_result;
+    return 0;
+}
+
+EXPORT(SceCommonDialog, 0xDC346979, int, sceNpTrophySetupDialogAbort, void)
+{
+    if (!g_trophy_dialog_active)
+        return SCE_COMMON_DIALOG_ERROR_NOT_IN_USE;
+
+    g_trophy_dialog_done = true;
+    g_trophy_dialog_result = SCE_COMMON_DIALOG_RESULT_ABORTED;
+    return 0;
+}
+
+EXPORT(SceCommonDialog, 0xA81082DD, int, sceNpTrophySetupDialogTerm, void)
+{
+    if (!g_trophy_dialog_active)
+        return SCE_COMMON_DIALOG_ERROR_NOT_IN_USE;
+    if (!g_trophy_dialog_done)
+        return SCE_COMMON_DIALOG_ERROR_NOT_FINISHED;
+
+    g_trophy_dialog_active = false;
+    g_trophy_dialog_done = false;
+    g_trophy_dialog_result = SCE_COMMON_DIALOG_RESULT_OK;
     return 0;
 }
 
