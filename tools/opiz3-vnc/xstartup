@@ -31,6 +31,7 @@ fi
 : "${V2N_PROFILE:=0}"
 : "${V2N_PROFILE_FRAME:=0}"
 : "${V2N_INPUT_DEBUG:=0}"
+: "${V2N_TRACE_TEXTURES:=0}"
 : "${V2N_CRASH_CORE:=0}"
 : "${V2N_XDG_RUNTIME_DIR:=/run/user/1001}"
 : "${V2N_PULSE_SERVER:=unix:$V2N_XDG_RUNTIME_DIR/pulse/native}"
@@ -54,6 +55,7 @@ export PULSE_SERVER="$V2N_PULSE_SERVER"
 [ "$V2N_PROFILE" = 1 ] && export VITA2NATIVE_PROFILE=1
 [ "$V2N_PROFILE_FRAME" = 1 ] && export VITA2NATIVE_PROFILE_FRAME=1
 [ "$V2N_INPUT_DEBUG" = 1 ] && export VITA2NATIVE_INPUT_DEBUG=1
+[ "$V2N_TRACE_TEXTURES" = 1 ] && export VITA2NATIVE_TRACE_TEXTURES=1
 
 # A crash is only useful if it leaves evidence: the kiosk restarts within a
 # couple of seconds and truncates V2N_LOG. Keep the log (and the core, when

@@ -1537,6 +1537,15 @@ static uint32_t gxm_hash_bytes_fast(uint32_t hash, const void *data, size_t size
     return (h0 * 16777619u) ^ (h1 * 16777619u) ^ (h2 * 16777619u) ^ (h3 * 16777619u);
 }
 
+static int gxm_trace_textures(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = getenv("VITA2NATIVE_TRACE_TEXTURES") != NULL;
+    return enabled;
+}
+
 static uint32_t gxm_texture_hash(const SceGxmTextureInner *texture, const void *data)
 {
     SceGxmTextureFormat format = gxm_texture_get_format(texture);
@@ -1555,6 +1564,13 @@ static uint32_t gxm_texture_hash(const SceGxmTextureInner *texture, const void *
 
             if (gxm_texture_get_level(texture, face, level, &info) != 0)
                 break;
+            if (gxm_trace_textures()) {
+                LOG("SceGxm: hash face %u level %u off=0x%x size=0x%x tex %ux%u fmt=0x%08x "
+                    "type=%d mips=%u data=%p",
+                    face, level, info.offset, info.size, gxm_texture_get_width(texture),
+                    gxm_texture_get_height(texture), (uint32_t)format, (int)type,
+                    gxm_texture_true_mip_count(texture), data);
+            }
             hash = gxm_hash_bytes_fast(hash, (const uint8_t *)data + info.offset, info.size);
         }
     }
