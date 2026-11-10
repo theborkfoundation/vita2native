@@ -5735,10 +5735,22 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
             }
         }
         const SceGxmRenderTarget *target = context->render_target;
-        uint32_t scale = 1;
+        uint32_t replicate = 1;
+        uint32_t out_width;
+        uint32_t out_height;
 
-        width = surface->width < target->params.width ? surface->width : target->params.width;
-        height = surface->height < target->params.height ? surface->height : target->params.height;
+        /*
+         * The GL render target is render_width x render_height, which is
+         * smaller than the guest's parameters when VITA2NATIVE_RENDER_SCALE is
+         * active. Read back exactly the FBO: reading params-sized pixels from
+         * a smaller attachment puts the valid rows at the bottom of the
+         * flipped buffer, leaving black borders in the guest surface.
+         */
+        width = surface->width < target->render_width ? surface->width : target->render_width;
+        height = surface->height < target->render_height ? surface->height : target->render_height;
+        out_width = surface->width < target->params.width ? surface->width : target->params.width;
+        out_height =
+            surface->height < target->params.height ? surface->height : target->params.height;
 
         /*
          * Without MSAA_DOWNSCALE the guest expects the supersampled image in
@@ -5750,26 +5762,30 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
         if (target->samples && !surface->downscale &&
             surface->width >= target->params.width * 2 &&
             surface->height >= target->params.height * 2) {
-            scale = 2;
-            width = target->params.width;
-            height = target->params.height;
+            replicate = 2;
+            out_width = target->params.width * 2;
+            out_height = target->params.height * 2;
+            if (out_width > surface->width)
+                out_width = surface->width;
+            if (out_height > surface->height)
+                out_height = surface->height;
         }
 
-        if (gxm_direct_present_enabled() && scale == 1 && target->color &&
+        if (gxm_direct_present_enabled() && replicate == 1 && target->color &&
             surface->width == target->params.width &&
             surface->height == target->params.height) {
             g_present_frame.valid = true;
             g_present_frame.data = surface->data;
             g_present_frame.texture = target->color;
-            g_present_frame.width = (int)target->params.width;
-            g_present_frame.height = (int)target->params.height;
+            g_present_frame.width = (int)target->render_width;
+            g_present_frame.height = (int)target->render_height;
             if (getenv("VITA2NATIVE_DIRECT_PRESENT_DEBUG")) {
                 static unsigned int logged;
 
                 if (logged < 20) {
                     LOG("SceGxm direct frame %llu: surf=%p tex=%u %dx%d",
                         (unsigned long long)g_gxm_frame, surface->data, target->color,
-                        (int)target->params.width, (int)target->params.height);
+                        (int)target->render_width, (int)target->render_height);
                     logged++;
                 }
             }
@@ -5781,6 +5797,12 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
         if (gxm_skip_readback()) {
             t2 = gxm_time_ns();
             gxm_profile_frame(t_resolve, t1 - t0, t2 - t1, gxm_time_ns() - t2);
+            goto convert_done;
+        }
+
+        if (width == 0 || height == 0 || out_width == 0 || out_height == 0) {
+            t2 = gxm_time_ns();
+            gxm_profile_frame(t_resolve, t1 - t0, t2 - t1, 0);
             goto convert_done;
         }
 
@@ -5802,11 +5824,11 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
                     nonzero++;
             }
             LOG("SceGxm frame %llu: fbo=%u surf=%p %ux%u stride=%u fmt=0x%x "
-                "clip=%u,%u..%u,%u scale=%u sum=%08x nz=%u px0=%08x",
+                "clip=%u,%u..%u,%u src=%ux%u out=%ux%u sum=%08x nz=%u px0=%08x",
                 g_gxm_frame, context->render_target->fbo, (void *)surface->data, surface->width,
                 surface->height, surface->strideInPixels, surface->colorFormat, surface->clipXMin,
-                surface->clipYMin, surface->clipXMax, surface->clipYMax, scale, sum, nonzero,
-                *(const uint32_t *)rgba);
+                surface->clipYMin, surface->clipXMax, surface->clipYMax, width, height, out_width,
+                out_height, sum, nonzero, *(const uint32_t *)rgba);
         }
 
         /* GL's origin is bottom-left; Vita surfaces are top-left. */
@@ -5818,29 +5840,64 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
             uint32_t clip_y1 = surface->clipYMax;
             bool gamma = surface->gamma_mode != 0;
             bool dither = surface->dither_mode != 0;
-            uint32_t row_pixels = surface->width < width ? surface->width : width;
-            uint32_t row_count = surface->height < height ? surface->height : height;
             uint32_t stride = surface->strideInPixels ? surface->strideInPixels : surface->width;
-            bool direct = !gamma && !dither && scale == 1 && bytes_per_pixel == 4 &&
-                          surface->surfaceType != SCE_GXM_COLOR_SURFACE_TILED &&
-                          surface->surfaceType != SCE_GXM_COLOR_SURFACE_SWIZZLED &&
-                          (surface->colorFormat & SCE_GXM_COLOR_BASE_FORMAT_MASK) ==
-                              SCE_GXM_COLOR_BASE_FORMAT_U8U8U8U8 &&
-                          ((surface->colorFormat >> 20) & 3) == 0; /* ABGR == GL byte order */
+            bool direct_format =
+                !gamma && !dither && bytes_per_pixel == 4 &&
+                surface->surfaceType != SCE_GXM_COLOR_SURFACE_TILED &&
+                surface->surfaceType != SCE_GXM_COLOR_SURFACE_SWIZZLED &&
+                (surface->colorFormat & SCE_GXM_COLOR_BASE_FORMAT_MASK) ==
+                    SCE_GXM_COLOR_BASE_FORMAT_U8U8U8U8 &&
+                ((surface->colorFormat >> 20) & 3) == 0; /* ABGR == GL byte order */
 
-            if (clip_x1 >= surface->width)
-                clip_x1 = surface->width - 1;
-            if (clip_y1 >= surface->height)
-                clip_y1 = surface->height - 1;
+            if (clip_x1 >= out_width)
+                clip_x1 = out_width - 1;
+            if (clip_y1 >= out_height)
+                clip_y1 = out_height - 1;
 
             /* The common Vita format (A8B8G8R8) is byte-identical to the GL
                readback, so full-surface frames are a row-wise memcpy. */
-            if (direct && clip_x0 == 0 && clip_y0 == 0 && clip_x1 + 1 == row_pixels &&
-                clip_y1 + 1 == row_count) {
-                for (uint32_t y = 0; y < row_count; y++) {
+            if (direct_format && width == out_width && height == out_height && clip_x0 == 0 &&
+                clip_y0 == 0 && clip_x1 + 1 == out_width && clip_y1 + 1 == out_height) {
+                for (uint32_t y = 0; y < out_height; y++) {
                     memcpy((uint8_t *)surface->data + (size_t)y * stride * 4,
                            rgba + (size_t)(height - 1 - y) * width * 4,
-                           (size_t)row_pixels * 4);
+                           (size_t)out_width * 4);
+                }
+                free(rgba);
+                gxm_profile_frame(t_resolve, t1 - t0, t2 - t1, gxm_time_ns() - t2);
+                goto convert_done;
+            }
+
+            /* Sub-native frames need a nearest-neighbour expansion; do it as
+               a plain 32-bit copy instead of the per-pixel format path. */
+            if (direct_format) {
+                const uint32_t *src = (const uint32_t *)rgba;
+
+                for (uint32_t y = clip_y0; y <= clip_y1; y++) {
+                    uint32_t sy = (uint32_t)((uint64_t)y * height / out_height);
+                    uint32_t *dst_row;
+                    const uint32_t *src_row;
+                    uint32_t sx;
+                    uint64_t frac;
+
+                    if (sy >= height)
+                        continue;
+                    dst_row = (uint32_t *)((uint8_t *)surface->data + (size_t)y * stride * 4);
+                    src_row = src + (size_t)(height - 1 - sy) * width;
+                    sx = (uint32_t)((uint64_t)clip_x0 * width / out_width);
+                    frac = (uint64_t)clip_x0 * width % out_width;
+
+                    for (uint32_t x = clip_x0; x <= clip_x1; x++) {
+                        if (sx >= width)
+                            break;
+                        dst_row[x] = src_row[sx];
+
+                        frac += width;
+                        if (frac >= out_width) {
+                            frac -= out_width;
+                            sx++;
+                        }
+                    }
                 }
                 free(rgba);
                 gxm_profile_frame(t_resolve, t1 - t0, t2 - t1, gxm_time_ns() - t2);
@@ -5848,15 +5905,18 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
             }
 
             for (uint32_t y = clip_y0; y <= clip_y1; y++) {
-                uint32_t sy = scale > 1 ? y / scale : y;
+                uint32_t sy = (uint32_t)((uint64_t)y * height / out_height);
                 const uint8_t *src;
+                uint32_t sx;
+                uint64_t frac;
 
                 if (sy >= height)
                     continue;
                 src = rgba + (size_t)(height - 1 - sy) * width * 4;
+                sx = (uint32_t)((uint64_t)clip_x0 * width / out_width);
+                frac = (uint64_t)clip_x0 * width % out_width;
 
                 for (uint32_t x = clip_x0; x <= clip_x1; x++) {
-                    uint32_t sx = scale > 1 ? x / scale : x;
                     uint8_t *dst;
 
                     if (sx >= width)
@@ -5866,6 +5926,12 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
 
                     gxm_write_color_pixel(dst, src + (size_t)sx * 4, surface->colorFormat, x, y,
                                           gamma, dither);
+
+                    frac += width;
+                    if (frac >= out_width) {
+                        frac -= out_width;
+                        sx++;
+                    }
                 }
             }
         }
