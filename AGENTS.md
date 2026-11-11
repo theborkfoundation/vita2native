@@ -30,13 +30,21 @@ are the judgement that goes with those commands, not a second copy of them.
 
   ```sh
   ssh -tt r36s 'bash -lc "cd /home/ark/v2n-run && \
-    VITA2NATIVE_KMS_PRESENT=1 VITA2NATIVE_RENDER_SCALE=0.6667 \
+    SDL_VIDEODRIVER=kmsdrm VITA2NATIVE_RENDER_SCALE=0.6667 \
     ./v2n-arm PCSE00322/eboot.bin"'
   ```
 
   A plain `ssh r36s 'command'` runs a non-login shell and does not get this
-  environment. `VITA2NATIVE_KMS_PRESENT=1` (or `SDL_VIDEODRIVER=kmsdrm`) is
-  also required for a manual run to use the direct-KMS present path.
+  environment. `SDL_VIDEODRIVER=kmsdrm` lets SDL own the panel and present
+  through its own KMSDRM driver, which is what works on this vendor kernel.
+
+  Do **not** set `VITA2NATIVE_KMS_PRESENT=1` here. That switches to the raw
+  KMS/DRM presenter, and on the R36S's vendor kernel the VOP accepts every
+  `drmModePageFlip` while continuing to scan the buffer installed by
+  `drmModeSetCrtc` — frames advance in the log (`SceGxm present texture ...`,
+  `SceDisplay: N frames in 1.0 s`), `dri/0/summary` shows an ACTIVE plane, and
+  the panel still shows the first (black) frame. Raw KMS is opt-in and stays
+  off by default for that reason.
 
 - Maximum performance mode uses the ArkOS helper, not raw sysfs:
 

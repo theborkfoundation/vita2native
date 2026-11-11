@@ -115,7 +115,7 @@ static const Setting g_settings[] = {
     FLAG("VITA2NATIVE_FPS", "log the frame rate once a second"),
     FLAG("VITA2NATIVE_FPS_OVERLAY", "draw the FPS graph in the corner of the frame"),
     STR("VITA2NATIVE_METRICS_FILE", "append <ms>,<fps>,<frames> per second for fps_chart.py"),
-    FLAG("VITA2NATIVE_KMS_PRESENT", "use the direct KMS/DRM present path"),
+    FLAG("VITA2NATIVE_KMS_PRESENT", "opt-in raw KMS/DRM present; SDL presents by default"),
     FLOAT("VITA2NATIVE_RENDER_SCALE", "scale the 3D scene, upscaled again on present"),
     STR("VITA2NATIVE_SDL_SIZE", "SDL window size, WxH (default: the display geometry)"),
     FLAG("VITA2NATIVE_SDL_WINDOWED", "keep an SDL window instead of going fullscreen"),

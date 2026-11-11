@@ -7,25 +7,22 @@
 #include "settings.h"
 
 /*
- * True when the active SDL video driver targets KMS/DRM. On a handheld that
- * means presentation can attach EGL to the scanout plane directly instead of
- * copying the frame through SDL. VITA2NATIVE_KMS_PRESENT forces the KMS path
- * for debugging when SDL is driven through another video driver.
+ * True when the raw KMS/DRM present path is wanted.
+ *
+ * It is opt-in. On several vendor kernels (the R36S VOP, for one)
+ * drmModePageFlip reports success while the controller keeps scanning the
+ * buffer from drmModeSetCrtc, so the panel shows the first frame forever.
+ * SDL's own KMSDRM driver drives that panel correctly, so presentation goes
+ * through SDL even when SDL selected the KMSDRM video driver.
  */
 static inline bool host_display_uses_kms(void)
 {
     static int cached = -1;
-    const char *driver;
 
     if (cached >= 0)
         return cached != 0;
 
-    cached = 0;
-    if (vita2native_env_flag("VITA2NATIVE_KMS_PRESENT")) {
-        cached = 1;
-    } else if ((driver = getenv("SDL_VIDEODRIVER")) && strstr(driver, "kmsdrm")) {
-        cached = 1;
-    }
+    cached = vita2native_env_flag("VITA2NATIVE_KMS_PRESENT") ? 1 : 0;
 
     return cached != 0;
 }
