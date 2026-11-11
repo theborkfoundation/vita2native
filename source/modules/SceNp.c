@@ -1,6 +1,6 @@
 /*
  * SceNpManager / SceNpBasic / SceNpScore / SceNpActivity / SceNpTrophy /
- * SceNearUtil / SceLiveAreaUtil.
+ * SceNpCommon / SceNpCommerce2 / SceNearUtil / SceLiveAreaUtil.
  *
  * There is no PlayStation Network on this host, so the console is presented as
  * permanently signed out: sceNpGetServiceState reports SIGNED_OUT and the
@@ -427,6 +427,44 @@ EXPORT(SceNearUtil, 0xF3398774, int, sceNearLaunchNearAppForUpdate, void)
     return 0;
 }
 
+/* ---------------------------------------------------------- SceNpCommon */
+
+/*
+ * Authentication only needs its pool set up: the request entry points stay
+ * unresolved, so titles that query the ticket service fall back to their
+ * offline path. Fort Defense asserts on a failed sceNpAuthInit during boot.
+ */
+EXPORT(SceNpCommon, 0x441D8B4E, int, sceNpAuthInit, void *pool, uint32_t pool_size)
+{
+    (void)pool;
+    (void)pool_size;
+
+    NP_LOG("sceNpAuthInit");
+    return 0;
+}
+
+EXPORT(SceNpCommon, 0x6093B689, int, sceNpAuthTerm, void)
+{
+    NP_LOG("sceNpAuthTerm");
+    return 0;
+}
+
+/* ------------------------------------------------------- SceNpCommerce2 */
+
+/* The PS Store is not reachable, but the subsystem still initialises so the
+   boot sequence of titles that link it completes. */
+EXPORT(SceNpCommerce2, 0xC73F209A, int, sceNpCommerce2Init, void)
+{
+    NP_LOG("sceNpCommerce2Init");
+    return 0;
+}
+
+EXPORT(SceNpCommerce2, 0xB99958AE, int, sceNpCommerce2Term, void)
+{
+    NP_LOG("sceNpCommerce2Term");
+    return 0;
+}
+
 /* ----------------------------------------------------- SceLiveAreaUtil */
 
 EXPORT(SceLiveAreaUtil, 0xD330285D, int, sceLiveAreaUpdateFrameAsync, void)
@@ -436,6 +474,8 @@ EXPORT(SceLiveAreaUtil, 0xD330285D, int, sceLiveAreaUpdateFrameAsync, void)
 }
 
 DECLARE_LIBRARY(SceNpManager, 0xD8835093);
+DECLARE_LIBRARY(SceNpCommon, 0xECB62224);
+DECLARE_LIBRARY(SceNpCommerce2, 0x40120DC3);
 DECLARE_LIBRARY(SceNpBasic, 0x605BA760);
 DECLARE_LIBRARY(SceNpScore, 0x75F052DB);
 DECLARE_LIBRARY(SceNpActivity, 0xFEF492ED);
