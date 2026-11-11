@@ -265,6 +265,34 @@ time, so they do not depend on how slow software rendering is.
 call stack, which is how guest/host hotspots were located on the device.
 `VITA2NATIVE_GL_CHECK=1` re-enables the per-draw `glGetError` checks.
 
+### Test devices
+
+`tools/v2n` bundles the host/device routines used while bringing a title up, so
+they are one command instead of a scrollback search:
+
+```sh
+./tools/v2n help
+./tools/v2n deploy                 # build arm-rel, copy, restart the kiosk
+./tools/v2n title PCSE01177        # run a staged title (no argument: list them)
+./tools/v2n shot menu              # -> build/shots/menu.png
+./tools/v2n drive click 480 497    # a tap shorter than a frame is dropped
+./tools/v2n drive key z 0.8
+./tools/v2n log 40                 # live log
+./tools/v2n crash                  # newest preserved crash, run-up to the fault
+./tools/v2n test                   # ARM smoke suite, on the device
+./tools/v2n dump-frame 120,400     # headless capture -> build/shots/frame-*.png
+./tools/v2n gdb                    # attach gdb to the running title
+./tools/v2n clean cores            # core dumps are 400-500 MB each
+```
+
+`V2N_HOST` selects the device (`opiz3` by default, `r36s` for ArkOS), and
+`V2N_REMOTE_DIR`, `V2N_APPS_DIR` and `V2N_OUT` override the paths. Screenshots
+come from `xwd -root`; `tools/img2png.py` converts both XWD stills and the BMP
+frame dumps using nothing but the standard library.
+
+The judgement that goes with these commands (what a crash means, which render
+knob to turn) lives in the agent skills under `.agents/skills`.
+
 ## Building from source
 
 ```sh

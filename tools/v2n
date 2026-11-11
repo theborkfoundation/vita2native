@@ -1,0 +1,323 @@
+#!/bin/sh
+# v2n - drive the vita2native test devices from the development host.
+#
+# The commands are here; the judgement (what to look at, when a crash is a
+# missing API rather than a title bug) lives in the skills under .agents/skills.
+#
+# Config (environment):
+#   V2N_HOST        ssh alias of the device            (default opiz3)
+#   V2N_REMOTE_DIR  where v2n-arm and the logs live    (per host default)
+#   V2N_APPS_DIR    staged titles, one dir per <ID>    (per host default)
+#   V2N_BUILD       host build directory               (build/cmake-arm-rel)
+#   V2N_OUT         screenshot / frame-dump output     (build/shots)
+#   V2N_JOBS        build parallelism                  (all cores)
+
+set -u
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+BUILD=${V2N_BUILD:-$ROOT/build/cmake-arm-rel}
+OUT=${V2N_OUT:-$ROOT/build/shots}
+JOBS=${V2N_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}
+BIN=v2n-arm
+DISPLAY_NUM=:1
+
+# Portable ARM smoke tests, in the order they are worth running: the ones that
+# cover the pieces titles actually break on. Device-specific failures are
+# documented in the v2n-crash-triage skill (gxm_draw_smoke needs shader
+# fixtures, shader_smoke needs an argument).
+SMOKE_DEFAULT="host_smoke mspace_smoke libc_format_smoke dialog_smoke fios2_smoke \
+sync_smoke threadmgr_smoke fiber_smoke apputil_smoke regmgr_smoke \
+ctrl_script_smoke extra_imports_smoke jpeg_smoke camera_smoke pgf_smoke \
+sqlite_smoke atrac_smoke audiodec_smoke ngs_smoke http_smoke net_smoke \
+processmgr_smoke touch_smoke appmgr_smoke aeabi_smoke"
+
+die() { echo "v2n: $*" >&2; exit 1; }
+
+usage() {
+    cat <<'EOF'
+v2n - drive the vita2native test devices from the development host.
+
+The commands are here; the judgement (what to look at, when a crash is a
+missing API rather than a title bug) lives in the skills under .agents/skills.
+
+Config (environment):
+  V2N_HOST        ssh alias of the device            (default opiz3)
+  V2N_REMOTE_DIR  where v2n-arm and the logs live    (per host default)
+  V2N_APPS_DIR    staged titles, one dir per <ID>    (per host default)
+  V2N_BUILD       host build directory               (build/cmake-arm-rel)
+  V2N_OUT         screenshot / frame-dump output     (build/shots)
+  V2N_JOBS        build parallelism                  (all cores)
+
+Commands:
+  deploy [host]            build arm-rel, copy the binary, restart the kiosk
+  title [ID]               run title <ID> (list staged titles when omitted)
+  shot [name]              screenshot the VNC display to build/shots/<name>.png
+  drive click X Y [hold]   tap/hold the touchscreen (default hold 0.8s)
+  drive key KEYSYM [hold]  tap/hold a key (z, Return, Left, ...)
+  drive cmd '<xdotool>'    run a raw xdotool command inside the X session
+  log [lines]              tail the live game log
+  crash [-a]               show the newest preserved crash log (-a: whole file)
+  test [name...]           run the ARM smoke tests on the device
+  dump-frame [frames] [s]  headless frame capture of the running title
+  gdb [pid]                attach gdb to v2n-arm and inspect the next signal
+  clean [cores|shots|all]  delete device core dumps / local captures
+
+Examples:
+  tools/v2n title PCSE01177 && tools/v2n shot iconoclasts-menu
+  tools/v2n drive click 480 497 1.2
+  tools/v2n dump-frame 400,600 && open build/shots/frame_0400.png
+  V2N_HOST=r36s tools/v2n deploy
+EOF
+}
+
+# Per-host defaults. The Orange Pi runs a TigerVNC kiosk unit; the R36S has no
+# kiosk and starts the game from a login shell (see AGENTS.md).
+host_config() {
+    HOST=${1:-${V2N_HOST:-opiz3}}
+    case $HOST in
+        opiz3)
+            REMOTE_DIR=${V2N_REMOTE_DIR:-/home/bachnx/v2n-run}
+            APPS_DIR=${V2N_APPS_DIR:-/home/bachnx/tests/apps}
+            CONF=${V2N_CONF:-/home/bachnx/.vnc/v2n.conf}
+            LOG=${V2N_LOG:-$REMOTE_DIR/vnc-game.log}
+            UNIT=${V2N_UNIT-tigervncserver@:1.service}
+            ;;
+        r36s)
+            REMOTE_DIR=${V2N_REMOTE_DIR:-/home/ark/v2n-run}
+            APPS_DIR=${V2N_APPS_DIR:-/home/ark/tests/apps}
+            CONF=${V2N_CONF:-/home/ark/.vnc/v2n.conf}
+            LOG=${V2N_LOG:-$REMOTE_DIR/vnc-game.log}
+            UNIT=${V2N_UNIT-}
+            ;;
+        *)
+            REMOTE_DIR=${V2N_REMOTE_DIR:-$HOME/v2n-run}
+            APPS_DIR=${V2N_APPS_DIR:-$HOME/tests/apps}
+            CONF=${V2N_CONF:-$HOME/.vnc/v2n.conf}
+            LOG=${V2N_LOG:-$REMOTE_DIR/vnc-game.log}
+            UNIT=${V2N_UNIT-}
+            ;;
+    esac
+}
+
+remote() { ssh "$HOST" "$@"; }
+remote_sh() { ssh "$HOST" "$*"; }
+
+# The kiosk relaunches the title; a plain `nohup` start would be reparented
+# into the login session and survive the X server.
+restart_kiosk() {
+    [ -n "$UNIT" ] || return 0
+    remote "sudo systemctl restart '$UNIT'"
+}
+
+current_app() {
+    remote "sed -n 's/^V2N_APP=//p' '$CONF' | tail -n 1"
+}
+
+cmd_deploy() {
+    host_config "${1:-}"
+    cmake --preset arm-rel >/dev/null || die "arm-rel configure failed"
+    cmake --build --preset arm-rel -j"$JOBS" || die "arm-rel build failed"
+    echo "v2n: deploying $(stat -f %z "$BUILD/vita2native" 2>/dev/null ||
+        stat -c %s "$BUILD/vita2native") bytes to $HOST:$REMOTE_DIR/$BIN"
+    scp -q "$BUILD/vita2native" "$HOST:$REMOTE_DIR/$BIN.new" || die "scp failed"
+    remote "mv '$REMOTE_DIR/$BIN.new' '$REMOTE_DIR/$BIN'" || die "install failed"
+    if [ -n "$UNIT" ]; then
+        restart_kiosk || die "could not restart $UNIT"
+        sleep 3
+        remote "tail -n 8 '$LOG'"
+    else
+        cat <<EOF
+v2n: deployed. $HOST has no kiosk; run it from a login shell (the Mali EGL
+     environment comes from the profile) and stop EmulationStation first:
+  ssh -tt $HOST 'bash -lc "cd $REMOTE_DIR && ./$BIN $APPS_DIR/<ID>/eboot.bin"'
+EOF
+    fi
+}
+
+cmd_title() {
+    host_config
+    if [ $# -eq 0 ]; then
+        echo "staged titles in $HOST:$APPS_DIR:"
+        remote "ls -d '$APPS_DIR'/*/ 2>/dev/null" | sed 's|.*/\([^/]*\)/$|  \1|'
+        echo
+        echo "run one with: tools/v2n title <ID>"
+        return 0
+    fi
+    id=$1
+    app=$APPS_DIR/$id/eboot.bin
+    remote "test -f '$app'" || die "no $app on $HOST (v2n title lists staged titles)"
+    remote "cp '$CONF' '$CONF.bak' 2>/dev/null" || true
+    remote "sed -i 's|^V2N_APP=.*|V2N_APP=$app|' '$CONF'"
+    remote "grep -q '^V2N_APP=' '$CONF' || echo 'V2N_APP=$app' >> '$CONF'" || die "could not update $CONF"
+    echo "v2n: $id -> $app (previous config saved as v2n.conf.bak)"
+    restart_kiosk || die "could not restart the session"
+    sleep 3
+    remote "tail -n 12 '$LOG'"
+}
+
+cmd_shot() {
+    host_config
+    name=${1:-shot-$(date +%Y%m%d-%H%M%S)}
+    mkdir -p "$OUT" || die "cannot create $OUT"
+    remote "DISPLAY=$DISPLAY_NUM xwd -root -silent -out /tmp/v2n-shot.xwd" ||
+        die "xwd failed (is the VNC session running?)"
+    scp -q "$HOST:/tmp/v2n-shot.xwd" "$OUT/$name.xwd" || die "scp failed"
+    python3 "$ROOT/tools/img2png.py" "$OUT/$name.xwd" "$OUT/$name.png" || die "conversion failed"
+    rm -f "$OUT/$name.xwd"
+    echo "$OUT/$name.png"
+}
+
+cmd_drive() {
+    host_config
+    [ $# -ge 1 ] || die "usage: v2n drive click X Y [hold] | key KEYSYM [hold] | cmd '<xdotool>'"
+    action=$1
+    shift
+    case $action in
+        click)
+            [ $# -ge 2 ] || die "usage: v2n drive click X Y [hold]"
+            remote "DISPLAY=$DISPLAY_NUM xdotool mousemove $1 $2 mousedown 1; sleep ${3:-0.8}; DISPLAY=$DISPLAY_NUM xdotool mouseup 1"
+            ;;
+        key)
+            [ $# -ge 1 ] || die "usage: v2n drive key KEYSYM [hold]"
+            remote "DISPLAY=$DISPLAY_NUM xdotool keydown $1; sleep ${2:-0.8}; DISPLAY=$DISPLAY_NUM xdotool keyup $1"
+            ;;
+        cmd)
+            [ $# -ge 1 ] || die "usage: v2n drive cmd '<xdotool arguments>'"
+            remote_sh "DISPLAY=$DISPLAY_NUM xdotool $*"
+            ;;
+        *)
+            die "unknown drive action '$action' (click, key, cmd)"
+            ;;
+    esac
+}
+
+cmd_log() {
+    host_config
+    remote "tail -n ${1:-60} '$LOG'"
+}
+
+cmd_crash() {
+    host_config
+    newest=$(remote "ls -t '$REMOTE_DIR'/crash-*.log 2>/dev/null | head -n 1")
+    [ -n "$newest" ] || die "no crash-*.log in $HOST:$REMOTE_DIR (the kiosk keeps one only when the guest faulted)"
+    echo "== $newest"
+    if [ "${1:-}" = -a ]; then
+        remote "cat '$newest'"
+        return 0
+    fi
+    # The interesting part is the log up to the fatal line; everything after it
+    # is the register dump and /proc/self/maps. Print the run-up, not the tail.
+    remote sh -s "$newest" <<'REMOTE'
+file=$1
+fatal=$(awk '/vita2native: guest signal|sceKernelCallAbortHandler called/ { last = NR }
+             { rows[NR] = $0 }
+             END { print last + 0 }' "$file")
+if [ "$fatal" -eq 0 ]; then
+    echo "(no fatal marker in $file; last 60 lines)"
+    tail -n 60 "$file"
+    exit 0
+fi
+start=$((fatal > 30 ? fatal - 30 : 1))
+awk -v s="$start" -v e="$((fatal + 1))" 'NR >= s && NR <= e' "$file"
+echo
+echo "(v2n crash -a: whole file; v2n gdb: catch the next one live)"
+REMOTE
+}
+
+cmd_test() {
+    host_config
+    set -- ${*:-$SMOKE_DEFAULT}
+    remote "mkdir -p $REMOTE_DIR/smoke" || die "cannot create the smoke dir"
+    failed=""
+    total=0
+    for name in "$@"; do
+        [ -x "$BUILD/$name" ] || die "$BUILD/$name is missing (build arm-rel with BUILD_TESTING=ON)"
+        scp -q "$BUILD/$name" "$HOST:$REMOTE_DIR/smoke/$name" || die "scp $name failed"
+        total=$((total + 1))
+        if out=$(remote "cd '$REMOTE_DIR/smoke' && LD_LIBRARY_PATH=/usr/lib/arm-linux-gnueabihf timeout 60 ./$name" 2>&1); then
+            echo "PASS $name"
+        else
+            echo "FAIL $name"
+            printf '%s\n' "$out" | tail -n 15 | sed 's/^/     /'
+            failed="$failed $name"
+        fi
+    done
+    if [ -n "$failed" ]; then
+        die "$(echo "$failed" | wc -w | tr -d ' ')/$total failed:$failed"
+    fi
+    echo "all $total passed"
+}
+
+cmd_dump_frame() {
+    host_config
+    frames=${1:-240}
+    timeout=${2:-40}
+    app=$(current_app)
+    [ -n "$app" ] || die "V2N_APP is not set in $HOST:$CONF (v2n title <ID>)"
+    echo "v2n: capturing frames $frames of $(basename "$(dirname "$app")")"
+    remote "rm -f /tmp/v2n-f_*.bmp"
+    remote "cd '$REMOTE_DIR' && SDL_VIDEODRIVER=dummy DISPLAY=$DISPLAY_NUM \
+        LD_LIBRARY_PATH=/usr/lib/arm-linux-gnueabihf \
+        XDG_RUNTIME_DIR=/run/user/1001 PULSE_SERVER=unix:/run/user/1001/pulse/native \
+        VITA2NATIVE_DUMP_FRAME=/tmp/v2n-f_%u.bmp VITA2NATIVE_DUMP_FRAME_AT=$frames \
+        timeout $timeout ./$BIN '$app'" >/dev/null 2>&1
+    mkdir -p "$OUT" || die "cannot create $OUT"
+    count=0
+    for frame in $(remote "ls /tmp/v2n-f_*.bmp 2>/dev/null"); do
+        name=$(basename "$frame" .bmp)
+        scp -q "$HOST:$frame" "$OUT/$name.bmp" || die "scp $frame failed"
+        python3 "$ROOT/tools/img2png.py" "$OUT/$name.bmp" "$OUT/$name.png" >/dev/null ||
+            die "conversion failed for $frame"
+        rm -f "$OUT/$name.bmp"
+        count=$((count + 1))
+    done
+    [ "$count" -gt 0 ] || die "no frames captured (is the title still loading? raise the timeout)"
+    echo "v2n: $count frame(s) in $OUT"
+}
+
+cmd_gdb() {
+    host_config
+    pid=${1:-}
+    [ -n "$pid" ] || pid=$(remote "pgrep -x $BIN | tail -n 1")
+    [ -n "$pid" ] || die "$BIN is not running on $HOST"
+    scp -q "$ROOT/tools/gdb/live-attach.gdb" "$HOST:/tmp/v2n-live.gdb" || die "scp failed"
+    echo "v2n: attaching to pid $pid (the title runs again after gdb detaches)"
+    remote "sudo timeout 300 gdb -nx -batch -p $pid -x /tmp/v2n-live.gdb"
+}
+
+cmd_clean() {
+    host_config
+    what=${1:-cores}
+    case $what in
+        cores)
+            remote "ls -1 '$REMOTE_DIR'/core* 2>/dev/null | wc -l | tr -d ' '" | {
+                read -r n
+                [ "$n" -gt 0 ] || { echo "v2n: no core dumps"; exit 0; }
+                remote "rm -f '$REMOTE_DIR'/core '$REMOTE_DIR'/core-*"
+                echo "v2n: removed $n core dump(s)"
+            }
+            ;;
+        shots) rm -f "$OUT"/*.png "$OUT"/*.xwd "$OUT"/*.bmp 2>/dev/null; echo "v2n: cleared $OUT" ;;
+        all) cmd_clean cores; cmd_clean shots ;;
+        *) die "usage: v2n clean [cores|shots|all]" ;;
+    esac
+}
+
+[ $# -ge 1 ] || { usage; exit 1; }
+command=$1
+shift
+
+case $command in
+    deploy) cmd_deploy "$@" ;;
+    title) cmd_title "$@" ;;
+    shot) cmd_shot "$@" ;;
+    drive) cmd_drive "$@" ;;
+    log) cmd_log "$@" ;;
+    crash) cmd_crash "$@" ;;
+    test) cmd_test "$@" ;;
+    dump-frame) cmd_dump_frame "$@" ;;
+    gdb) cmd_gdb "$@" ;;
+    clean) cmd_clean "$@" ;;
+    -h|--help|help) usage ;;
+    *) usage; die "unknown command '$command'" ;;
+esac
