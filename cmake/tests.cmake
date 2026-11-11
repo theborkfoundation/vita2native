@@ -20,14 +20,13 @@ add_compile_options(-UNDEBUG)
 #     [INCLUDES <directory>...]  extra include directories
 #     [DEFINES <define>...]      extra compile definitions
 #     [ARGUMENTS <argument>...]  ctest arguments
-#     [LABELS <label>...]        ctest labels, for tests CI has to skip
 #     [NO_TEST])                 build only, do not register with ctest
 #
 # `include` and `external/vita-headers/include` as well as `_GNU_SOURCE=1` are
 # implied: every test needs them and 31 copies of the same block was the reason
 # this helper exists.
 function(vita2native_add_smoke name)
-    cmake_parse_arguments(SMOKE "NO_TEST" "" "SOURCES;LIBS;INCLUDES;DEFINES;ARGUMENTS;LABELS" ${ARGN})
+    cmake_parse_arguments(SMOKE "NO_TEST" "" "SOURCES;LIBS;INCLUDES;DEFINES;ARGUMENTS" ${ARGN})
 
     add_executable(${name} ${SMOKE_SOURCES})
     target_include_directories(${name} PRIVATE
@@ -47,16 +46,19 @@ function(vita2native_add_smoke name)
 
     if(NOT SMOKE_NO_TEST)
         add_test(NAME ${name} COMMAND ${name} ${SMOKE_ARGUMENTS})
-        if(SMOKE_LABELS)
-            set_tests_properties(${name} PROPERTIES LABELS "${SMOKE_LABELS}")
-        endif()
     endif()
 endfunction()
 
-# The smoke tests fall into three groups: portable, needs-gl (a real GL/EGL
-# context) and not-64bit (the test passes guest pointers through 32-bit struct
-# fields, which only works on a 32-bit host). CI runs `ctest -LE
-# '(needs-gl|not-64bit)'`; the device runs the whole set through tools/v2n.
+# Every test builds on every host, but two groups only run on particular ones:
+#
+#   needs a GL/EGL context : gfx_smoke gl_thread_smoke egl_window_smoke
+#                            gxm_draw_smoke display_egl_smoke
+#   32-bit host only       : dialog_smoke texture_smoke avplayer_smoke
+#
+# The second group emulates guest structs by putting *host* pointers in 32-bit
+# fields, so on a 64-bit build the pointer truncates and the test faults. The
+# devices run everything through tools/v2n; on x64 it is the compile check that
+# matters.
 
 vita2native_add_smoke(host_smoke
     SOURCES
@@ -108,8 +110,7 @@ vita2native_add_smoke(camera_smoke
 vita2native_add_smoke(gfx_smoke
     SOURCES tests/gfx_smoke.c ${VITA2NATIVE_HOST_GFX_SOURCES}
     INCLUDES external/khronos/include
-    LIBS ${CMAKE_DL_LIBS} m
-    LABELS needs-gl)
+    LIBS ${CMAKE_DL_LIBS} m)
 
 vita2native_add_smoke(gpu_bench
     SOURCES tests/gpu_bench.c ${VITA2NATIVE_HOST_GFX_SOURCES}
@@ -120,8 +121,7 @@ vita2native_add_smoke(gpu_bench
 vita2native_add_smoke(gl_thread_smoke
     SOURCES tests/gl_thread_smoke.c ${VITA2NATIVE_HOST_GFX_SOURCES}
     INCLUDES source/host external/khronos/include
-    LIBS pthread ${CMAKE_DL_LIBS} m
-    LABELS needs-gl)
+    LIBS pthread ${CMAKE_DL_LIBS} m)
 
 # Interactive display check: presents a moving pattern through DRM/KMS or
 # fbdev. Not a ctest entry because it needs a real panel and runs until the
@@ -289,18 +289,14 @@ vita2native_add_smoke(processmgr_smoke
         source/host/host_thread.c
     LIBS pthread m)
 
-# The save-data dialog test stores guest pointers in 32-bit struct fields, so
-# it only runs on a 32-bit host: on a 64-bit build the pointer truncates and
-# the test faults. It is labelled instead of dropped because the device build
-# can still run it.
+# Stores guest pointers in 32-bit struct fields, so it faults on a 64-bit build.
 vita2native_add_smoke(dialog_smoke
     SOURCES
         tests/dialog_smoke.c
         tests/dialog_deps_stub.c
         source/modules/SceCommonDialog.c
         source/host/host_thread.c
-    LIBS pthread
-    LABELS not-64bit)
+    LIBS pthread)
 
 vita2native_add_smoke(dialog_overlay_smoke
     SOURCES
@@ -319,8 +315,7 @@ vita2native_add_smoke(avplayer_smoke
         source/module.c
         source/modules/SceAvPlayer.c
         source/host/host_thread.c
-    LIBS pthread
-    LABELS not-64bit)
+    LIBS pthread)
 
 vita2native_add_smoke(touch_smoke
     SOURCES
@@ -346,8 +341,7 @@ vita2native_add_smoke(ngs_smoke
 vita2native_add_smoke(egl_window_smoke
     SOURCES tests/egl_window_smoke.c ${VITA2NATIVE_HOST_GFX_SOURCES}
     INCLUDES source/host external/khronos/include
-    LIBS ${CMAKE_DL_LIBS} m
-    LABELS needs-gl)
+    LIBS ${CMAKE_DL_LIBS} m)
 
 if(NOT VITA2NATIVE_HEADLESS)
     vita2native_add_smoke(display_egl_smoke
@@ -364,8 +358,7 @@ if(NOT VITA2NATIVE_HEADLESS)
             external/Vita3K/external/LibAtrac9/C/src
             ${SDL2_INCLUDE_DIRS}
         DEFINES _FILE_OFFSET_BITS=64
-        LIBS ${SDL2_LIBRARIES} ${CMAKE_DL_LIBS} m pthread
-        LABELS needs-gl)
+        LIBS ${SDL2_LIBRARIES} ${CMAKE_DL_LIBS} m pthread)
 endif()
 
 # shader_smoke takes a .gxp path, so it registers one ctest entry per fixture
@@ -386,8 +379,7 @@ add_test(NAME shader_smoke_texture
 
 vita2native_add_smoke(texture_smoke
     SOURCES tests/texture_smoke.c ${VITA2NATIVE_GXM_TEXTURE_SOURCES}
-    INCLUDES external/Vita3K/vita3k/renderer/include
-    LABELS not-64bit)
+    INCLUDES external/Vita3K/vita3k/renderer/include)
 
 vita2native_add_smoke(gxm_draw_smoke
     SOURCES
@@ -409,5 +401,4 @@ vita2native_add_smoke(gxm_draw_smoke
     LIBS
         shader glslang spirv-cross-glsl spirv-cross-core fmt-header-only
         m pthread ${CMAKE_DL_LIBS}
-    ARGUMENTS ${CMAKE_SOURCE_DIR}/external/Vita3K/tools/native-tool/src/shaders
-    LABELS needs-gl)
+    ARGUMENTS ${CMAKE_SOURCE_DIR}/external/Vita3K/tools/native-tool/src/shaders)
