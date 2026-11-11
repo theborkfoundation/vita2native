@@ -306,6 +306,23 @@ frame dumps using nothing but the standard library.
 The judgement that goes with these commands (what a crash means, which render
 knob to turn) lives in the agent skills under `.agents/skills`.
 
+### Getting a title out of a .pkg
+
+`tools/v2n-extract` turns a Vita `.pkg` plus its `work.bin` into the same
+layout: a decrypted `eboot.bin`, decrypted `sce_module/*.suprx` and the game
+data under `<TITLE_ID>/`.
+
+```sh
+tools/v2n-extract/build.sh
+build/v2n-extract-host/v2n-extract --pkg game.pkg --work-bin work.bin --out ~/tests/apps
+scp -r ~/tests/apps/<TITLE_ID> opiz3:~/tests/apps/
+./tools/v2n title <TITLE_ID>
+```
+
+The pkg container needs no keys (three public constants); the license supplies
+the klicensee for the PFS and SELF layers. `--list` prints the contents and
+needs no license. See `tools/v2n-extract/README.md` for the three layers.
+
 ## Building from source
 
 ```sh
