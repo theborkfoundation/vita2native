@@ -60,6 +60,10 @@ endfunction()
 # devices run everything through tools/v2n; on x64 it is the compile check that
 # matters.
 
+vita2native_add_smoke(settings_smoke
+    SOURCES tests/settings_smoke.c source/settings.c
+    ARGUMENTS ${CMAKE_SOURCE_DIR})
+
 vita2native_add_smoke(host_smoke
     SOURCES
         tests/host_smoke.c

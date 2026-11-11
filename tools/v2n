@@ -25,7 +25,7 @@ DISPLAY_NUM=:1
 # cover the pieces titles actually break on. Device-specific failures are
 # documented in the v2n-crash-triage skill (gxm_draw_smoke needs shader
 # fixtures, shader_smoke needs an argument).
-SMOKE_DEFAULT="host_smoke mspace_smoke libc_format_smoke dialog_smoke fios2_smoke \
+SMOKE_DEFAULT="host_smoke settings_smoke mspace_smoke libc_format_smoke dialog_smoke fios2_smoke \
 sync_smoke threadmgr_smoke fiber_smoke apputil_smoke regmgr_smoke \
 ctrl_script_smoke extra_imports_smoke jpeg_smoke camera_smoke pgf_smoke \
 sqlite_smoke atrac_smoke audiodec_smoke ngs_smoke http_smoke net_smoke \

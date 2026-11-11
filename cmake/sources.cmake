@@ -20,6 +20,7 @@ add_executable(vita2native
     source/main.c
     source/module.c
     source/netlog.c
+    source/settings.c
     source/spirv_cross_glsl_es.cpp
     source/util.c
     source/vita3k_shader_recompiler_iface_c.cpp

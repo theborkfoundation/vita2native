@@ -99,6 +99,15 @@ fallback. Set `VITA2NATIVE_NETWORK=1` to report the host's real network state.
 Guest `mspace_*` imports automatically prefer the title's own `libc.suprx` when
 it exports them, falling back to the host implementation otherwise.
 
+Every knob is listed in `include/settings.h` with a cached lookup. A misspelt
+`VITA2NATIVE_*` name is reported at startup with the closest known one, and
+`VITA2NATIVE_ENV_DUMP=1 ./vita2native` prints the whole table with the current
+values and exit:
+
+```
+vita2native: unknown setting VITA2NATIVE_NO_MSA (did you mean VITA2NATIVE_NO_MSAA?)
+```
+
 ## Current status
 
 CPU-rendered homebrew runs: ELF loading, relocations, import patching, threads,

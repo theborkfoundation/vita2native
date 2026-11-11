@@ -21,6 +21,7 @@
 #include "log.h"
 #include "module.h"
 #include "netlog.h"
+#include "settings.h"
 #include "vpk.h"
 
 #include "modules/SceCtrl.h"
@@ -951,6 +952,12 @@ int main(int argc, char *argv[])
        to be a launcher setting (MALLOC_ARENA_MAX=2). */
     mallopt(M_ARENA_MAX, 2);
 #endif
+
+    vita2native_settings_check();
+    if (vita2native_env_flag("VITA2NATIVE_ENV_DUMP")) {
+        vita2native_settings_dump();
+        return 0;
+    }
 
     if (argc > 1) {
         for (int i = 1; i < argc; i++) {
