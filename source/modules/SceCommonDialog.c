@@ -9,6 +9,7 @@
  */
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +20,8 @@
 
 #include "host.h"
 #include "module.h"
+#include "modules/SceAppUtil.h"
+#include "modules/SceSysmem.h"
 #include "modules/common_dialog_overlay.h"
 
 static bool g_msg_dialog_active;
@@ -496,7 +499,7 @@ static bool savedata_debug(void)
     return getenv("VITA2NATIVE_INPUT_DEBUG") != NULL;
 }
 
-static int dialog_savedata_init(const void *param_ptr)
+EXPORT(SceCommonDialog, 0xBF5248FA, SceInt32, sceSaveDataDialogInit, void *param_ptr)
 {
     const uint8_t *p = param_ptr;
     uint32_t fixed_param, user_param, sys_param;
@@ -535,30 +538,60 @@ static int dialog_savedata_init(const void *param_ptr)
     return 0;
 }
 
-static int dialog_savedata_get_status(void)
+EXPORT(SceCommonDialog, 0x6E258046, SceCommonDialogStatus, sceSaveDataDialogGetStatus, void)
 {
     return g_savedata_dialog_active ? SCE_COMMON_DIALOG_STATUS_FINISHED
                                     : SCE_COMMON_DIALOG_STATUS_NONE;
 }
 
-static int dialog_savedata_get_substatus(void)
+EXPORT(SceCommonDialog, 0xBA0542CA, SceCommonDialogStatus, sceSaveDataDialogGetSubStatus, void)
 {
     return g_savedata_dialog_active ? SCE_COMMON_DIALOG_STATUS_FINISHED
                                     : SCE_COMMON_DIALOG_STATUS_NONE;
 }
 
-static int dialog_savedata_get_result(void *result_ptr)
+/*
+ * SceSaveDataDialogResult. Titles allocate the slot description themselves and
+ * hand its address in `slotInfo`; the dialog fills it in place and leaves the
+ * pointer alone. Only the fields below are written: the caller keeps its own
+ * locals directly behind the header on the same stack frame, so a blanket
+ * memset of the structure would corrupt them.
+ */
+struct savedata_dialog_result_header {
+    int32_t mode;
+    int32_t result;
+    int32_t button_id;
+    int32_t slot_id;
+    uint32_t slot_info;
+    uint32_t userdata;
+};
+
+struct savedata_dialog_slot_info {
+    uint32_t is_exist;
+    uint32_t slot_param;
+    uint8_t reserved[32];
+};
+
+/* Slot info fallback for titles that leave `slotInfo` NULL. */
+#define SAVEDATA_DIALOG_SCRATCH_SIZE 0x800
+
+static void *savedata_dialog_scratch(void)
 {
-    struct {
-        int32_t mode;
-        int32_t result;
-        int32_t button_id;
-        int32_t slot_id;
-        uint32_t slot_info;
-        uint32_t userdata;
-        uint8_t reserved[32];
-    } *result = result_ptr;
+    static uint8_t *scratch;
+
+    if (!scratch)
+        scratch = SceSysmem_alloc_guest_scratch("SaveDataDialogSlot",
+                                                SAVEDATA_DIALOG_SCRATCH_SIZE);
+    return scratch;
+}
+
+EXPORT(SceCommonDialog, 0xB2FF576E, SceInt32, sceSaveDataDialogGetResult, void *result_ptr)
+{
+    struct savedata_dialog_result_header *result = result_ptr;
+    struct savedata_dialog_slot_info *info;
+    SceAppUtilSaveDataSlotParam param;
     int32_t button_id = SCE_MSG_DIALOG_BUTTON_ID_YES;
+    bool param_ok;
 
     if (!result)
         return SCE_COMMON_DIALOG_ERROR_NULL;
@@ -567,38 +600,61 @@ static int dialog_savedata_get_result(void *result_ptr)
         g_savedata_dialog_message && strstr(g_savedata_dialog_message, "Failed to load"))
         button_id = SCE_MSG_DIALOG_BUTTON_ID_NO;
 
-    memset(result, 0, sizeof(*result));
     result->mode = g_savedata_dialog_mode;
     result->result = SCE_COMMON_DIALOG_RESULT_OK;
     result->button_id = button_id;
     result->slot_id = (int32_t)g_savedata_dialog_slot;
     result->userdata = g_savedata_dialog_userdata;
 
+    info = (struct savedata_dialog_slot_info *)(uintptr_t)result->slot_info;
+    if (!info) {
+        uint8_t *scratch = savedata_dialog_scratch();
+
+        if (scratch) {
+            info = (struct savedata_dialog_slot_info *)scratch;
+            info->slot_param = (uint32_t)(uintptr_t)(scratch + sizeof(*info));
+        }
+    }
+
+    param_ok = SceAppUtil_read_slot_param(g_savedata_dialog_slot, &param) == 0;
+    if (info) {
+        info->is_exist = param_ok ? 1u : 0u;
+        if (info->slot_param) {
+            if (param_ok)
+                memcpy((void *)(uintptr_t)info->slot_param, &param, sizeof(param));
+            else
+                memset((void *)(uintptr_t)info->slot_param, 0, sizeof(param));
+        }
+        result->slot_info = (uint32_t)(uintptr_t)info;
+    }
+
     if (savedata_debug()) {
-        fprintf(stderr, "vita2native: SaveDataDialog get_result mode=%d button=%d slot=%u\n",
-                g_savedata_dialog_mode, button_id, g_savedata_dialog_slot);
+        fprintf(stderr,
+                "vita2native: SaveDataDialog get_result mode=%d button=%d slot=%u exist=%d\n",
+                g_savedata_dialog_mode, button_id, g_savedata_dialog_slot,
+                info ? (int)info->is_exist : -1);
         fflush(stderr);
     }
     return 0;
 }
 
-static int dialog_savedata_finish(void)
+EXPORT(SceCommonDialog, 0x6C49924B, SceInt32, sceSaveDataDialogFinish, void)
 {
     return 0;
 }
 
-static int dialog_savedata_continue(void)
+EXPORT(SceCommonDialog, 0x19192C8B, SceInt32, sceSaveDataDialogContinue, void)
 {
     return 0;
 }
 
-static int dialog_savedata_term(void)
+EXPORT(SceCommonDialog, 0x2192A10A, SceInt32, sceSaveDataDialogTerm, void)
 {
     g_savedata_dialog_active = false;
     return 0;
 }
 
-static int dialog_savedata_abort(void)
+EXPORT(SceCommonDialog, 0x013E7F74, SceInt32, sceSaveDataDialogAbort, void)
 {
     g_savedata_dialog_active = false;
     return 0;

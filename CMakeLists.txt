@@ -624,6 +624,7 @@ if(BUILD_TESTING)
 
     add_executable(dialog_smoke
         tests/dialog_smoke.c
+        tests/dialog_deps_stub.c
         source/modules/SceCommonDialog.c
         source/host/host_thread.c
     )
@@ -634,6 +635,7 @@ if(BUILD_TESTING)
 
     add_executable(dialog_overlay_smoke
         tests/dialog_overlay_smoke.c
+        tests/dialog_deps_stub.c
         source/module.c
         source/modules/SceCommonDialog.c
         source/modules/common_dialog_overlay.c

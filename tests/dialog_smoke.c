@@ -21,6 +21,29 @@ SceInt32 sceImeDialogGetResult(SceImeDialogResult *result);
 SceInt32 sceImeDialogTerm(void);
 int sceImeDialogAbort(void);
 
+SceInt32 sceSaveDataDialogInit(const void *param);
+SceInt32 sceSaveDataDialogTerm(void);
+SceCommonDialogStatus sceSaveDataDialogGetStatus(void);
+SceCommonDialogStatus sceSaveDataDialogGetSubStatus(void);
+SceInt32 sceSaveDataDialogGetResult(void *result);
+
+/* SceSaveDataDialogResult as titles see it: a short header whose slotInfo
+   field points at storage the caller owns. */
+struct savedata_slot_info {
+    uint32_t is_exist;
+    uint32_t slot_param;
+    uint8_t reserved[32];
+};
+
+struct savedata_result {
+    int32_t mode;
+    int32_t result;
+    int32_t button_id;
+    int32_t slot_id;
+    uint32_t slot_info;
+    uint32_t userdata;
+};
+
 #define CHECK(cond, message)                                                                       \
     do {                                                                                           \
         if (!(cond)) {                                                                             \
@@ -82,6 +105,46 @@ int main(void)
     CHECK(sceImeDialogInit(&ime_param) == 0, "the IME could not be restarted");
     CHECK(sceImeDialogAbort() == 0, "ImeDialogAbort failed");
     CHECK(sceImeDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_NONE, "the IME is still active");
+
+    /*
+     * The save-data dialog fills the caller's slot description in place. Titles
+     * keep their own locals directly behind the result header, so GetResult must
+     * stop at the userdata field: a memset over the whole structure used to
+     * zero the caller's slotInfo pointer (Shakedown: Hawaii crash).
+     */
+    {
+        uint8_t dialog_param[0x80];
+        uint8_t slot_param[0x34C];
+        uint32_t slot_id = 0;
+        struct savedata_slot_info info;
+        struct savedata_result result;
+
+        memset(dialog_param, 0, sizeof(dialog_param));
+        memset(slot_param, 0xcd, sizeof(slot_param));
+        *(int32_t *)(dialog_param + 0x50) = 1; /* SCE_SAVEDATA_DIALOG_MODE_FIXED */
+        *(int32_t *)(dialog_param + 0x54) = 2;
+        *(uint32_t *)(dialog_param + 0x58) = (uint32_t)(uintptr_t)&slot_id;
+
+        memset(&info, 0, sizeof(info));
+        info.slot_param = (uint32_t)(uintptr_t)slot_param;
+
+        memset(&result, 0, sizeof(result));
+        result.slot_info = (uint32_t)(uintptr_t)&info;
+
+        CHECK(sceSaveDataDialogInit(dialog_param) == 0, "SaveDataDialogInit failed");
+        CHECK(sceSaveDataDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_FINISHED,
+              "the save-data dialog did not finish");
+        CHECK(sceSaveDataDialogGetSubStatus() == SCE_COMMON_DIALOG_STATUS_FINISHED,
+              "the save-data dialog has no success substatus");
+        CHECK(sceSaveDataDialogGetResult(&result) == 0, "SaveDataDialogGetResult failed");
+        CHECK(result.mode == 1, "the save-data result mode is wrong");
+        CHECK(result.result == SCE_COMMON_DIALOG_RESULT_OK, "the save-data result is not OK");
+        CHECK(result.slot_id == 0, "the save-data result slot is wrong");
+        CHECK(result.slot_info == (uint32_t)(uintptr_t)&info,
+              "GetResult replaced the caller's slotInfo pointer");
+        CHECK(info.is_exist == 0, "the empty slot was reported as existing");
+        CHECK(sceSaveDataDialogTerm() == 0, "SaveDataDialogTerm failed");
+    }
 
     puts("dialog_smoke: ok");
     return 0;

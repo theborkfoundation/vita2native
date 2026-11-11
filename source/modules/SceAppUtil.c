@@ -23,6 +23,7 @@
 #include "fs.h"
 #include "log.h"
 #include "module.h"
+#include "modules/SceAppUtil.h"
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -105,6 +106,30 @@ static int write_slot_param(unsigned int slot_id, const SceAppUtilSaveDataSlotPa
     fwrite(param, 1, sizeof(*param), file);
     fclose(file);
 
+    return 0;
+}
+
+int SceAppUtil_read_slot_param(unsigned int slot_id, SceAppUtilSaveDataSlotParam *param)
+{
+    char path[PATH_MAX];
+    FILE *file;
+    size_t read_size;
+
+    if (!param || slot_param_path(slot_id, path, sizeof(path)) != 0)
+        return SCE_APPUTIL_ERROR_PARAMETER;
+
+    file = fopen(path, "rb");
+    if (!file)
+        return SCE_APPUTIL_ERROR_SAVEDATA_SLOT_NOT_FOUND;
+
+    memset(param, 0, sizeof(*param));
+    read_size = fread(param, 1, sizeof(*param), file);
+    fclose(file);
+
+    if (read_size != sizeof(*param))
+        return SCE_APPUTIL_ERROR_PARAMETER;
+
+    param->status = 0;
     return 0;
 }
 
@@ -204,27 +229,17 @@ EXPORT(SceAppUtil, 0x98630136, int, sceAppUtilSaveDataSlotSetParam, unsigned int
 EXPORT(SceAppUtil, 0x93F0D89F, int, sceAppUtilSaveDataSlotGetParam, unsigned int slot_id,
        SceAppUtilSaveDataSlotParam *param, SceAppUtilSaveDataMountPoint *mount_point)
 {
-    char path[PATH_MAX];
-    FILE *file;
-    size_t read_size;
+    int ret;
 
     (void)mount_point;
 
-    if (!param || slot_param_path(slot_id, path, sizeof(path)) != 0)
+    if (!param)
         return SCE_APPUTIL_ERROR_PARAMETER;
 
-    file = fopen(path, "rb");
-    if (!file)
-        return SCE_APPUTIL_ERROR_SAVEDATA_SLOT_NOT_FOUND;
+    ret = SceAppUtil_read_slot_param(slot_id, param);
+    if (ret != 0)
+        return ret;
 
-    memset(param, 0, sizeof(*param));
-    read_size = fread(param, 1, sizeof(*param), file);
-    fclose(file);
-
-    if (read_size != sizeof(*param))
-        return SCE_APPUTIL_ERROR_PARAMETER;
-
-    param->status = 0;
     if (save_debug()) {
         fprintf(stderr, "vita2native: SaveDataSlotGetParam slot=%u -> ok status=%u\n",
                 slot_id, (unsigned)param->status);

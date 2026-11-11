@@ -225,6 +225,20 @@ VitaMemBlockInfo *SceSysmem_get_vita_memblock_info_for_addr(const void *addr)
     return block;
 }
 
+void *SceSysmem_alloc_guest_scratch(const char *name, uint32_t size)
+{
+    void *base = NULL;
+    SceUID uid = sceKernelAllocMemBlock(name, SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, size, NULL);
+
+    if (uid < 0)
+        return NULL;
+    if (sceKernelGetMemBlockBase(uid, &base) < 0)
+        return NULL;
+
+    memset(base, 0, size);
+    return base;
+}
+
 EXPORT(SceSysmem, 0xD0D4F729, int, sceKernelGetModel, void)
 {
     return SCE_KERNEL_MODEL_VITA;
