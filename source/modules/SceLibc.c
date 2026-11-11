@@ -773,13 +773,504 @@ EXPORT(SceLibc, 0x4696e7be, void, vita_perror, const char *s)
     perror(s);
 }
 
+/*
+ * Vita wide strings are UTF-16, but the host printf reads %ls as a 32-bit
+ * wchar_t string. The two halves of a UTF-16 code unit then form an invalid
+ * character, the conversion fails and nothing is written: Fort Defense builds
+ * its file names with sprintf("%ls") and ended up opening empty paths.
+ *
+ * Format the arguments here instead: every conversion is handed to the host
+ * printf on its own (so widths, precisions and floating point keep their exact
+ * behaviour) and only %ls/%lc go through the UTF-16 to UTF-8 conversion.
+ */
+struct vita_format_out {
+    char *buffer;
+    size_t size;   /* capacity including the terminating NUL; SIZE_MAX = sprintf */
+    size_t length; /* bytes the complete output needs */
+};
+
+static void format_append(struct vita_format_out *out, const char *text, size_t length)
+{
+    if (length == 0)
+        return;
+
+    if (out->size > 0 && out->length < out->size - 1) {
+        size_t room = out->size - 1 - out->length;
+        size_t count = length < room ? length : room;
+
+        memcpy(out->buffer + out->length, text, count);
+    }
+
+    out->length += length;
+}
+
+static void format_emit(struct vita_format_out *out, const char *spec, ...)
+{
+    char stack[256];
+    va_list args;
+    int needed;
+
+    va_start(args, spec);
+    needed = vsnprintf(stack, sizeof(stack), spec, args);
+    va_end(args);
+
+    if (needed < 0)
+        return;
+
+    if ((size_t)needed < sizeof(stack)) {
+        format_append(out, stack, (size_t)needed);
+        return;
+    }
+
+    {
+        char *heap = malloc((size_t)needed + 1);
+
+        if (!heap) {
+            format_append(out, stack, sizeof(stack) - 1);
+            return;
+        }
+
+        va_start(args, spec);
+        vsnprintf(heap, (size_t)needed + 1, spec, args);
+        va_end(args);
+        format_append(out, heap, (size_t)needed);
+        free(heap);
+    }
+}
+
+/* Returns the UTF-8 length and, when `dst` is given, writes the text (without
+   the NUL) as long as it fits. */
+static size_t utf16_to_utf8(char *dst, size_t dst_size, const uint16_t *src)
+{
+    size_t length = 0;
+
+    for (; *src; src++) {
+        uint32_t code = *src;
+        char encoded[4];
+        size_t count;
+
+        if (code >= 0xd800 && code <= 0xdbff && src[1] >= 0xdc00 && src[1] <= 0xdfff) {
+            code = 0x10000u + ((code - 0xd800u) << 10) + (src[1] - 0xdc00u);
+            src++;
+        }
+
+        if (code < 0x80) {
+            encoded[0] = (char)code;
+            count = 1;
+        } else if (code < 0x800) {
+            encoded[0] = (char)(0xc0 | (code >> 6));
+            encoded[1] = (char)(0x80 | (code & 0x3f));
+            count = 2;
+        } else if (code < 0x10000) {
+            encoded[0] = (char)(0xe0 | (code >> 12));
+            encoded[1] = (char)(0x80 | ((code >> 6) & 0x3f));
+            encoded[2] = (char)(0x80 | (code & 0x3f));
+            count = 3;
+        } else {
+            encoded[0] = (char)(0xf0 | (code >> 18));
+            encoded[1] = (char)(0x80 | ((code >> 12) & 0x3f));
+            encoded[2] = (char)(0x80 | ((code >> 6) & 0x3f));
+            encoded[3] = (char)(0x80 | (code & 0x3f));
+            count = 4;
+        }
+
+        if (dst && length + count <= dst_size)
+            memcpy(dst + length, encoded, count);
+        length += count;
+    }
+
+    return length;
+}
+
+static void format_wide_string(struct vita_format_out *out, const char *prefix,
+                               const char *precision_text, const uint16_t *text)
+{
+    char spec[64];
+
+    if (!text) {
+        snprintf(spec, sizeof(spec), "%s%ss", prefix, precision_text);
+        format_emit(out, spec, "(null)");
+        return;
+    }
+
+    {
+        size_t length = utf16_to_utf8(NULL, 0, text);
+        char stack[256];
+        char *buffer = length < sizeof(stack) ? stack : malloc(length + 1);
+
+        if (!buffer)
+            return;
+
+        utf16_to_utf8(buffer, length + 1, text);
+        buffer[length] = '\0';
+
+        /* %ls counts the precision in bytes and never splits a character. */
+        if (precision_text[0]) {
+            long precision = strtol(precision_text + 1, NULL, 10);
+
+            if (precision >= 0 && (size_t)precision < length) {
+                length = (size_t)precision;
+                while (length > 0 && ((unsigned char)buffer[length] & 0xc0) == 0x80)
+                    length--;
+                buffer[length] = '\0';
+            }
+        }
+
+        snprintf(spec, sizeof(spec), "%ss", prefix);
+        format_emit(out, spec, buffer);
+
+        if (buffer != stack)
+            free(buffer);
+    }
+}
+
+typedef enum {
+    VITA_LEN_NONE,
+    VITA_LEN_HH,
+    VITA_LEN_H,
+    VITA_LEN_L,
+    VITA_LEN_LL,
+    VITA_LEN_J,
+    VITA_LEN_Z,
+    VITA_LEN_T,
+    VITA_LEN_BIG_L,
+} vita_format_length;
+
+static int vita_format(char *buffer, size_t size, const char *format, va_list args)
+{
+    struct vita_format_out out = { buffer, size, 0 };
+    const char *p = format;
+    va_list ap;
+
+    if (!format) {
+        format = "(null)";
+        p = format;
+    }
+
+    va_copy(ap, args);
+
+    while (*p) {
+        char prefix[48];
+        size_t prefix_length = 0;
+        char precision_text[16] = "";
+        vita_format_length length = VITA_LEN_NONE;
+        char spec[64];
+        char conversion;
+
+        if (*p != '%') {
+            const char *start = p;
+
+            while (*p && *p != '%')
+                p++;
+            format_append(&out, start, (size_t)(p - start));
+            continue;
+        }
+
+        p++;
+        if (*p == '%') {
+            p++;
+            format_append(&out, "%", 1);
+            continue;
+        }
+
+        prefix[prefix_length++] = '%';
+        while (*p && strchr("-+ #0'", *p) && prefix_length < sizeof(prefix) - 1)
+            prefix[prefix_length++] = *p++;
+
+        if (*p == '*') {
+            int width = va_arg(ap, int);
+
+            p++;
+            if (width < 0) {
+                if (prefix_length < sizeof(prefix) - 1)
+                    prefix[prefix_length++] = '-';
+                width = -width;
+            }
+            prefix_length += (size_t)snprintf(prefix + prefix_length,
+                                              sizeof(prefix) - prefix_length, "%d", width);
+            if (prefix_length >= sizeof(prefix) - 1)
+                prefix_length = sizeof(prefix) - 1;
+        } else {
+            while (*p >= '0' && *p <= '9' && prefix_length < sizeof(prefix) - 1)
+                prefix[prefix_length++] = *p++;
+        }
+        prefix[prefix_length] = '\0';
+
+        if (*p == '.') {
+            p++;
+            if (*p == '*') {
+                int precision = va_arg(ap, int);
+
+                p++;
+                if (precision >= 0)
+                    snprintf(precision_text, sizeof(precision_text), ".%d", precision);
+            } else {
+                char *text = precision_text;
+
+                *text++ = '.';
+                while (*p >= '0' && *p <= '9' &&
+                       text < precision_text + sizeof(precision_text) - 1)
+                    *text++ = *p++;
+                *text = '\0';
+            }
+        }
+
+        if (p[0] == 'h' && p[1] == 'h') {
+            length = VITA_LEN_HH;
+            p += 2;
+        } else if (*p == 'h') {
+            length = VITA_LEN_H;
+            p++;
+        } else if (p[0] == 'l' && p[1] == 'l') {
+            length = VITA_LEN_LL;
+            p += 2;
+        } else if (*p == 'l') {
+            length = VITA_LEN_L;
+            p++;
+        } else if (*p == 'j') {
+            length = VITA_LEN_J;
+            p++;
+        } else if (*p == 'z') {
+            length = VITA_LEN_Z;
+            p++;
+        } else if (*p == 't') {
+            length = VITA_LEN_T;
+            p++;
+        } else if (*p == 'L' || *p == 'q') {
+            length = *p == 'L' ? VITA_LEN_BIG_L : VITA_LEN_LL;
+            p++;
+        }
+
+        if (!*p)
+            break;
+
+        conversion = *p++;
+
+        switch (conversion) {
+        case 'd':
+        case 'i':
+            switch (length) {
+            case VITA_LEN_HH:
+                snprintf(spec, sizeof(spec), "%s%s%sd", prefix, precision_text, "hh");
+                format_emit(&out, spec, (int)(signed char)va_arg(ap, int));
+                break;
+            case VITA_LEN_H:
+                snprintf(spec, sizeof(spec), "%s%shd", prefix, precision_text);
+                format_emit(&out, spec, (int)(short)va_arg(ap, int));
+                break;
+            case VITA_LEN_L:
+                snprintf(spec, sizeof(spec), "%s%sld", prefix, precision_text);
+                format_emit(&out, spec, va_arg(ap, long));
+                break;
+            case VITA_LEN_LL:
+                snprintf(spec, sizeof(spec), "%s%slld", prefix, precision_text);
+                format_emit(&out, spec, va_arg(ap, long long));
+                break;
+            case VITA_LEN_J:
+                snprintf(spec, sizeof(spec), "%s%sjd", prefix, precision_text);
+                format_emit(&out, spec, va_arg(ap, intmax_t));
+                break;
+            case VITA_LEN_Z:
+                snprintf(spec, sizeof(spec), "%s%szd", prefix, precision_text);
+                format_emit(&out, spec, va_arg(ap, ssize_t));
+                break;
+            case VITA_LEN_T:
+                snprintf(spec, sizeof(spec), "%s%std", prefix, precision_text);
+                format_emit(&out, spec, va_arg(ap, ptrdiff_t));
+                break;
+            default:
+                snprintf(spec, sizeof(spec), "%s%sd", prefix, precision_text);
+                format_emit(&out, spec, va_arg(ap, int));
+                break;
+            }
+            break;
+
+        case 'o':
+        case 'u':
+        case 'x':
+        case 'X':
+            switch (length) {
+            case VITA_LEN_HH:
+                snprintf(spec, sizeof(spec), "%s%shh%c", prefix, precision_text, conversion);
+                format_emit(&out, spec, (unsigned int)(unsigned char)va_arg(ap, unsigned int));
+                break;
+            case VITA_LEN_H:
+                snprintf(spec, sizeof(spec), "%s%sh%c", prefix, precision_text, conversion);
+                format_emit(&out, spec, (unsigned int)(unsigned short)va_arg(ap, unsigned int));
+                break;
+            case VITA_LEN_L:
+                snprintf(spec, sizeof(spec), "%s%sl%c", prefix, precision_text, conversion);
+                format_emit(&out, spec, va_arg(ap, unsigned long));
+                break;
+            case VITA_LEN_LL:
+                snprintf(spec, sizeof(spec), "%s%sll%c", prefix, precision_text, conversion);
+                format_emit(&out, spec, va_arg(ap, unsigned long long));
+                break;
+            case VITA_LEN_J:
+                snprintf(spec, sizeof(spec), "%s%sj%c", prefix, precision_text, conversion);
+                format_emit(&out, spec, va_arg(ap, uintmax_t));
+                break;
+            case VITA_LEN_Z:
+                snprintf(spec, sizeof(spec), "%s%sz%c", prefix, precision_text, conversion);
+                format_emit(&out, spec, va_arg(ap, size_t));
+                break;
+            case VITA_LEN_T:
+                snprintf(spec, sizeof(spec), "%s%st%c", prefix, precision_text, conversion);
+                format_emit(&out, spec, va_arg(ap, ptrdiff_t));
+                break;
+            default:
+                snprintf(spec, sizeof(spec), "%s%s%c", prefix, precision_text, conversion);
+                format_emit(&out, spec, va_arg(ap, unsigned int));
+                break;
+            }
+            break;
+
+        case 'c':
+            if (length == VITA_LEN_L) {
+                uint16_t units[2];
+                char narrow[8];
+                size_t narrow_length;
+
+                units[0] = (uint16_t)va_arg(ap, int);
+                units[1] = 0;
+                narrow_length = utf16_to_utf8(narrow, sizeof(narrow) - 1, units);
+                narrow[narrow_length] = '\0';
+                snprintf(spec, sizeof(spec), "%ss", prefix);
+                format_emit(&out, spec, narrow);
+            } else {
+                snprintf(spec, sizeof(spec), "%s%sc", prefix, precision_text);
+                format_emit(&out, spec, va_arg(ap, int));
+            }
+            break;
+
+        case 's':
+            if (length == VITA_LEN_L)
+                format_wide_string(&out, prefix, precision_text, va_arg(ap, const uint16_t *));
+            else {
+                snprintf(spec, sizeof(spec), "%s%ss", prefix, precision_text);
+                format_emit(&out, spec, va_arg(ap, const char *));
+            }
+            break;
+
+        case 'p':
+            snprintf(spec, sizeof(spec), "%s%sp", prefix, precision_text);
+            format_emit(&out, spec, va_arg(ap, void *));
+            break;
+
+        case 'n':
+            switch (length) {
+            case VITA_LEN_HH:
+                *va_arg(ap, signed char *) = (signed char)out.length;
+                break;
+            case VITA_LEN_H:
+                *va_arg(ap, short *) = (short)out.length;
+                break;
+            case VITA_LEN_L:
+                *va_arg(ap, long *) = (long)out.length;
+                break;
+            case VITA_LEN_LL:
+                *va_arg(ap, long long *) = (long long)out.length;
+                break;
+            case VITA_LEN_J:
+                *va_arg(ap, intmax_t *) = (intmax_t)out.length;
+                break;
+            case VITA_LEN_Z:
+                *va_arg(ap, ssize_t *) = (ssize_t)out.length;
+                break;
+            default:
+                *va_arg(ap, int *) = (int)out.length;
+                break;
+            }
+            break;
+
+        case 'f':
+        case 'F':
+        case 'e':
+        case 'E':
+        case 'g':
+        case 'G':
+        case 'a':
+        case 'A':
+            if (length == VITA_LEN_BIG_L) {
+                snprintf(spec, sizeof(spec), "%s%sL%c", prefix, precision_text, conversion);
+                format_emit(&out, spec, va_arg(ap, long double));
+            } else {
+                snprintf(spec, sizeof(spec), "%s%s%c", prefix, precision_text, conversion);
+                format_emit(&out, spec, va_arg(ap, double));
+            }
+            break;
+
+        default:
+            /* Unknown conversion: emit it verbatim rather than dropping text. */
+            snprintf(spec, sizeof(spec), "%s%s%c", prefix, precision_text, conversion);
+            format_append(&out, spec, strlen(spec));
+            break;
+        }
+    }
+
+    va_end(ap);
+
+    if (out.size > 0) {
+        size_t end = out.length < out.size - 1 ? out.length : out.size - 1;
+
+        out.buffer[end] = '\0';
+    }
+
+    return (int)out.length;
+}
+
+static int vita_stream_write(FILE *stream, const char *text, size_t length)
+{
+    if (vita_is_host_file(stream)) {
+        if (length == 0)
+            return 0;
+        return (int)fwrite(text, 1, length, stream);
+    }
+
+    vita_guest_stream_write(text, length);
+    return (int)length;
+}
+
+static int vita_format_stream(FILE *stream, const char *format, va_list args)
+{
+    char stack[512];
+    char *buffer = stack;
+    va_list copy;
+    int needed;
+    int written;
+
+    va_copy(copy, args);
+    needed = vita_format(stack, sizeof(stack), format, copy);
+    va_end(copy);
+
+    if (needed < 0)
+        return needed;
+
+    if ((size_t)needed >= sizeof(stack)) {
+        buffer = malloc((size_t)needed + 1);
+        if (!buffer)
+            return -1;
+
+        va_copy(copy, args);
+        vita_format(buffer, (size_t)needed + 1, format, copy);
+        va_end(copy);
+    }
+
+    written = vita_stream_write(stream, buffer, (size_t)needed);
+
+    if (buffer != stack)
+        free(buffer);
+
+    return written;
+}
+
 EXPORT(SceLibc, 0x9a004680, int, vita_printf, const char *format, ...)
 {
     va_list args;
     int result;
 
     va_start(args, format);
-    result = vprintf(format, args);
+    result = vita_format_stream(stdout, format, args);
     va_end(args);
 
     return result;
@@ -787,7 +1278,7 @@ EXPORT(SceLibc, 0x9a004680, int, vita_printf, const char *format, ...)
 
 EXPORT(SceLibc, 0xe7b5e23e, int, vita_vprintf, const char *format, va_list args)
 {
-    return vprintf(format, args);
+    return vita_format_stream(stdout, format, args);
 }
 
 EXPORT(SceLibc, 0xe0c79764, int, vita_fprintf, FILE *stream, const char *format, ...)
@@ -799,16 +1290,7 @@ EXPORT(SceLibc, 0xe0c79764, int, vita_fprintf, FILE *stream, const char *format,
         LOG("fprintf(%p, \"%s\")", (void *)stream, format ? format : "(null)");
 
     va_start(args, format);
-    if (vita_is_host_file(stream)) {
-        result = vfprintf(stream, format, args);
-    } else {
-        char buffer[1024];
-
-        result = vsnprintf(buffer, sizeof(buffer), format, args);
-        if (result > 0)
-            vita_guest_stream_write(buffer, (size_t)result < sizeof(buffer) ? (size_t)result
-                                                                           : sizeof(buffer) - 1);
-    }
+    result = vita_format_stream(stream, format, args);
     va_end(args);
 
     return result;
@@ -816,18 +1298,7 @@ EXPORT(SceLibc, 0xe0c79764, int, vita_fprintf, FILE *stream, const char *format,
 
 EXPORT(SceLibc, 0xf7915685, int, vita_vfprintf, FILE *stream, const char *format, va_list args)
 {
-    if (vita_is_host_file(stream))
-        return vfprintf(stream, format, args);
-
-    {
-        char buffer[1024];
-        int result = vsnprintf(buffer, sizeof(buffer), format, args);
-
-        if (result > 0)
-            vita_guest_stream_write(buffer, (size_t)result < sizeof(buffer) ? (size_t)result
-                                                                           : sizeof(buffer) - 1);
-        return result;
-    }
+    return vita_format_stream(stream, format, args);
 }
 
 EXPORT(SceLibc, 0x7449b359, int, vita_sprintf, char *buffer, const char *format, ...)
@@ -836,7 +1307,7 @@ EXPORT(SceLibc, 0x7449b359, int, vita_sprintf, char *buffer, const char *format,
     int result;
 
     va_start(args, format);
-    result = vsprintf(buffer, format, args);
+    result = vita_format(buffer, SIZE_MAX, format, args);
     va_end(args);
 
     return result;
@@ -848,7 +1319,7 @@ EXPORT(SceLibc, 0xa1bff606, int, vita_snprintf, char *buffer, size_t size, const
     int result;
 
     va_start(args, format);
-    result = vsnprintf(buffer, size, format, args);
+    result = vita_format(buffer, size, format, args);
     va_end(args);
 
     return result;
@@ -857,7 +1328,7 @@ EXPORT(SceLibc, 0xa1bff606, int, vita_snprintf, char *buffer, size_t size, const
 EXPORT(SceLibc, 0xfe83f2e4, int, vita_vsnprintf, char *buffer, size_t size, const char *format,
        va_list args)
 {
-    return vsnprintf(buffer, size, format, args);
+    return vita_format(buffer, size, format, args);
 }
 
 EXPORT(SceLibc, 0x4ab952f5, int, vita_snprintf_s, char *buffer, size_t size, const char *format,
@@ -867,7 +1338,7 @@ EXPORT(SceLibc, 0x4ab952f5, int, vita_snprintf_s, char *buffer, size_t size, con
     int result;
 
     va_start(args, format);
-    result = vsnprintf(buffer, size, format, args);
+    result = vita_format(buffer, size, format, args);
     va_end(args);
 
     return result;

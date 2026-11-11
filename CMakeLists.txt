@@ -534,6 +534,24 @@ if(BUILD_TESTING)
     target_link_libraries(apputil_smoke PRIVATE pthread m)
     add_test(NAME apputil_smoke COMMAND apputil_smoke)
 
+    add_executable(libc_format_smoke
+        tests/libc_format_smoke.c
+        source/modules/SceLibc.c
+        source/module.c
+        source/host/host_fs.c
+        source/host/host_psarc.c
+        source/host/host_thread.c
+        source/mspace.c
+        source/log.c
+        source/netlog.c
+        external/Vita3K/external/miniz/miniz.c
+    )
+    target_include_directories(libc_format_smoke PRIVATE include source/modules
+        external/vita-headers/include external/Vita3K/external)
+    target_compile_definitions(libc_format_smoke PRIVATE _GNU_SOURCE=1 _FILE_OFFSET_BITS=64)
+    target_link_libraries(libc_format_smoke PRIVATE pthread m)
+    add_test(NAME libc_format_smoke COMMAND libc_format_smoke)
+
     add_executable(fios2_smoke
         tests/fios2_smoke.c
         source/modules/SceFios2.c
