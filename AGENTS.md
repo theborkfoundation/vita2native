@@ -1,5 +1,9 @@
 # AGENTS
 
+Device work goes through `tools/v2n` (see README): `deploy`, `title`, `shot`,
+`drive`, `log`, `crash`, `test`, `dump-frame`, `gdb`, `clean`. The notes below
+are the judgement that goes with those commands, not a second copy of them.
+
 ## R36S (ArkOS)
 
 - Work from `/home/ark/v2n-run`; the host binary is `v2n-arm`.
@@ -62,16 +66,13 @@
 - This image has **no desktop environment and no display manager**; do not try
   to "remove XFCE". The game is shown through a TigerVNC X session that starts
   the game directly (kiosk).
-- Work from `/home/bachnx/v2n-run`; the host binary is `v2n-arm`, the game is at
-  `/home/bachnx/tests/apps/PCSE01031/eboot.bin` (Chasm).
-- Deploy the normal `build/cmake-arm-rel/vita2native` build, then restart the
-  kiosk unit. It is enabled at boot and relaunches the game on exit:
-
-  ```sh
-  scp build/cmake-arm-rel/vita2native opiz3:/home/bachnx/v2n-run/v2n-arm.new
-  ssh opiz3 'mv ~/v2n-run/v2n-arm.new ~/v2n-run/v2n-arm && \
-    sudo systemctl restart tigervncserver@:1.service'
-  ```
+- Work from `/home/bachnx/v2n-run`; the host binary is `v2n-arm`. Titles are
+  staged one directory per ID under `/home/bachnx/tests/apps/` and selected with
+  `tools/v2n title <ID>` (the kiosk runs whatever `V2N_APP` points at).
+- Deploy the normal `build/cmake-arm-rel/vita2native` build with
+  `tools/v2n deploy`; it copies the binary and restarts the kiosk unit. The
+  `arm-minsize` preset is for size experiments and rare cases only; do not use
+  it as the default deployment artifact.
 
 - `~/.vnc/xstartup` sources `~/.vnc/v2n.conf` and exports the runtime
   environment itself; a login shell is not needed. Connect to
@@ -79,12 +80,12 @@
 - Log: `/home/bachnx/v2n-run/vnc-game.log`. A crash is copied to
   `crash-<stamp>-<status>.log` (and `core-<stamp>` when `V2N_CRASH_CORE=1`)
   before the kiosk restarts.
-- `V2N_RENDER_SCALE=1` keeps the text readable at about 3.5 fps;
-  `0.6667` is faster but the font becomes unreadable.
+- `V2N_RENDER_SCALE=1` keeps small fonts readable; `0.6667` is faster but
+  blurs them. Heavy 3D titles run in the single digits either way.
 - The launcher kills its child when the session stops. Without that the game
   is reparented into the login session scope and survives the X server.
 - Mono/PSM titles build paths with a Windows `\` separator
-  (`savedata0:Chasm/Saves\`); `host_fs_resolve_path` normalises it to `/`.
+  (`savedata0:<Title>/Saves\`); `host_fs_resolve_path` normalises it to `/`.
   Without it the save enumeration fails and the game aborts with an unhandled
   `System::Exception`.
 - `VITA2NATIVE_TRACE_ABORT=1` logs the guest call stack in

@@ -58,9 +58,11 @@ cmake -S . -B build/native-arm -G Ninja -DCMAKE_BUILD_TYPE=Release \
 cmake --build build/native-arm
 ```
 
-Guest exports that pass or return floats use the host hard-float ABI, matching
-the default VitaSDK toolchain (`-mfloat-abi=hard`). For homebrew built with the
-old base-AAPCS/softfp profile, configure with `-DVITA2NATIVE_SOFTFP=ON`.
+Guest exports that pass or return floats use the host hard-float ABI,
+matching the default VitaSDK toolchain and every caller seen so far (VitaSDK
+titles, Unity's eboot and Sony's own modules). An entry point that a base-AAPCS
+caller needs is declared with `EXPORT_SOFTFP` in `include/module.h`, which pins
+that export alone to `pcs("aapcs")`.
 
 ## Running
 
@@ -220,20 +222,23 @@ a window instead of going fullscreen.
 
 ### Remote testing over X11
 
-Launch XQuartz, then connect with a local `DISPLAY` so ssh requests forwarding:
+Forwarding X11 is the quickest way to drive a title from a desktop keyboard
+without going through the VNC kiosk. Launch XQuartz once, then connect with `-X`
+so ssh forwards it:
 
 ```sh
 open -a XQuartz            # once
 DISPLAY=:0 ssh -X opiz3
 ```
 
-On the device:
+Stop the kiosk and run the binary by hand from the run directory:
 
 ```sh
-cd /tmp/v2n-run
-LD_LIBRARY_PATH=/usr/lib/arm-linux-gnueabihf \
-SDL_VIDEODRIVER=x11 VITA2NATIVE_SDL_WINDOWED=1 \
-/tmp/v2n-arm/vita2native-rel /tmp/VitaShell.vpk
+ssh opiz3 'sudo systemctl stop tigervncserver@:1.service'
+ssh -tt opiz3 'cd ~/v2n-run && \
+  LD_LIBRARY_PATH=/usr/lib/arm-linux-gnueabihf \
+  SDL_VIDEODRIVER=x11 VITA2NATIVE_SDL_WINDOWED=1 VITA2NATIVE_SDL_SIZE=960x544 \
+  ./v2n-arm ~/tests/apps/PCSE01177/eboot.bin'
 ```
 
 `VITA2NATIVE_SDL_SIZE=480x272` uses a smaller window. The guest's GLES context
@@ -241,7 +246,6 @@ stays offscreen (surfaceless with Panfrost or the vendor blob); only
 presentation goes through SDL's X11 driver. That split is deliberate: if the GL
 context is created on the X11 EGL platform, Mesa uses llvmpipe over the
 forwarded connection, which is roughly 5x slower and can crash in LLVM.
-Forwarded X11 is also the easiest way to drive a title from a desktop keyboard.
 
 ### Headless capture and scripted input
 
