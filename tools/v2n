@@ -60,12 +60,15 @@ Commands:
   test [name...]           run the ARM smoke tests on the device
   dump-frame [frames] [s]  headless frame capture of the running title
   gdb [pid]                attach gdb to v2n-arm and inspect the next signal
-  clean [cores|shots|all]  delete device core dumps / local captures
+  clean [cores|tmp|shots|all]
+                           delete device core dumps, device /tmp scratch, or
+                           local captures
 
 Examples:
   tools/v2n title PCSE01177 && tools/v2n shot iconoclasts-menu
   tools/v2n drive click 480 497 1.2
   tools/v2n dump-frame 400,600 && open build/shots/frame_0400.png
+  tools/v2n clean all
   V2N_HOST=r36s tools/v2n deploy
 EOF
 }
@@ -297,9 +300,17 @@ cmd_clean() {
                 echo "v2n: removed $n core dump(s)"
             }
             ;;
+        tmp)
+            # The smoke tests and the kiosk leave per-run scratch in /tmp: mkdtemp
+            # directories, frame dumps and xwd stills. The shader cache stays.
+            remote_sh "cd /tmp && ls -d v2n-* 2>/dev/null |
+                grep -v '^v2n-gxm-shader-cache$' | xargs -r rm -rf;\
+                rm -f *.xwd *.bmp"
+            echo "v2n: cleared /tmp scratch on $HOST"
+            ;;
         shots) rm -f "$OUT"/*.png "$OUT"/*.xwd "$OUT"/*.bmp 2>/dev/null; echo "v2n: cleared $OUT" ;;
-        all) cmd_clean cores; cmd_clean shots ;;
-        *) die "usage: v2n clean [cores|shots|all]" ;;
+        all) cmd_clean cores; cmd_clean tmp; cmd_clean shots ;;
+        *) die "usage: v2n clean [cores|tmp|shots|all]" ;;
     esac
 }
 

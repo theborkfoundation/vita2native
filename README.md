@@ -282,7 +282,7 @@ they are one command instead of a scrollback search:
 ./tools/v2n test                   # ARM smoke suite, on the device
 ./tools/v2n dump-frame 120,400     # headless capture -> build/shots/frame-*.png
 ./tools/v2n gdb                    # attach gdb to the running title
-./tools/v2n clean cores            # core dumps are 400-500 MB each
+./tools/v2n clean all               # core dumps (400-500 MB each) + /tmp scratch
 ```
 
 `V2N_HOST` selects the device (`opiz3` by default, `r36s` for ArkOS), and
