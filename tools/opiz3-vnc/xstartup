@@ -19,7 +19,7 @@ fi
 
 : "${V2N_STATE_DIR:=$HOME/v2n-run}"
 : "${V2N_BIN:=$V2N_STATE_DIR/v2n-arm}"
-: "${V2N_APP:=$HOME/tests/apps/PCSE01031/eboot.bin}"
+: "${V2N_APP:?V2N_APP is not set; point it at the title's eboot.bin in $V2N_CONF}"
 : "${V2N_LOG:=$V2N_STATE_DIR/vnc-game.log}"
 : "${V2N_WINDOW_SIZE:=${VNC_GEOMETRY:-960x544}}"
 : "${V2N_RENDER_SCALE:=1}"

@@ -2,8 +2,11 @@
 
 Runs the game directly in a bare Xtigervnc session — there is no desktop
 environment and no display manager on this image. The game is the only client,
-so the VNC screen is exactly the 960x544 game window. Chasm (PCSE01031) is the
-title currently configured.
+so the VNC screen is exactly the 960x544 game window.
+
+The title is whatever `V2N_APP` points at in `~/.vnc/v2n.conf`. Switching
+titles means editing that one line and restarting the session (see
+`tools/v2n title <ID>`).
 
 At boot `tigervncserver@:1.service` starts the session, `~/.vnc/xstartup`
 sources `~/.vnc/v2n.conf`, and the game runs. Restarting the unit relaunches
@@ -64,13 +67,13 @@ so the 960x544 frame is displayed 1:1 and stays sharp.
 
 - The OPi renders offscreen with Panfrost, then SDL copies the frame into the
   virtual display. The guest-side readback, not VNC, is the bottleneck: at
-  native scale Chasm runs at about 3.5 fps; `V2N_RENDER_SCALE=0.6667` is faster
-  (about 5.5 fps) but blurs the small font, so `1` is the readable setting.
+  native scale heavy 3D titles run at a few fps; `V2N_RENDER_SCALE=0.6667` is
+  faster but blurs small fonts, so `1` is the readable setting.
 - Set `V2N_FPS_OVERLAY=1` to draw the FPS graph in the top-right corner;
   `V2N_FPS=1` only writes FPS lines to the log.
 - VNC has no audio. The game writes to the PulseAudio `v2n` null sink.
 - Mono (the PSM port) builds save paths with a Windows `\` separator, e.g.
-  `savedata0:Chasm/Saves\`. `host_fs_resolve_path` normalises `\` to `/`;
+  `savedata0:<Title>/Saves\`. `host_fs_resolve_path` normalises `\` to `/`;
   without that the save enumeration fails and the game aborts with an
   unhandled `System::Exception`.
 - The launcher kills its child when the session is stopped; otherwise the game

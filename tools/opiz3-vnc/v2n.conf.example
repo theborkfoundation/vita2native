@@ -5,7 +5,8 @@
 # Paths
 V2N_STATE_DIR=/home/bachnx/v2n-run
 V2N_BIN=/home/bachnx/v2n-run/v2n-arm
-V2N_APP=/home/bachnx/tests/apps/PCSE01031/eboot.bin
+# Title to run: <title-id> directory under V2N_APPS_DIR holding eboot.bin.
+V2N_APP=/home/bachnx/tests/apps/<title-id>/eboot.bin
 V2N_LOG=/home/bachnx/v2n-run/vnc-game.log
 
 # Display

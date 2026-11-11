@@ -854,5 +854,3 @@ if(BUILD_TESTING)
         COMMAND gxm_draw_smoke
             ${CMAKE_SOURCE_DIR}/external/Vita3K/tools/native-tool/src/shaders)
 endif()
-
-install(TARGETS vita2native RUNTIME DESTINATION bin)
