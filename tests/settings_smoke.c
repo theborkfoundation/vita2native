@@ -194,7 +194,11 @@ int main(int argc, char **argv)
         if (snprintf(path, sizeof(path), "%s/include", argv[1]) < (int)sizeof(path))
             scan_dir(path);
 
-        REQUIRE(g_getenv_names > 100);
+        /* Every knob now goes through settings.h: a new raw getenv() with our
+           prefix is either a typo or a knob that skipped the table. */
+        CHECK(g_getenv_names == 0,
+              "%u getenv(\"VITA2NATIVE_...\") call site(s) remain; use settings.h",
+              g_getenv_names);
         for (size_t i = 0; i < count; i++)
             CHECK(g_seen[i], "%s is in the table but nothing reads it", table[i].name);
     } else {

@@ -28,6 +28,7 @@
 
 #include "libatrac9.h"
 #include "ngs_types.h"
+#include "settings.h"
 
 #define NGS_R_VOICES            1024
 #define NGS_R_PATCHES           1024
@@ -175,7 +176,7 @@ static int ngs_render_trace(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_NGS_DEBUG") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_NGS_DEBUG");
     return enabled;
 }
 

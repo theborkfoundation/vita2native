@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "module.h"
+#include "settings.h"
 
 #define SCE_NP_SERVICE_STATE_SIGNED_OUT 1
 
@@ -57,7 +58,7 @@ static int np_debug(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_INPUT_DEBUG") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG");
     return enabled;
 }
 

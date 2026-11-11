@@ -34,6 +34,7 @@
 #include "module.h"
 #include "modules/SceModulemgr.h"
 #include "modules/SceSysmem.h"
+#include "settings.h"
 
 #define VITA_MODULE_SLOTS 32
 
@@ -57,7 +58,7 @@ static bool trace_module_lookups(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_TRACE_MODULE_LOOKUPS") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_TRACE_MODULE_LOOKUPS");
 
     return enabled != 0;
 }
@@ -264,8 +265,8 @@ static void module_apply_patch_list(VitaModuleInfo *module, const char *list, bo
  */
 static void module_apply_debug_patches(VitaModuleInfo *module)
 {
-    const char *breakpoints = getenv("VITA2NATIVE_MODULE_BKPT");
-    const char *patches = getenv("VITA2NATIVE_MODULE_PATCH");
+    const char *breakpoints = vita2native_env_str("VITA2NATIVE_MODULE_BKPT");
+    const char *patches = vita2native_env_str("VITA2NATIVE_MODULE_PATCH");
 
     if (!module->jit.rw || !module->jit.size)
         return;
@@ -286,7 +287,7 @@ static void module_apply_debug_patches(VitaModuleInfo *module)
 
 static void module_dump_code(const VitaModuleInfo *module)
 {
-    const char *dir = getenv("VITA2NATIVE_DUMP_MODULE_CODE");
+    const char *dir = vita2native_env_str("VITA2NATIVE_DUMP_MODULE_CODE");
     char path[PATH_MAX];
     FILE *file;
 
@@ -390,7 +391,7 @@ static bool has_suprx_suffix(const char *name)
  */
 static bool is_skipped_module(const char *name)
 {
-    const char *list = getenv("VITA2NATIVE_SKIP_MODULES");
+    const char *list = vita2native_env_str("VITA2NATIVE_SKIP_MODULES");
     const char *cursor;
 
     if (!list || !name)
@@ -418,7 +419,7 @@ static bool is_skipped_module(const char *name)
  */
 static bool should_skip_start(const char *name)
 {
-    const char *list = getenv("VITA2NATIVE_SKIP_MODULE_START");
+    const char *list = vita2native_env_str("VITA2NATIVE_SKIP_MODULE_START");
     const char *cursor;
 
     if (!list || !name || !name[0])
@@ -524,7 +525,7 @@ int SceModulemgr_load_app_modules(void)
     static const char *const dirs[] = { "sce_module", "Media/Modules" };
     int loaded = 0;
 
-    if (getenv("VITA2NATIVE_NO_MODULE_AUTOLOAD"))
+    if (vita2native_env_flag("VITA2NATIVE_NO_MODULE_AUTOLOAD"))
         return 0;
 
     for (size_t i = 0; i < ARRAY_SIZE(dirs); i++)

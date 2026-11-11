@@ -29,6 +29,7 @@
 #include "modules/SceKernelSync.h"
 #include "modules/SceKernelThreadMgr.h"
 #include "modules/SceSysmem.h"
+#include "settings.h"
 #include "util.h"
 
 #define SCE_KERNEL_ERROR_EVF_MULTI 0x800280E4
@@ -63,7 +64,7 @@ static int trace_sync(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_TRACE_SYNC") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_TRACE_SYNC");
     return enabled;
 }
 
@@ -987,7 +988,7 @@ EXPORT(SceLibKernel, 0xA6A2C915, int, sceKernelTryLockLwMutex, SceKernelLwMutexW
 
     for (int i = 0; i < count; i++) {
         if (pthread_mutex_trylock(&lw->mutex) != 0) {
-            if (getenv("VITA2NATIVE_TRACE_SYNC"))
+            if (vita2native_env_flag("VITA2NATIVE_TRACE_SYNC"))
                 LOG("sceKernelTryLockLwMutex(\"%s\") failed on entry %d/%d (owner %d)",
                     lw->name, i, count, lw->owner);
             return SCE_KERNEL_ERROR_LW_MUTEX_FAILED_TO_OWN;

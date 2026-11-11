@@ -34,6 +34,7 @@
 #include "log.h"
 #include "module.h"
 #include "mspace.h"
+#include "settings.h"
 
 #define SCE_LIBC_NID 0xbe43bb07
 #define SCE_LIBM_NID 0xcdae3c7d
@@ -358,7 +359,7 @@ static bool trace_alloc(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_TRACE_ALLOC") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_TRACE_ALLOC");
 
     return enabled != 0;
 }
@@ -552,7 +553,7 @@ static int trace_fileio(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_TRACE_FILEIO") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_TRACE_FILEIO");
     return enabled;
 }
 

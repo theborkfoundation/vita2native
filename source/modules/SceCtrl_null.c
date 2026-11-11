@@ -57,6 +57,7 @@
 #include "host.h"
 #include "module.h"
 #include "modules/SceCtrl_script.h"
+#include "settings.h"
 #include "util.h"
 
 #define MAX_INPUT_DEVICES 12
@@ -399,8 +400,8 @@ DECLARE_LIBRARY(SceCtrl, 0xD197E3C7);
 
 int SceCtrl_init(void)
 {
-    g_debug = getenv("VITA2NATIVE_INPUT_DEBUG") != NULL;
-    g_swap_ab = getenv("VITA2NATIVE_CTRL_SWAP_AB") != NULL;
+    g_debug = vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG");
+    g_swap_ab = vita2native_env_flag("VITA2NATIVE_CTRL_SWAP_AB");
 
     if (!input_open_devices()) {
         if (g_debug)

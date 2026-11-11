@@ -24,6 +24,7 @@
 #include "log.h"
 #include "module.h"
 #include "modules/SceAppUtil.h"
+#include "settings.h"
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -41,7 +42,7 @@ static int save_debug(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_INPUT_DEBUG") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG");
     return enabled;
 }
 

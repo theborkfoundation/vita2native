@@ -23,6 +23,7 @@
 #include "modules/SceAudio.h"
 
 #include "SceAudio_internal.h"
+#include "settings.h"
 
 #define AUDIO_DEVICE_FREQ 48000
 #define AUDIO_MAX_PORTS   8
@@ -65,7 +66,7 @@ static int audio_debug(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_AUDIO_DEBUG") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_AUDIO_DEBUG");
     return enabled;
 }
 

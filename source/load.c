@@ -13,6 +13,7 @@
 #include "module.h"
 #include "sce-elf.h"
 #include "self.h"
+#include "settings.h"
 #include "util.h"
 
 #define IMP_GET_NEXT(imp) ((sce_module_imports_u_t *)((char *)imp + imp->size))
@@ -85,7 +86,7 @@ static bool trace_imports(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_TRACE_IMPORTS") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_TRACE_IMPORTS");
 
     return enabled != 0;
 }
@@ -99,7 +100,7 @@ static bool trace_imports(void)
  */
 static bool module_is_thumb(const segment_info_t *segments, int num_segments)
 {
-    const char *force_arm = getenv("VITA2NATIVE_GUEST_ARM");
+    const char *force_arm = vita2native_env_str("VITA2NATIVE_GUEST_ARM");
     int thumb = 0;
     int arm = 0;
 
@@ -826,7 +827,7 @@ segments_ready:
 
     /* VITA2NATIVE_DUMP_MAIN_DATA=<path> writes the main image's data segment. */
     if (info && strcmp(info->name, "eboot") == 0) {
-        const char *dump_path = getenv("VITA2NATIVE_DUMP_MAIN_DATA");
+        const char *dump_path = vita2native_env_str("VITA2NATIVE_DUMP_MAIN_DATA");
 
         if (dump_path && data_addr && data_size) {
             FILE *file = fopen(dump_path, "wb");

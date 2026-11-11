@@ -14,6 +14,7 @@
  */
 #include "gxm/texture.h"
 #include "gxm/texture_compressed.h"
+#include "settings.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -881,11 +882,8 @@ static int decode_texel_prepared(uint8_t out[4], const uint8_t *data, uint32_t i
         uint8_t value = component_to_u8((uint32_t)(word & mask), info->width[0], info->kind[0]);
         static int replicate = -1;
 
-        if (replicate < 0) {
-            const char *mode = getenv("VITA2NATIVE_MASK_REPLICATE");
-
-            replicate = mode ? atoi(mode) : 0;
-        }
+        if (replicate < 0)
+            replicate = (int)vita2native_env_int("VITA2NATIVE_MASK_REPLICATE", 0);
 
         switch (swizzle) {
         case 0: /* R */

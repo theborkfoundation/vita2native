@@ -11,6 +11,7 @@
 #include <renderer/pvrt-dec.h>
 
 #include "gxm/texture_compressed.h"
+#include "settings.h"
 
 extern "C" int gxm_texture_decode_pvrtc_reference(const void *data, uint32_t width, uint32_t height,
                                                   uint32_t two_bpp, uint32_t pvrt2, uint8_t *dest)
@@ -31,7 +32,7 @@ extern "C" int gxm_texture_decode_pvrtc(const void *data, uint32_t width, uint32
         return -1;
 
     if (fast_enabled < 0)
-        fast_enabled = getenv("VITA2NATIVE_NO_PVRTC_FAST") == NULL;
+        fast_enabled = !vita2native_env_flag("VITA2NATIVE_NO_PVRTC_FAST");
 
     if (fast_enabled && !two_bpp && !pvrt2 &&
         gxm_texture_decode_pvrtc4_fast(data, width, height, dest) == 0)

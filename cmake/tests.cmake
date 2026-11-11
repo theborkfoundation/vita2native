@@ -24,11 +24,12 @@ add_compile_options(-UNDEBUG)
 #
 # `include` and `external/vita-headers/include` as well as `_GNU_SOURCE=1` are
 # implied: every test needs them and 31 copies of the same block was the reason
-# this helper exists.
+# this helper exists. source/settings.c is added to every test as well, because
+# almost every module reads a knob through it.
 function(vita2native_add_smoke name)
     cmake_parse_arguments(SMOKE "NO_TEST" "" "SOURCES;LIBS;INCLUDES;DEFINES;ARGUMENTS" ${ARGN})
 
-    add_executable(${name} ${SMOKE_SOURCES})
+    add_executable(${name} ${SMOKE_SOURCES} ${CMAKE_SOURCE_DIR}/source/settings.c)
     target_include_directories(${name} PRIVATE
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/external/vita-headers/include
@@ -61,7 +62,7 @@ endfunction()
 # matters.
 
 vita2native_add_smoke(settings_smoke
-    SOURCES tests/settings_smoke.c source/settings.c
+    SOURCES tests/settings_smoke.c
     ARGUMENTS ${CMAKE_SOURCE_DIR})
 
 vita2native_add_smoke(host_smoke
@@ -393,7 +394,6 @@ vita2native_add_smoke(gxm_draw_smoke
         source/host/host_fs.c
         ${VITA2NATIVE_GXM_TEXTURE_SOURCES}
         source/modules/SceGxm.c
-        source/settings.c
         source/spirv_cross_glsl_es.cpp
         source/vita3k_shader_recompiler_iface_c.cpp
         source/stb_image_write_impl.c

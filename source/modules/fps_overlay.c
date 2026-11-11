@@ -13,6 +13,7 @@
 
 #include "font8x8_basic.h"
 #include "modules/fps_overlay.h"
+#include "settings.h"
 
 #define FPS_HISTORY 60
 #define PANEL_WIDTH 232
@@ -30,7 +31,7 @@ bool fps_overlay_enabled(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_FPS_OVERLAY") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_FPS_OVERLAY");
     return enabled != 0;
 }
 

@@ -26,6 +26,7 @@
 #include "display.h"
 #include "gfx.h"
 #include "host.h"
+#include "settings.h"
 
 #include <dlfcn.h>
 #include <errno.h>
@@ -413,7 +414,7 @@ static SDL_GameController *video_open_controller(HostVideo *video)
         name = api->game_controller_name ? api->game_controller_name(controller) : NULL;
         fprintf(stderr, "vita2native: SDL opened controller %d%s%s\n", i, name ? ": " : "",
                 name ? name : "");
-        if (getenv("VITA2NATIVE_INPUT_DEBUG") && api->game_controller_mapping) {
+        if (vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG") && api->game_controller_mapping) {
             char *mapping = api->game_controller_mapping(controller);
 
             if (mapping) {
@@ -586,7 +587,7 @@ static void video_poll_events(HostVideo *video)
     if (api->poll_event) {
         while (api->poll_event(&event)) {
             if (event.type == SDL_QUIT) {
-                if (getenv("VITA2NATIVE_INPUT_DEBUG")) {
+                if (vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG")) {
                     fprintf(stderr, "vita2native: SDL quit event\n");
                     fflush(stderr);
                 }
@@ -594,7 +595,7 @@ static void video_poll_events(HostVideo *video)
             } else if (event.type == SDL_WINDOWEVENT) {
                 const SdlWindowEvent *window_event = (const SdlWindowEvent *)&event;
 
-                if (getenv("VITA2NATIVE_INPUT_DEBUG")) {
+                if (vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG")) {
                     fprintf(stderr, "vita2native: SDL window event %u (%dx%d)\n",
                             window_event->event, window_event->data1, window_event->data2);
                     fflush(stderr);
@@ -630,7 +631,7 @@ static void video_sample_touch(HostVideo *video)
     buttons = api->get_mouse_state(&mouse_x, &mouse_y);
     down = (buttons & SDL_BUTTON_LMASK) != 0;
 
-    if (getenv("VITA2NATIVE_INPUT_DEBUG")) {
+    if (vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG")) {
         static int last_x = -1, last_y = -1;
         static unsigned int last_buttons;
 
@@ -1024,9 +1025,9 @@ HostVideo *host_video_open(void)
         goto fail;
 
     video->api = api;
-    video->stretch = getenv("VITA2NATIVE_STRETCH") != NULL;
-    video->windowed = getenv("VITA2NATIVE_SDL_WINDOWED") != NULL;
-    video->swap_ab = getenv("VITA2NATIVE_CTRL_SWAP_AB") != NULL;
+    video->stretch = vita2native_env_flag("VITA2NATIVE_STRETCH");
+    video->windowed = vita2native_env_flag("VITA2NATIVE_SDL_WINDOWED");
+    video->swap_ab = vita2native_env_flag("VITA2NATIVE_CTRL_SWAP_AB");
     video->pad.lx = 128;
     video->pad.ly = 128;
     video->pad.rx = 128;
@@ -1037,7 +1038,7 @@ HostVideo *host_video_open(void)
     /* VITA2NATIVE_SDL_SIZE=480x272 makes the window smaller (X11 forwarding
        and remote testing); the guest frame is still scaled/letterboxed. */
     {
-        const char *size = getenv("VITA2NATIVE_SDL_SIZE");
+        const char *size = vita2native_env_str("VITA2NATIVE_SDL_SIZE");
 
         if (size && sscanf(size, "%dx%d", &video->window_width, &video->window_height) != 2) {
             video->window_width = 960;

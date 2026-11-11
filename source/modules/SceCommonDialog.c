@@ -23,6 +23,7 @@
 #include "modules/SceAppUtil.h"
 #include "modules/SceSysmem.h"
 #include "modules/common_dialog_overlay.h"
+#include "settings.h"
 
 static bool g_msg_dialog_active;
 static bool g_msg_dialog_done;
@@ -193,7 +194,7 @@ EXPORT(SceCommonDialog, 0x9E2C02C9, int, sceNpTrophySetupDialogInit, const void 
     g_trophy_dialog_result = SCE_COMMON_DIALOG_RESULT_OK;
     g_trophy_start_ns = host_monotonic_ns();
 
-    if (getenv("VITA2NATIVE_INPUT_DEBUG")) {
+    if (vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG")) {
         fprintf(stderr, "vita2native: TrophySetupDialog init\n");
         fflush(stderr);
     }
@@ -295,7 +296,7 @@ EXPORT(SceCommonDialog, 0x755FF270, int, sceMsgDialogInit, const SceMsgDialogPar
         break;
     }
 
-    if (getenv("VITA2NATIVE_INPUT_DEBUG")) {
+    if (vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG")) {
         fprintf(stderr, "vita2native: MsgDialog init mode=%d text=\"%s\" hint=\"%s\"\n",
                 g_msg_dialog_mode, g_msg_text, g_msg_hint);
         fflush(stderr);
@@ -308,7 +309,7 @@ EXPORT(SceCommonDialog, 0x4107019E, SceCommonDialogStatus, sceMsgDialogGetStatus
 {
     msg_update_done();
 
-    if (getenv("VITA2NATIVE_INPUT_DEBUG")) {
+    if (vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG")) {
         static int last = -1;
 
         if (!g_msg_dialog_active)
@@ -496,7 +497,7 @@ static const char *g_savedata_dialog_message;
 
 static bool savedata_debug(void)
 {
-    return getenv("VITA2NATIVE_INPUT_DEBUG") != NULL;
+    return vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG");
 }
 
 EXPORT(SceCommonDialog, 0xBF5248FA, SceInt32, sceSaveDataDialogInit, void *param_ptr)

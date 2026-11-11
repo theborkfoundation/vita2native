@@ -3,6 +3,7 @@
 #include <time.h>
 
 #include "frame_profile.h"
+#include "settings.h"
 
 static int g_enabled = -1;
 
@@ -21,7 +22,7 @@ static unsigned int g_scenes;
 bool frame_profile_enabled(void)
 {
     if (g_enabled < 0)
-        g_enabled = getenv("VITA2NATIVE_PROFILE_FRAME") != NULL;
+        g_enabled = vita2native_env_flag("VITA2NATIVE_PROFILE_FRAME");
     return g_enabled != 0;
 }
 

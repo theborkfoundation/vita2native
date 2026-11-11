@@ -12,6 +12,7 @@
 #include "host.h"
 #include "log.h"
 #include "module.h"
+#include "settings.h"
 #include "util.h"
 
 static _Atomic SceUID g_last_uid = 1;
@@ -276,7 +277,7 @@ EXPORT(SceSysmem, 0x87CC580B, int, sceKernelGetFreeMemorySize, SceKernelFreeMemo
     info->size_phycont = 0x800000;
 
     {
-        const char *override = getenv("VITA2NATIVE_FREE_MEM");
+        const char *override = vita2native_env_str("VITA2NATIVE_FREE_MEM");
 
         if (override)
             info->size_user = (SceSize)strtoul(override, NULL, 0);

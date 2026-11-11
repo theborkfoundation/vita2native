@@ -28,6 +28,7 @@
 
 #include "modules/SceCtrl_script.h"
 #include "modules/SceDisplay.h"
+#include "settings.h"
 
 typedef struct {
     unsigned int frame;
@@ -89,7 +90,7 @@ static void script_append(unsigned int frame, unsigned int buttons)
 
 static void script_load(void)
 {
-    const char *env = getenv("VITA2NATIVE_CTRL_SCRIPT");
+    const char *env = vita2native_env_str("VITA2NATIVE_CTRL_SCRIPT");
     char *copy;
     char *token;
 
@@ -161,7 +162,7 @@ uint32_t SceCtrl_script_buttons(void)
         g_script_buttons = g_script[g_script_index].buttons;
         g_script_index++;
 
-        if (getenv("VITA2NATIVE_CTRL_SCRIPT_DEBUG"))
+        if (vita2native_env_flag("VITA2NATIVE_CTRL_SCRIPT_DEBUG"))
             fprintf(stderr, "vita2native: SceCtrl script frame %u -> buttons 0x%x\n", frame,
                     g_script_buttons);
     }

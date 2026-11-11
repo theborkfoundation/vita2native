@@ -13,6 +13,7 @@
 #include "modules/SceGxm.h"
 #include "modules/common_dialog_overlay.h"
 #include "modules/fps_overlay.h"
+#include "settings.h"
 #include "util.h"
 
 static SceDisplayFrameBuf g_vita_conf_fb;
@@ -87,10 +88,10 @@ static void dump_framebuffer(const SceDisplayFrameBuf *fb)
     FILE *file;
 
     if (!initialised) {
-        const char *at = getenv("VITA2NATIVE_DUMP_FRAME_AT");
+        const char *at = vita2native_env_str("VITA2NATIVE_DUMP_FRAME_AT");
 
         initialised = true;
-        path = getenv("VITA2NATIVE_DUMP_FRAME");
+        path = vita2native_env_str("VITA2NATIVE_DUMP_FRAME");
         if (at) {
             char *copy = malloc(strlen(at) + 1);
 
@@ -191,9 +192,9 @@ static void display_log_fps(void)
     uint64_t now;
 
     if (!ready) {
-        enabled = getenv("VITA2NATIVE_FPS") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_FPS");
         overlay_enabled = fps_overlay_enabled();
-        metrics_path = getenv("VITA2NATIVE_METRICS_FILE");
+        metrics_path = vita2native_env_str("VITA2NATIVE_METRICS_FILE");
         if (metrics_path && !metrics_path[0])
             metrics_path = NULL;
         ready = true;

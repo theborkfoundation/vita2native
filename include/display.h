@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include "settings.h"
 
 /*
  * True when the active SDL video driver targets KMS/DRM. On a handheld that
@@ -20,7 +21,7 @@ static inline bool host_display_uses_kms(void)
         return cached != 0;
 
     cached = 0;
-    if (getenv("VITA2NATIVE_KMS_PRESENT")) {
+    if (vita2native_env_flag("VITA2NATIVE_KMS_PRESENT")) {
         cached = 1;
     } else if ((driver = getenv("SDL_VIDEODRIVER")) && strstr(driver, "kmsdrm")) {
         cached = 1;

@@ -22,6 +22,7 @@
 
 #include "module.h"
 #include "modules/SceNgs_render.h"
+#include "settings.h"
 
 #define NGS_MAX_OBJECTS      1024
 #define NGS_HANDLE_BASE      0x4e470000u
@@ -83,7 +84,7 @@ static int ngs_trace_enabled(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_NGS_DEBUG") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_NGS_DEBUG");
     return enabled;
 }
 

@@ -21,6 +21,7 @@
 #include <psp2/touch.h>
 
 #include "module.h"
+#include "settings.h"
 
 #define PRIMITIVE_TYPE_DOWN 1
 #define PRIMITIVE_TYPE_MOVE 2
@@ -59,7 +60,7 @@ static bool gesture_debug(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_INPUT_DEBUG") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG");
     return enabled;
 }
 

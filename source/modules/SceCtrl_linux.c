@@ -11,6 +11,7 @@
 #include "log.h"
 #include "module.h"
 #include "modules/SceCtrl_script.h"
+#include "settings.h"
 #include "util.h"
 
 static SDL_GameController *g_controller;
@@ -191,7 +192,7 @@ int SceCtrl_init(void)
     if (g_initialized)
         return 0;
 
-    g_input_debug = getenv("VITA2NATIVE_INPUT_DEBUG") != NULL;
+    g_input_debug = vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG");
 
     if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
         LOG("SDL game controller init failed: %s", SDL_GetError());

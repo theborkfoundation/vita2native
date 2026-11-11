@@ -22,6 +22,7 @@
 #include "frame_profile.h"
 #include "host_gfx_gl.h"
 #include "host_gfx_internal.h"
+#include "settings.h"
 
 /*
  * EGL contexts are bound to the thread that made them current. Guest threads
@@ -980,7 +981,7 @@ HostGpuDevice host_gfx_gl_create(const HostGpuConfig *config)
     version = (const char *)g->glGetString(GL_VERSION);
     renderer = (const char *)g->glGetString(GL_RENDERER);
 
-    if (getenv("VITA2NATIVE_GL_INFO")) {
+    if (vita2native_env_flag("VITA2NATIVE_GL_INFO")) {
         const char *extensions = (const char *)g->glGetString(GL_EXTENSIONS);
 
         fprintf(stderr, "vita2native: GL extensions: %s\n", extensions ? extensions : "(none)");
@@ -1589,7 +1590,7 @@ static bool gles_present_overlap_enabled(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_NO_PRESENT_OVERLAP") == NULL;
+        enabled = !vita2native_env_flag("VITA2NATIVE_NO_PRESENT_OVERLAP");
     return enabled != 0;
 }
 
@@ -1704,7 +1705,7 @@ void host_gfx_gl_present_texture(HostGpuDevice device, unsigned int texture, int
         g->glUseProgram(0);
     }
 
-    if (getenv("VITA2NATIVE_DIRECT_PRESENT_DEBUG")) {
+    if (vita2native_env_flag("VITA2NATIVE_DIRECT_PRESENT_DEBUG")) {
         static unsigned int logged;
         GLenum error = g->glGetError();
 
@@ -1728,7 +1729,7 @@ void host_gfx_gl_present_texture(HostGpuDevice device, unsigned int texture, int
 
         if (!same_thread)
             g->glFinish();
-        else if (getenv("VITA2NATIVE_DIRECT_PRESENT_DEBUG")) {
+        else if (vita2native_env_flag("VITA2NATIVE_DIRECT_PRESENT_DEBUG")) {
             static unsigned int logged;
 
             if (logged++ < 20)

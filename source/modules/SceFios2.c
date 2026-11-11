@@ -26,6 +26,7 @@
 #include "log.h"
 #include "module.h"
 #include "modules/SceFios2.h"
+#include "settings.h"
 
 #define SCE_FIOS_ERROR_UNSUPPORTED  ((int32_t)0x80C90001)
 #define SCE_FIOS_ERROR_BAD_ARGUMENT ((int32_t)0x80C90003)
@@ -96,7 +97,7 @@ static int trace_fios(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_TRACE_FIOS") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_TRACE_FIOS");
     return enabled;
 }
 

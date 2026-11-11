@@ -26,6 +26,7 @@
 
 #include "host.h"
 #include "module.h"
+#include "settings.h"
 
 /* Not present in the public VitaSDK headers. */
 #define SCE_NET_CTL_ERROR_NOT_INITIALIZED 0x80412101
@@ -339,7 +340,7 @@ static bool network_forced_off(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_NETWORK") == NULL;
+        enabled = !vita2native_env_flag("VITA2NATIVE_NETWORK");
     return enabled != 0;
 }
 
@@ -383,7 +384,7 @@ EXPORT(SceNetCtl, 0x6D26AC68, int, sceNetCtlInetGetState, int *state)
 
     *state = is_connected() ? SCE_NETCTL_STATE_CONNECTED : SCE_NETCTL_STATE_DISCONNECTED;
 
-    if (getenv("VITA2NATIVE_INPUT_DEBUG")) {
+    if (vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG")) {
         static int last = -2;
 
         if (*state != last) {

@@ -20,6 +20,7 @@
 #include "../external/dlmalloc/malloc.c"
 
 #include "mspace.h"
+#include "settings.h"
 
 /*
  * A dlmalloc mspace handle is the `malloc_state` living at the start of the
@@ -70,7 +71,7 @@ static int mspace_debug(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_MSPACE_DEBUG") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_MSPACE_DEBUG");
     return enabled;
 }
 

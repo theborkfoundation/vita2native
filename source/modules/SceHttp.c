@@ -29,6 +29,7 @@
 #include <psp2/types.h>
 
 #include "module.h"
+#include "settings.h"
 
 #define HTTP_MAX_TEMPLATES   8
 #define HTTP_MAX_CONNECTIONS 8
@@ -890,7 +891,7 @@ EXPORT(SceHttp, 0xC616C200, int, sceHttpCreateConnectionWithURL, int template_id
 
     (void)enable_keepalive;
 
-    if (getenv("VITA2NATIVE_INPUT_DEBUG")) {
+    if (vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG")) {
         fprintf(stderr, "vita2native: HTTP connection for %s\n", url ? url : "(null)");
         fflush(stderr);
     }
@@ -1004,7 +1005,7 @@ EXPORT(SceHttp, 0x9CA58B99, int, sceHttpSendRequest, int request_id, const void 
     request->aborted = false;
     result = perform_request(request, post_data, post_size, HTTP_MAX_REDIRECTS);
 
-    if (getenv("VITA2NATIVE_INPUT_DEBUG")) {
+    if (vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG")) {
         fprintf(stderr, "vita2native: HTTP send %s -> %d\n", request->url, result);
         fflush(stderr);
     }

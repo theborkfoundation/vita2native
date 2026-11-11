@@ -1,4 +1,5 @@
 #include "host.h"
+#include "settings.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -693,7 +694,7 @@ Result threadStart(Thread *thread)
     pthread_attr_destroy(&attr);
 
 #if defined(__linux__)
-    if (ret == 0 && getenv("VITA2NATIVE_TRACE_THREAD_STACK")) {
+    if (ret == 0 && vita2native_env_flag("VITA2NATIVE_TRACE_THREAD_STACK")) {
         pthread_attr_t got;
         void *stack_addr = NULL;
         size_t got_size = 0;

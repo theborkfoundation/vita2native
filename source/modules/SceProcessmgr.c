@@ -21,6 +21,7 @@
 #include "module.h"
 #include "modules/SceLibKernel.h"
 #include "modules/SceProcessmgr.h"
+#include "settings.h"
 
 #define VITA_TITLE_ID         "V2N000001"
 #define VITA_PROCESS_NAME     "vita2native"
@@ -158,7 +159,7 @@ EXPORT(SceProcessmgr, 0xEB6E50BB, int, sceKernelCallAbortHandler, void)
      * prints them (odd values inside the JIT code range) to place a failing
      * title.
      */
-    if (getenv("VITA2NATIVE_TRACE_ABORT")) {
+    if (vita2native_env_flag("VITA2NATIVE_TRACE_ABORT")) {
         const uint32_t *slots = (const uint32_t *)__builtin_frame_address(0);
         int shown = 0;
 

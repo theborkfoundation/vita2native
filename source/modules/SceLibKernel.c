@@ -33,6 +33,7 @@
 #include "modules/SceKernelThreadMgr.h"
 #include "modules/SceLibKernel.h"
 #include "modules/SceSysmem.h"
+#include "settings.h"
 
 typedef struct {
     uint32_t index;
@@ -149,7 +150,7 @@ EXPORT(SceLibKernel, 0x6C60AC61, SceUID, sceIoOpen, const char *file, int flags,
     FILE *fp;
 
     if (host_fs_resolve_path(file, resolved, sizeof(resolved)) < 0) {
-        if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+        if (vita2native_env_flag("VITA2NATIVE_TRACE_FILEIO"))
             LOG("sceIoOpen(\"%s\") resolve failed", file ? file : "(null)");
         return SCE_ERROR_ERRNO_ENODEV;
     }
@@ -169,10 +170,10 @@ EXPORT(SceLibKernel, 0x6C60AC61, SceUID, sceIoOpen, const char *file, int flags,
         fp = fopen(host_file, access == SCE_O_WRONLY ? "w" : "w+");
     }
     if (!fp) {
-        if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+        if (vita2native_env_flag("VITA2NATIVE_TRACE_FILEIO"))
             LOG("sceIoOpen(\"%s\") failed: %s (host \"%s\")", file ? file : "(null)",
                 strerror(errno), host_file);
-        if (file && strstr(file, "savedata") && getenv("VITA2NATIVE_INPUT_DEBUG")) {
+        if (file && strstr(file, "savedata") && vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG")) {
             fprintf(stderr, "vita2native: sceIoOpen %s failed: %s (host %s)\n", file,
                     strerror(errno), host_file);
             fflush(stderr);
@@ -180,7 +181,7 @@ EXPORT(SceLibKernel, 0x6C60AC61, SceUID, sceIoOpen, const char *file, int flags,
         return sce_error_from_errno(errno);
     }
 
-    if (file && strstr(file, "savedata") && getenv("VITA2NATIVE_INPUT_DEBUG")) {
+    if (file && strstr(file, "savedata") && vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG")) {
         fprintf(stderr, "vita2native: sceIoOpen %s -> %s\n", file, host_file);
         fflush(stderr);
     }
@@ -202,7 +203,7 @@ EXPORT(SceLibKernel, 0x6C60AC61, SceUID, sceIoOpen, const char *file, int flags,
     vita_opened_files_dict_set_at(g_vita_opened_files, vfile->uid, vfile);
     rwlockWriteUnlock(&g_vita_opened_files_lock);
 
-    if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+    if (vita2native_env_flag("VITA2NATIVE_TRACE_FILEIO"))
         LOG("sceIoOpen(\"%s\") -> uid=0x%x", file ? file : "(null)", vfile->uid);
 
     return vfile->uid;
@@ -223,7 +224,7 @@ EXPORT(SceIofilemgr, 0xC70B8886, int, sceIoClose, SceUID fd)
     free(vfile->file);
     free(vfile);
 
-    if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+    if (vita2native_env_flag("VITA2NATIVE_TRACE_FILEIO"))
         LOG("sceIoClose(0x%x)", fd);
 
     if (ret)
@@ -242,7 +243,7 @@ EXPORT(SceIofilemgr, 0xFDB32293, SceSSize, sceIoRead, SceUID fd, void *buf, SceS
 
     result = (SceSSize)fread(buf, 1, nbyte, vfile->fp);
 
-    if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+    if (vita2native_env_flag("VITA2NATIVE_TRACE_FILEIO"))
         LOG("sceIoRead(0x%x, %u) -> %d", fd, (unsigned)nbyte, (int)result);
 
     return result;
@@ -319,7 +320,7 @@ EXPORT(SceLibKernel, 0xA9283DD0, SceUID, sceIoDopen, const char *dirname)
 
     dir = opendir(host_dirname);
     if (!dir) {
-        if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+        if (vita2native_env_flag("VITA2NATIVE_TRACE_FILEIO"))
             LOG("sceIoDopen(\"%s\") failed: %s (host \"%s\")", dirname, strerror(errno),
                 host_dirname);
         return SCE_ERROR_ERRNO_ENODEV;
@@ -340,7 +341,7 @@ EXPORT(SceLibKernel, 0xA9283DD0, SceUID, sceIoDopen, const char *dirname)
     vita_opened_dirs_dict_set_at(g_vita_opened_dirs, vdir->uid, vdir);
     rwlockWriteUnlock(&g_vita_opened_dirs_lock);
 
-    if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+    if (vita2native_env_flag("VITA2NATIVE_TRACE_FILEIO"))
         LOG("sceIoDopen(\"%s\") -> uid=0x%x", dirname, vdir->uid);
 
     return vdir->uid;
@@ -449,7 +450,7 @@ EXPORT(SceLibKernel, 0x9C8B6624, int, sceIoDread, SceUID fd, SceIoDirent *dirent
     strncpy(dirent->d_name, de->d_name, sizeof(dirent->d_name));
     dirent->d_private = NULL;
 
-    if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+    if (vita2native_env_flag("VITA2NATIVE_TRACE_FILEIO"))
         LOG("sceIoDread(0x%x) -> \"%s\"", fd, de->d_name);
 
     return 1;
@@ -471,7 +472,7 @@ EXPORT(SceLibKernel, 0xBCA5B623, int, sceIoGetstat, const char *file, SceIoStat 
     if (stat(host_path, &sb) != 0)
         return sce_error_from_errno(errno);
 
-    if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+    if (vita2native_env_flag("VITA2NATIVE_TRACE_FILEIO"))
         LOG("sceIoGetstat(\"%s\") -> size=%lld", file, (long long)sb.st_size);
 
     stat_to_sce_iostat(&sb, st);
@@ -600,7 +601,7 @@ EXPORT(SceLibKernel, 0x99BA173E, SceOff, sceIoLseek, SceUID fd, SceOff offset, i
     if (fseeko(vfile->fp, (off_t)offset, whence) != 0)
         return -1;
 
-    if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+    if (vita2native_env_flag("VITA2NATIVE_TRACE_FILEIO"))
         LOG("sceIoLseek(0x%x, %lld, %d) -> %lld", fd, (long long)offset, whence,
             (long long)ftello(vfile->fp));
 
@@ -618,7 +619,7 @@ EXPORT(SceLibKernel, 0x0FB972F9, int, sceKernelGetThreadId)
     static int trace = -1;
 
     if (trace < 0)
-        trace = getenv("VITA2NATIVE_TRACE_THREADID") != NULL;
+        trace = vita2native_env_flag("VITA2NATIVE_TRACE_THREADID");
     if (trace)
         LOG("sceKernelGetThreadId -> 0x%x (%s) ti=%p host=%p ra=%p", ti->uid,
             ti->name[0] ? ti->name : "?", (void *)ti, (void *)pthread_self(),
@@ -689,7 +690,7 @@ EXPORT(SceLibKernel, 0x52315AD7, SceSSize, sceIoPread, SceUID fd, void *buf, Sce
     if (saved >= 0)
         fseek(vfile->fp, saved, SEEK_SET);
 
-    if (getenv("VITA2NATIVE_TRACE_FILEIO"))
+    if (vita2native_env_flag("VITA2NATIVE_TRACE_FILEIO"))
         LOG("sceIoPread(0x%x, %u, %lld) -> %d", fd, (unsigned)nbyte, (long long)offset,
             (int)read);
 

@@ -4,6 +4,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Every VITA2NATIVE_* environment knob, in one table.
  *
@@ -53,5 +57,9 @@ void vita2native_settings_check(void);
 
 /* Print the table with the current values (VITA2NATIVE_ENV_DUMP=1). */
 void vita2native_settings_dump(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

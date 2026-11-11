@@ -7,6 +7,7 @@
 
 #include "module.h"
 #include "modules/SceProcessmgr.h"
+#include "settings.h"
 #include "util.h"
 
 #define MAX_GUEST_LIBRARIES 64
@@ -153,7 +154,7 @@ static int prefer_guest_exports(uint32_t lib_nid)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_PREFER_GUEST_EXPORTS") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_PREFER_GUEST_EXPORTS");
 
     if (enabled)
         return lib_nid != SCE_LIBC_NID;

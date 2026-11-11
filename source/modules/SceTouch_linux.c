@@ -22,6 +22,7 @@
 
 #include "host.h"
 #include "module.h"
+#include "settings.h"
 #include "util.h"
 
 /* Weak so the touch smoke test can link without a display backend; without a
@@ -66,7 +67,7 @@ static uint16_t g_script_x, g_script_y;
 
 static void touch_script_load(void)
 {
-    const char *env = getenv("VITA2NATIVE_TOUCH_SCRIPT");
+    const char *env = vita2native_env_str("VITA2NATIVE_TOUCH_SCRIPT");
     char *copy;
     char *token;
 
@@ -128,7 +129,7 @@ static void touch_script_poll(void)
         g_script_index++;
     }
 
-    if (getenv("VITA2NATIVE_TOUCH_SCRIPT_DEBUG") && g_script_index != before) {
+    if (vita2native_env_flag("VITA2NATIVE_TOUCH_SCRIPT_DEBUG") && g_script_index != before) {
         fprintf(stderr, "vita2native: SceTouch script frame %u -> %s %u,%u\n", frame,
                 g_script_down ? "down" : "up", (unsigned)g_script_x, (unsigned)g_script_y);
     }
@@ -457,6 +458,6 @@ DECLARE_LIBRARY(SceTouch, 0x3e4f4a81);
 
 int SceTouch_init(void)
 {
-    g_debug = getenv("VITA2NATIVE_INPUT_DEBUG") != NULL;
+    g_debug = vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG");
     return 0;
 }
