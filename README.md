@@ -24,25 +24,38 @@ That is why a 32-bit ARMv7-A userland is required.
 
 ## Building
 
-Build natively on the ARM32 host:
+The supported configurations are CMake presets that cross-compile from a 64-bit
+host with [Zig](https://ziglang.org): it bundles clang, LLD and libc, so no
+system cross toolchain is needed.
+
+| Preset | Target | Use |
+| --- | --- | --- |
+| `arm-rel` | 32-bit ARM, RelWithDebInfo | the deployment artifact |
+| `arm-debug` | 32-bit ARM, Debug | symbols for `gdb` on the device |
+| `arm-minsize` | 32-bit ARM, MinSizeRel + LTO | size experiments only; crash backtraces lose symbol names |
+| `x64-syntax` | 64-bit x86 | compile check and smoke tests; cannot execute Vita code |
+
+Generate the compiler wrappers once. They are written to `build/`, which is not
+tracked:
 
 ```sh
-cmake --preset Linux-Debug
-cmake --build --preset Linux-Debug
+ tools/zig-toolchain.sh arm
+ tools/zig-toolchain.sh x64   # only needed for x64-syntax
 ```
 
-Or configure manually:
+Then configure and build the preset you want:
 
 ```sh
-cmake -S . -B build/Linux-Debug -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake --build build/Linux-Debug
+cmake --preset arm-rel
+cmake --build --preset arm-rel
 ```
 
-For QEMU or a machine without SDL2, build the headless variant:
+On a 32-bit ARM host the build also works without a cross toolchain:
 
 ```sh
-cmake -S . -B build/Linux-Headless -G Ninja -DVITA2NATIVE_HEADLESS=ON
-cmake --build build/Linux-Headless
+cmake -S . -B build/native-arm -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DVITA2NATIVE_HEADLESS=ON
+cmake --build build/native-arm
 ```
 
 Guest exports that pass or return floats use the host hard-float ABI, matching
@@ -55,7 +68,7 @@ Run with the default layout (`vita2native/executable` relative to the current
 working directory), or pass a path explicitly:
 
 ```sh
-./build/Linux-Debug/vita2native ./vita2native/executable
+./build/cmake-arm-rel/vita2native ./vita2native/executable
 ```
 
 A VPK can be passed directly. `eboot.bin` is loaded from memory and the
@@ -63,7 +76,7 @@ remaining entries are extracted to `vita2native/app0/` (skipped when the archive
 size and mtime are unchanged), so `app0:` reads work:
 
 ```sh
-./build/Linux-Debug/vita2native ./MyHomebrew.vpk
+./build/cmake-arm-rel/vita2native ./MyHomebrew.vpk
 ```
 
 Vita device paths are remapped below `vita2native/`:

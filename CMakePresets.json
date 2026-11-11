@@ -7,46 +7,43 @@
     },
     "configurePresets": [
         {
-            "name": "Linux-Debug",
+            "name": "arm-rel",
+            "displayName": "32-bit ARM release (deploy artifact)",
+            "description": "Cross build for armhf with zig. This is the binary that gets deployed to the devices.",
             "hidden": false,
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/build/Linux-Debug",
+            "binaryDir": "${sourceDir}/build/cmake-arm-rel",
+            "toolchainFile": "${sourceDir}/cmake/toolchains/zig-arm.cmake",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug",
-                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-                "CMAKE_COLOR_DIAGNOSTICS": "ON"
-            }
-        },
-        {
-            "name": "Linux-Release",
-            "hidden": false,
-            "generator": "Ninja",
-            "binaryDir": "${sourceDir}/build/Linux-Release",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release",
-                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-                "CMAKE_COLOR_DIAGNOSTICS": "ON"
-            }
-        },
-        {
-            "name": "Linux-Cross-Headless",
-            "hidden": false,
-            "generator": "Ninja",
-            "binaryDir": "${sourceDir}/build/Linux-Cross-Headless",
-            "toolchainFile": "${sourceDir}/cmake/toolchains/arm-linux-gnueabihf.cmake",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
                 "VITA2NATIVE_HEADLESS": "ON",
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "CMAKE_COLOR_DIAGNOSTICS": "ON"
             }
         },
         {
-            "name": "Linux-Cross-MinSize",
+            "name": "arm-debug",
+            "displayName": "32-bit ARM debug",
+            "description": "Cross build for armhf with zig and symbols suitable for gdb on the device.",
             "hidden": false,
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/build/Linux-Cross-MinSize",
-            "toolchainFile": "${sourceDir}/cmake/toolchains/arm-linux-gnueabihf.cmake",
+            "binaryDir": "${sourceDir}/build/cmake-arm",
+            "toolchainFile": "${sourceDir}/cmake/toolchains/zig-arm.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "VITA2NATIVE_HEADLESS": "ON",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "CMAKE_COLOR_DIAGNOSTICS": "ON"
+            }
+        },
+        {
+            "name": "arm-minsize",
+            "displayName": "32-bit ARM minimum size (experiments)",
+            "description": "LTO and stripped dynamic symbols. For size experiments only: crash backtraces lose names.",
+            "hidden": false,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/cmake-arm-minsize",
+            "toolchainFile": "${sourceDir}/cmake/toolchains/zig-arm.cmake",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "MinSizeRel",
                 "VITA2NATIVE_HEADLESS": "ON",
@@ -56,28 +53,44 @@
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "CMAKE_COLOR_DIAGNOSTICS": "ON"
             }
+        },
+        {
+            "name": "x64-syntax",
+            "displayName": "64-bit x86 compile check",
+            "description": "Full-source compile check and smoke-test build where a 32-bit ARM userland is not available. Cannot execute Vita code.",
+            "hidden": false,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/cmake-x64",
+            "toolchainFile": "${sourceDir}/cmake/toolchains/zig-x64.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "VITA2NATIVE_HEADLESS": "ON",
+                "VITA2NATIVE_ALLOW_64BIT": "ON",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "CMAKE_COLOR_DIAGNOSTICS": "ON"
+            }
         }
     ],
     "buildPresets": [
         {
-            "name": "Linux-Debug",
+            "name": "arm-rel",
             "hidden": false,
-            "configurePreset": "Linux-Debug"
+            "configurePreset": "arm-rel"
         },
         {
-            "name": "Linux-Release",
+            "name": "arm-debug",
             "hidden": false,
-            "configurePreset": "Linux-Release"
+            "configurePreset": "arm-debug"
         },
         {
-            "name": "Linux-Cross-Headless",
+            "name": "arm-minsize",
             "hidden": false,
-            "configurePreset": "Linux-Cross-Headless"
+            "configurePreset": "arm-minsize"
         },
         {
-            "name": "Linux-Cross-MinSize",
+            "name": "x64-syntax",
             "hidden": false,
-            "configurePreset": "Linux-Cross-MinSize"
+            "configurePreset": "x64-syntax"
         }
     ]
 }
