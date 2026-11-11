@@ -19,7 +19,7 @@ fi
 
 : "${V2N_STATE_DIR:=$HOME/v2n-run}"
 : "${V2N_BIN:=$V2N_STATE_DIR/v2n-arm}"
-: "${V2N_APP:?V2N_APP is not set; point it at the title's eboot.bin in $V2N_CONF}"
+: "${V2N_APP:?V2N_APP is not set; point it at the eboot.bin under V2N_APPS_DIR in $V2N_CONF}"
 : "${V2N_LOG:=$V2N_STATE_DIR/vnc-game.log}"
 : "${V2N_WINDOW_SIZE:=${VNC_GEOMETRY:-960x544}}"
 : "${V2N_RENDER_SCALE:=1}"
@@ -59,9 +59,9 @@ export PULSE_SERVER="$V2N_PULSE_SERVER"
 [ "$V2N_INPUT_DEBUG" = 1 ] && export VITA2NATIVE_INPUT_DEBUG=1
 [ "$V2N_TRACE_TEXTURES" = 1 ] && export VITA2NATIVE_TRACE_TEXTURES=1
 
-# A crash is only useful if it leaves evidence: the kiosk restarts within a
-# couple of seconds and truncates V2N_LOG. Keep the log (and the core, when
-# V2N_CRASH_CORE is on) under a timestamped name before the session exits.
+# A crash is only useful if it leaves evidence: the next run truncates V2N_LOG.
+# Keep the log (and the core, when V2N_CRASH_CORE is on) under a timestamped
+# name before the session exits.
 if [ "$V2N_CRASH_CORE" = 1 ]; then
     ulimit -c unlimited 2>/dev/null
     export VITA2NATIVE_CRASH_CORE=1
@@ -82,9 +82,9 @@ done
 sleep 1
 pkill -KILL -x "$game_name" 2>/dev/null
 
-# The kiosk restarts the whole session to stop the game, so the child has to
-# follow its shell. SDL turns SIGTERM into an SDL_QUIT event, so a guest that
-# is busy rendering and not polling events ignores it; escalate to SIGKILL.
+# Stopping the session is how a title is stopped, so the child has to follow
+# its shell. SDL turns SIGTERM into an SDL_QUIT event, so a guest that is busy
+# rendering and not polling events ignores it; escalate to SIGKILL.
 stopping=0
 stop_game() {
     stopping=1

@@ -87,7 +87,11 @@ are the judgement that goes with those commands, not a second copy of them.
   `vnc://<host>:5901`; the SDL window matches the VNC geometry (960x544).
 - Log: `/home/bachnx/v2n-run/vnc-game.log`. A crash is copied to
   `crash-<stamp>-<status>.log` (and `core-<stamp>` when `V2N_CRASH_CORE=1`)
-  before the kiosk restarts.
+  before the session exits.
+- The kiosk does not relaunch itself (`Restart=no`). When the game exits or
+  crashes the service goes inactive; run the title again with
+  `sudo systemctl restart tigervncserver@:1.service`, or `tools/v2n title` /
+  `tools/v2n deploy`, which restart it for you.
 - `V2N_RENDER_SCALE=1` keeps small fonts readable; `0.6667` is faster but
   blurs them. Heavy 3D titles run in the single digits either way.
 - The launcher kills its child when the session stops. Without that the game

@@ -1,6 +1,6 @@
 # Orange Pi Zero 3 VNC test bed settings.
-# Sourced by ~/.vnc/xstartup. Restart the VNC session after editing:
-#   vncserver -kill :1 && vncserver :1
+# Sourced by ~/.vnc/xstartup. Restart the session after editing:
+#   sudo systemctl restart tigervncserver@:1.service
 
 # Paths
 V2N_STATE_DIR=/home/bachnx/v2n-run

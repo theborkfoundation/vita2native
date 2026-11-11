@@ -9,19 +9,23 @@ titles means editing that one line and restarting the session (see
 `tools/v2n title <ID>`).
 
 At boot `tigervncserver@:1.service` starts the session, `~/.vnc/xstartup`
-sources `~/.vnc/v2n.conf`, and the game runs. Restarting the unit relaunches
-the game (`Restart=always` in `/etc/systemd/system/tigervncserver@.service.d/`).
+sources `~/.vnc/v2n.conf`, and the game runs. The session does **not** relaunch
+itself (`Restart=no`, from `tigervncserver-override.conf`): when the game exits
+or crashes, the service goes inactive and stays that way, so a crash loop
+cannot hammer the board and the game's exit status remains meaningful. Rerun it
+explicitly:
 
 ```sh
-sudo systemctl restart tigervncserver@:1.service
-sudo systemctl stop tigervncserver@:1.service
+sudo systemctl restart tigervncserver@:1.service   # run the title again
+sudo systemctl stop tigervncserver@:1.service      # stop it
 ```
 
 ## Crashes
 
 `xstartup` copies the log and the core (when `V2N_CRASH_CORE=1` in
-`v2n.conf`) to timestamped files before the session restarts, so a crash is
-not lost to the next run:
+`v2n.conf`) to timestamped files when the game dies on its own, before the
+session exits, so a crash is not lost. The service is then inactive: restart
+it to run the title again.
 
 ```sh
 ls -lt ~/v2n-run/crash-*.log ~/v2n-run/core-*
@@ -34,6 +38,10 @@ ls -lt ~/v2n-run/crash-*.log ~/v2n-run/core-*
 cp tools/opiz3-vnc/xstartup ~/.vnc/xstartup
 cp tools/opiz3-vnc/v2n.conf.example ~/.vnc/v2n.conf
 chmod 755 ~/.vnc/xstartup
+sudo mkdir -p /etc/systemd/system/tigervncserver@.service.d
+sudo cp tools/opiz3-vnc/tigervncserver-override.conf \
+    /etc/systemd/system/tigervncserver@.service.d/override.conf
+sudo systemctl daemon-reload
 printf 'v2n-pass\n' | vncpasswd -f > ~/.vnc/passwd
 chmod 600 ~/.vnc/passwd
 printf 'geometry=960x544\ndepth=24\nlocalhost=no\n' > ~/.vnc/config
