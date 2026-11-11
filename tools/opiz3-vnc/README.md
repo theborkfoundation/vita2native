@@ -47,9 +47,13 @@ chmod 600 ~/.vnc/passwd
 printf 'geometry=960x544\ndepth=24\nlocalhost=no\n' > ~/.vnc/config
 
 # start/stop
-vncserver :1
-vncserver -kill :1
+sudo systemctl start tigervncserver@:1.service
+sudo systemctl stop tigervncserver@:1.service
 ```
+
+The unit runs `xstartup`; `vncserver :1` starts a session systemd does not own
+(the unit then reports inactive and `tools/v2n title`/`deploy` cannot restart
+it). Use `systemctl`.
 
 The VNC session starts the game directly. Remove `session=xfce` from
 `~/.vnc/config` if it is present; otherwise TigerVNC ignores `xstartup`.
