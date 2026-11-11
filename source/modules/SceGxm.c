@@ -2687,6 +2687,15 @@ static void gxm_apply_viewport(SceGxmContext *context)
         if (ih < 1)
             ih = 1;
         g_gl->glViewport(ix, iy, iw, ih);
+        if (getenv("VITA2NATIVE_TRACE_VIEWPORT")) {
+            static unsigned int logged;
+
+            if (logged++ < 16)
+                LOG("SceGxm viewport: guest off=%.1f,%.1f scale=%.1f,%.1f -> gl %d,%d %dx%d (rt %ux%u)",
+                    context->viewport_x_offset, context->viewport_y_offset,
+                    context->viewport_x_scale, context->viewport_y_scale, ix, iy, iw, ih, width,
+                    height);
+        }
     } else {
         g_gl->glViewport(0, 0, (GLsizei)width, (GLsizei)height);
     }
@@ -2837,8 +2846,20 @@ static void gxm_flush_state(SceGxmContext *context, const GxmLinkedProgram *link
 
     /* Render-info uniform buffers. */
     {
+        /*
+         * The readback flips GL's bottom-up rows into the guest's top-down
+         * order, which matches the viewport transform of a title whose
+         * y_scale is negative (ndc +1 lands at the top of the surface). A
+         * positive y_scale asks for the opposite Y direction - Iconoclasts
+         * renders into a 640x368 target with scale +180 - so flip the clips
+         * space y here instead of touching the readback.
+         */
+        float flip_y = context->viewport_enable == SCE_GXM_VIEWPORT_ENABLED &&
+                               context->viewport_y_scale > 0.0f
+                           ? -1.0f
+                           : 1.0f;
         struct GXMRenderVertUniformBlock vert = {
-            {1.0f, 1.0f, 1.0f, 1.0f},
+            {1.0f, flip_y, 1.0f, 1.0f},
             context->viewport_enable == SCE_GXM_VIEWPORT_ENABLED ? 1.0f : 0.0f,
             (float)surface_width,
             (float)surface_height,
