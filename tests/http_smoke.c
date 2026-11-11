@@ -15,6 +15,7 @@
 
 #include <psp2/types.h>
 #include <psp2/net/http.h>
+#include "test.h"
 
 int sceHttpInit(unsigned int poolSize);
 int sceHttpTerm(void);
@@ -149,14 +150,6 @@ static void stop_server(TestServer *server)
     close(server->listen_fd);
 }
 
-#define CHECK(cond, message)                                                                       \
-    do {                                                                                           \
-        if (!(cond)) {                                                                             \
-            printf("http_smoke: %s (line %d)\n", message, __LINE__);                              \
-            return 1;                                                                              \
-        }                                                                                          \
-    } while (0)
-
 static int fetch(const char *url, int expected_status, const char *expected_body)
 {
     unsigned long long content_length = 0;
@@ -173,49 +166,51 @@ static int fetch(const char *url, int expected_status, const char *expected_body
     snprintf(full_url, sizeof(full_url), "http://127.0.0.1:%d%s", g_server.port, url);
 
     template_id = sceHttpCreateTemplate("vita2native-test", 1, 0);
-    CHECK(template_id > 0, "CreateTemplate failed");
+    REQUIRE(template_id > 0, "CreateTemplate failed");
 
     connection_id = sceHttpCreateConnectionWithURL(template_id, full_url, 1);
-    CHECK(connection_id > 0, "CreateConnectionWithURL failed");
+    REQUIRE(connection_id > 0, "CreateConnectionWithURL failed");
 
     request_id = sceHttpCreateRequestWithURL(connection_id, SCE_HTTP_METHOD_GET, full_url, 0);
-    CHECK(request_id > 0, "CreateRequestWithURL failed");
+    REQUIRE(request_id > 0, "CreateRequestWithURL failed");
 
-    CHECK(sceHttpSendRequest(request_id, NULL, 0) == 0, "SendRequest failed");
-    CHECK(sceHttpGetStatusCode(request_id, &status) == 0, "GetStatusCode failed");
-    CHECK(status == expected_status, "unexpected HTTP status");
+    REQUIRE(sceHttpSendRequest(request_id, NULL, 0) == 0, "SendRequest failed");
+    REQUIRE(sceHttpGetStatusCode(request_id, &status) == 0, "GetStatusCode failed");
+    REQUIRE(status == expected_status, "unexpected HTTP status");
 
-    CHECK(sceHttpGetAllResponseHeaders(request_id, &headers, &header_size) == 0,
-          "GetAllResponseHeaders failed");
-    CHECK(headers && header_size > 0, "the response headers are empty");
+    REQUIRE(sceHttpGetAllResponseHeaders(request_id, &headers, &header_size) == 0,
+            "GetAllResponseHeaders failed");
+    REQUIRE(headers && header_size > 0, "the response headers are empty");
 
     if (expected_status == 200) {
-        CHECK(sceHttpParseResponseHeader(headers, header_size, "X-Test", &value, &value_length) == 0,
-              "ParseResponseHeader did not find X-Test");
-        CHECK(value_length == 3 && strncmp(value, "yes", 3) == 0, "X-Test has the wrong value");
+        REQUIRE(sceHttpParseResponseHeader(headers, header_size, "X-Test", &value, &value_length) ==
+                    0,
+                "ParseResponseHeader did not find X-Test");
+        REQUIRE(value_length == 3 && strncmp(value, "yes", 3) == 0, "X-Test has the wrong value");
 
-        CHECK(sceHttpGetResponseContentLength(request_id, &content_length) == 0,
-              "GetResponseContentLength failed");
-        CHECK(content_length == strlen(expected_body), "the content length is wrong");
+        REQUIRE(sceHttpGetResponseContentLength(request_id, &content_length) == 0,
+                "GetResponseContentLength failed");
+        REQUIRE(content_length == strlen(expected_body), "the content length is wrong");
     }
 
     for (;;) {
-        int read = sceHttpReadData(request_id, body + total, (unsigned int)(sizeof(body) - 1 - total));
+        int read =
+            sceHttpReadData(request_id, body + total, (unsigned int)(sizeof(body) - 1 - total));
 
-        CHECK(read >= 0, "ReadData failed");
+        REQUIRE(read >= 0, "ReadData failed");
         if (read == 0)
             break;
         total += read;
     }
 
     if (expected_body)
-        CHECK(total == (int)strlen(expected_body) &&
-                  memcmp(body, expected_body, (size_t)total) == 0,
-              "the response body is wrong");
+        REQUIRE(total == (int)strlen(expected_body) &&
+                    memcmp(body, expected_body, (size_t)total) == 0,
+                "the response body is wrong");
 
-    CHECK(sceHttpDeleteRequest(request_id) == 0, "DeleteRequest failed");
-    CHECK(sceHttpDeleteConnection(connection_id) == 0, "DeleteConnection failed");
-    CHECK(sceHttpDeleteTemplate(template_id) == 0, "DeleteTemplate failed");
+    REQUIRE(sceHttpDeleteRequest(request_id) == 0, "DeleteRequest failed");
+    REQUIRE(sceHttpDeleteConnection(connection_id) == 0, "DeleteConnection failed");
+    REQUIRE(sceHttpDeleteTemplate(template_id) == 0, "DeleteTemplate failed");
 
     return 0;
 }
@@ -273,16 +268,16 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    CHECK(sceHttpInit(0) == 0, "Init failed");
-    CHECK(fetch("/hello", 200, "hello world") == 0, "plain request failed");
-    CHECK(fetch("/redirect", 200, "hello world") == 0, "redirect was not followed");
-    CHECK(fetch("/chunked", 200, "hello world") == 0, "chunked body was not decoded");
-    CHECK(fetch("/missing", 404, "not found") == 0, "404 response failed");
+    REQUIRE(sceHttpInit(0) == 0, "Init failed");
+    REQUIRE(fetch("/hello", 200, "hello world") == 0, "plain request failed");
+    REQUIRE(fetch("/redirect", 200, "hello world") == 0, "redirect was not followed");
+    REQUIRE(fetch("/chunked", 200, "hello world") == 0, "chunked body was not decoded");
+    REQUIRE(fetch("/missing", 404, "not found") == 0, "404 response failed");
 
     if (argc > 1)
         probe_external(argv[1]);
 
-    CHECK(sceHttpTerm() == 0, "Term failed");
+    REQUIRE(sceHttpTerm() == 0, "Term failed");
 
     stop_server(&g_server);
     puts("http_smoke: ok");

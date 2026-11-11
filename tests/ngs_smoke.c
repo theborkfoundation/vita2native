@@ -15,6 +15,8 @@
 #include <sys/mman.h>
 #endif
 
+#include "test.h"
+
 int32_t sceNgsAT9GetSectionDetails(int32_t samples_start, int32_t num_samples, int32_t config_data,
                                    SceNgsAT9SkipBufferInfo *info);
 int32_t sceNgsModuleGetNumPresets(SceNgsHSynSystem system, SceNgsModuleID module_id,
@@ -27,7 +29,7 @@ int32_t sceNgsPatchGetInfo(SceNgsHPatch patch_handle, SceNgsPatchRouteInfo *rout
                            SceNgsPatchSetupInfo *setup);
 int32_t sceNgsPatchRemoveRouting(SceNgsHPatch patch_handle);
 int32_t sceNgsRackGetRequiredMemorySize(SceNgsHSynSystem system,
-                                       const SceNgsRackDescription *description, uint32_t *size);
+                                        const SceNgsRackDescription *description, uint32_t *size);
 int32_t sceNgsRackInit(SceNgsHSynSystem system, const SceNgsBufferInfo *info,
                        const SceNgsRackDescription *description, SceNgsHRack *rack_handle);
 int32_t sceNgsRackGetVoiceHandle(SceNgsHRack rack_handle, uint32_t index,
@@ -94,14 +96,6 @@ int32_t sceSulphaNgsSetVoiceName(SceNgsHVoice voice_handle, const char *name);
 int32_t sceSulphaNgsShutdown(void);
 int32_t sceSulphaNgsTrace(const char *message);
 
-#define CHECK(cond)                                                                                \
-    do {                                                                                           \
-        if (!(cond)) {                                                                             \
-            printf("ngs_smoke: failed line %d: %s\n", __LINE__, #cond);                            \
-            return 1;                                                                              \
-        }                                                                                          \
-    } while (0)
-
 static void finished_callback(const SceNgsCallbackInfo *info)
 {
     (void)info;
@@ -140,8 +134,8 @@ _Static_assert(offsetof(TestPlayerParams, type) == 79, "player type offset");
 static uint8_t *alloc_guest_bytes(size_t size)
 {
 #if defined(__linux__) && defined(__x86_64__)
-    void *memory = mmap(NULL, size, PROT_READ | PROT_WRITE,
-                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+    void *memory =
+        mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
 
     return memory == MAP_FAILED ? NULL : memory;
 #else
@@ -212,44 +206,44 @@ static int run_hevag_render_test(void)
     int16_t state[1024 * 2];
     uint8_t *frame;
 
-    CHECK(sceNgsSystemGetRequiredMemorySize(&init, &size) == 0);
+    REQUIRE(sceNgsSystemGetRequiredMemorySize(&init, &size) == 0);
     system_mem = malloc(size);
-    CHECK(system_mem != NULL);
-    CHECK(sceNgsSystemInit(system_mem, size, &init, &system) == 0);
+    REQUIRE(system_mem != NULL);
+    REQUIRE(sceNgsSystemInit(system_mem, size, &init, &system) == 0);
 
-    CHECK(sceNgsRackGetRequiredMemorySize(system, &master_desc, &size) == 0);
+    REQUIRE(sceNgsRackGetRequiredMemorySize(system, &master_desc, &size) == 0);
     master_mem = malloc(size);
-    CHECK(master_mem != NULL);
+    REQUIRE(master_mem != NULL);
     buffer_info.data = master_mem;
     buffer_info.size = size;
-    CHECK(sceNgsRackInit(system, &buffer_info, &master_desc, &master_rack) == 0);
-    CHECK(sceNgsRackGetVoiceHandle(master_rack, 0, &master) == 0);
+    REQUIRE(sceNgsRackInit(system, &buffer_info, &master_desc, &master_rack) == 0);
+    REQUIRE(sceNgsRackGetVoiceHandle(master_rack, 0, &master) == 0);
 
-    CHECK(sceNgsRackGetRequiredMemorySize(system, &simple_desc, &size) == 0);
+    REQUIRE(sceNgsRackGetRequiredMemorySize(system, &simple_desc, &size) == 0);
     simple_mem = malloc(size);
-    CHECK(simple_mem != NULL);
+    REQUIRE(simple_mem != NULL);
     buffer_info.data = simple_mem;
     buffer_info.size = size;
-    CHECK(sceNgsRackInit(system, &buffer_info, &simple_desc, &simple_rack) == 0);
-    CHECK(sceNgsRackGetVoiceHandle(simple_rack, 0, &simple) == 0);
+    REQUIRE(sceNgsRackInit(system, &buffer_info, &simple_desc, &simple_rack) == 0);
+    REQUIRE(sceNgsRackGetVoiceHandle(simple_rack, 0, &simple) == 0);
 
     setup.source_voice = simple;
     setup.destination_voice = master;
-    CHECK(sceNgsPatchCreateRouting(&setup, &patch) == 0);
+    REQUIRE(sceNgsPatchCreateRouting(&setup, &patch) == 0);
     memset(&identity, 0, sizeof(identity));
     identity.matrix[0][0] = 1.0f;
     identity.matrix[1][1] = 1.0f;
-    CHECK(sceNgsVoicePatchSetVolumesMatrix(patch, &identity) == 0);
+    REQUIRE(sceNgsVoicePatchSetVolumesMatrix(patch, &identity) == 0);
 
     samples = alloc_guest_bytes(64 * 16);
-    CHECK(samples != NULL);
+    REQUIRE(samples != NULL);
     memset(samples, 0, 64 * 16);
     frame = samples + 40 * 16;
     frame[0] = 0x08; /* coef 0, shift nibble 8 */
     frame[1] = 0x00; /* flag 0 */
     memset(frame + 2, 0x77, 14);
 
-    CHECK(sceNgsVoiceLockParams(simple, 0, 0x01015CE6, &params_buffer) == 0);
+    REQUIRE(sceNgsVoiceLockParams(simple, 0, 0x01015CE6, &params_buffer) == 0);
     params = params_buffer.data;
     memset(params, 0, sizeof(*params));
     params->id = 0x01015CE6;
@@ -261,21 +255,21 @@ static int run_hevag_render_test(void)
     params->playback_scalar = 1.0f;
     params->channels = 1;
     params->type = 1; /* HEVAG */
-    CHECK(sceNgsVoiceUnlockParams(simple, 0) == 0);
-    CHECK(sceNgsVoicePlay(simple) == 0);
+    REQUIRE(sceNgsVoiceUnlockParams(simple, 0) == 0);
+    REQUIRE(sceNgsVoicePlay(simple) == 0);
 
-    CHECK(sceNgsSystemUpdate(system) == 0);
-    CHECK(sceNgsVoiceGetStateData(master, 1, state, sizeof(state)) == 0);
-    CHECK(state[100 * 2] == 0 && state[100 * 2 + 1] == 0);
+    REQUIRE(sceNgsSystemUpdate(system) == 0);
+    REQUIRE(sceNgsVoiceGetStateData(master, 1, state, sizeof(state)) == 0);
+    REQUIRE(state[100 * 2] == 0 && state[100 * 2 + 1] == 0);
 
-    CHECK(sceNgsSystemUpdate(system) == 0);
-    CHECK(sceNgsVoiceGetStateData(master, 1, state, sizeof(state)) == 0);
-    CHECK(state[95 * 2] == 0 && state[96 * 2] == 112 && state[96 * 2 + 1] == 112);
-    CHECK(state[123 * 2] == 112 && state[124 * 2] == 0);
+    REQUIRE(sceNgsSystemUpdate(system) == 0);
+    REQUIRE(sceNgsVoiceGetStateData(master, 1, state, sizeof(state)) == 0);
+    REQUIRE(state[95 * 2] == 0 && state[96 * 2] == 112 && state[96 * 2 + 1] == 112);
+    REQUIRE(state[123 * 2] == 112 && state[124 * 2] == 0);
 
-    CHECK(sceNgsRackRelease(simple_rack, NULL) == 0);
-    CHECK(sceNgsRackRelease(master_rack, NULL) == 0);
-    CHECK(sceNgsSystemRelease(system) == 0);
+    REQUIRE(sceNgsRackRelease(simple_rack, NULL) == 0);
+    REQUIRE(sceNgsRackRelease(master_rack, NULL) == 0);
+    REQUIRE(sceNgsSystemRelease(system) == 0);
     free(system_mem);
     free(master_mem);
     free(simple_mem);
@@ -324,172 +318,172 @@ int main(void)
     void *memory;
     int32_t rc;
 
-    CHECK(sceNgsVoiceDefGetMasterBuss() != NULL);
-    CHECK(sceNgsVoiceDefGetSimpleVoice() != NULL);
-    CHECK(sceNgsVoiceDefGetTemplate1() != NULL);
-    CHECK(sceNgsVoiceDefGetMasterBuss() != sceNgsVoiceDefGetSimpleVoice());
+    REQUIRE(sceNgsVoiceDefGetMasterBuss() != NULL);
+    REQUIRE(sceNgsVoiceDefGetSimpleVoice() != NULL);
+    REQUIRE(sceNgsVoiceDefGetTemplate1() != NULL);
+    REQUIRE(sceNgsVoiceDefGetMasterBuss() != sceNgsVoiceDefGetSimpleVoice());
 
-    CHECK(sceNgsSystemGetRequiredMemorySize(&params, &size) == 0);
-    CHECK(size >= 0x1000);
+    REQUIRE(sceNgsSystemGetRequiredMemorySize(&params, &size) == 0);
+    REQUIRE(size >= 0x1000);
     memory = malloc(size);
-    CHECK(memory != NULL);
+    REQUIRE(memory != NULL);
 
-    CHECK(sceNgsSystemInit(memory, size, &params, &system) == 0);
-    CHECK(system != 0);
-    CHECK(sceNgsSystemSetFlags(system, 1) == 0);
-    CHECK(sceNgsSystemLock(system) == 0);
-    CHECK(sceNgsSystemUnlock(system) == 0);
-    CHECK(sceNgsSystemSetParamErrorCallback(system, NULL) == 0);
-    CHECK(sceNgsSystemUpdate(system) == 0);
+    REQUIRE(sceNgsSystemInit(memory, size, &params, &system) == 0);
+    REQUIRE(system != 0);
+    REQUIRE(sceNgsSystemSetFlags(system, 1) == 0);
+    REQUIRE(sceNgsSystemLock(system) == 0);
+    REQUIRE(sceNgsSystemUnlock(system) == 0);
+    REQUIRE(sceNgsSystemSetParamErrorCallback(system, NULL) == 0);
+    REQUIRE(sceNgsSystemUpdate(system) == 0);
 
-    CHECK(sceNgsModuleGetNumPresets(system, 0, &presets) == 0);
-    CHECK(presets == 0);
-    CHECK(sceNgsModuleGetPreset(system, 0, 0, NULL) == SCE_NGS_ERROR_INVALID_PARAM);
+    REQUIRE(sceNgsModuleGetNumPresets(system, 0, &presets) == 0);
+    REQUIRE(presets == 0);
+    REQUIRE(sceNgsModuleGetPreset(system, 0, 0, NULL) == SCE_NGS_ERROR_INVALID_PARAM);
 
-    CHECK(sceNgsRackGetRequiredMemorySize(system, &rack_desc, &size) == 0);
-    CHECK(size >= 0x400);
+    REQUIRE(sceNgsRackGetRequiredMemorySize(system, &rack_desc, &size) == 0);
+    REQUIRE(size >= 0x400);
     memory = realloc(memory, size);
-    CHECK(memory != NULL);
+    REQUIRE(memory != NULL);
     rack_buffer.data = memory;
     rack_buffer.size = size;
 
-    CHECK(sceNgsRackInit(system, &rack_buffer, &rack_desc, &rack) == 0);
-    CHECK(rack != 0);
-    CHECK(sceNgsRackSetParamErrorCallback(rack, NULL) == 0);
+    REQUIRE(sceNgsRackInit(system, &rack_buffer, &rack_desc, &rack) == 0);
+    REQUIRE(rack != 0);
+    REQUIRE(sceNgsRackSetParamErrorCallback(rack, NULL) == 0);
 
     for (uint32_t i = 0; i < 4; i++) {
-        CHECK(sceNgsRackGetVoiceHandle(rack, i, &voices[i]) == 0);
-        CHECK(voices[i] != 0);
+        REQUIRE(sceNgsRackGetVoiceHandle(rack, i, &voices[i]) == 0);
+        REQUIRE(voices[i] != 0);
         if (i > 0)
-            CHECK(voices[i] != voices[i - 1]);
+            REQUIRE(voices[i] != voices[i - 1]);
     }
-    CHECK(sceNgsRackGetVoiceHandle(rack, 4, &found) == SCE_NGS_ERROR_INVALID_PARAM);
+    REQUIRE(sceNgsRackGetVoiceHandle(rack, 4, &found) == SCE_NGS_ERROR_INVALID_PARAM);
 
-    CHECK(sceNgsVoiceInit(voices[0], NULL, SCE_NGS_VOICE_INIT_ALL) == 0);
-    CHECK(sceNgsVoicePlay(voices[0]) == 0);
-    CHECK(sceNgsVoiceGetInfo(voices[0], &voice_info) == 0);
-    CHECK(voice_info.voice_state == SCE_NGS_VOICE_STATE_ACTIVE);
-    CHECK(voice_info.num_outputs == 1);
+    REQUIRE(sceNgsVoiceInit(voices[0], NULL, SCE_NGS_VOICE_INIT_ALL) == 0);
+    REQUIRE(sceNgsVoicePlay(voices[0]) == 0);
+    REQUIRE(sceNgsVoiceGetInfo(voices[0], &voice_info) == 0);
+    REQUIRE(voice_info.voice_state == SCE_NGS_VOICE_STATE_ACTIVE);
+    REQUIRE(voice_info.num_outputs == 1);
 
-    CHECK(sceNgsVoicePause(voices[0]) == 0);
-    CHECK(sceNgsVoiceGetInfo(voices[0], &voice_info) == 0);
-    CHECK(voice_info.voice_state == SCE_NGS_VOICE_STATE_PAUSED);
-    CHECK(sceNgsVoiceResume(voices[0]) == 0);
+    REQUIRE(sceNgsVoicePause(voices[0]) == 0);
+    REQUIRE(sceNgsVoiceGetInfo(voices[0], &voice_info) == 0);
+    REQUIRE(voice_info.voice_state == SCE_NGS_VOICE_STATE_PAUSED);
+    REQUIRE(sceNgsVoiceResume(voices[0]) == 0);
 
-    CHECK(sceNgsVoiceKeyOff(voices[0]) == 0);
-    CHECK(sceNgsVoiceGetInfo(voices[0], &voice_info) == 0);
-    CHECK(voice_info.voice_state == SCE_NGS_VOICE_STATE_KEY_OFF);
-    CHECK(sceNgsVoiceKill(voices[0]) == 0);
-    CHECK(sceNgsVoiceGetInfo(voices[0], &voice_info) == 0);
-    CHECK(voice_info.voice_state == SCE_NGS_VOICE_STATE_AVAILABLE);
-    CHECK(sceNgsVoicePlay(voices[0]) == 0);
+    REQUIRE(sceNgsVoiceKeyOff(voices[0]) == 0);
+    REQUIRE(sceNgsVoiceGetInfo(voices[0], &voice_info) == 0);
+    REQUIRE(voice_info.voice_state == SCE_NGS_VOICE_STATE_KEY_OFF);
+    REQUIRE(sceNgsVoiceKill(voices[0]) == 0);
+    REQUIRE(sceNgsVoiceGetInfo(voices[0], &voice_info) == 0);
+    REQUIRE(voice_info.voice_state == SCE_NGS_VOICE_STATE_AVAILABLE);
+    REQUIRE(sceNgsVoicePlay(voices[0]) == 0);
 
-    CHECK(sceNgsVoiceBypassModule(voices[0], 0, 1) == 0);
-    CHECK(sceNgsVoiceGetModuleBypass(voices[0], 0, &flag) == 0);
-    CHECK(flag == SCE_NGS_MODULE_FLAG_BYPASSED);
-    CHECK(sceNgsVoiceBypassModule(voices[0], 0, 0) == 0);
-    CHECK(sceNgsVoiceGetModuleBypass(voices[0], 0, &flag) == 0);
-    CHECK(flag == SCE_NGS_MODULE_FLAG_NOT_BYPASSED);
-    CHECK(sceNgsVoiceGetModuleType(voices[0], 0, &flag) == 0);
+    REQUIRE(sceNgsVoiceBypassModule(voices[0], 0, 1) == 0);
+    REQUIRE(sceNgsVoiceGetModuleBypass(voices[0], 0, &flag) == 0);
+    REQUIRE(flag == SCE_NGS_MODULE_FLAG_BYPASSED);
+    REQUIRE(sceNgsVoiceBypassModule(voices[0], 0, 0) == 0);
+    REQUIRE(sceNgsVoiceGetModuleBypass(voices[0], 0, &flag) == 0);
+    REQUIRE(flag == SCE_NGS_MODULE_FLAG_NOT_BYPASSED);
+    REQUIRE(sceNgsVoiceGetModuleType(voices[0], 0, &flag) == 0);
 
-    CHECK(sceNgsVoiceLockParams(voices[0], 0, 0x01015caa, &params_buffer) == 0);
-    CHECK(params_buffer.data != NULL);
-    CHECK(params_buffer.size > 0);
-    CHECK(sceNgsVoiceLockParams(voices[0], 0, 0x01015caa, &params_buffer) ==
-          SCE_NGS_ERROR_RESOURCE_LOCKED);
-    CHECK(sceNgsVoiceUnlockParams(voices[0], 1) == SCE_NGS_ERROR_INVALID_PARAM);
-    CHECK(sceNgsVoiceUnlockParams(voices[0], 0) == 0);
+    REQUIRE(sceNgsVoiceLockParams(voices[0], 0, 0x01015caa, &params_buffer) == 0);
+    REQUIRE(params_buffer.data != NULL);
+    REQUIRE(params_buffer.size > 0);
+    REQUIRE(sceNgsVoiceLockParams(voices[0], 0, 0x01015caa, &params_buffer) ==
+            SCE_NGS_ERROR_RESOURCE_LOCKED);
+    REQUIRE(sceNgsVoiceUnlockParams(voices[0], 1) == SCE_NGS_ERROR_INVALID_PARAM);
+    REQUIRE(sceNgsVoiceUnlockParams(voices[0], 0) == 0);
 
     memset(state, 0xff, sizeof(state));
-    CHECK(sceNgsVoiceGetStateData(voices[0], 0, state, sizeof(state)) == 0);
-    CHECK(state[0] == 0 && state[sizeof(state) - 1] == 0);
-    CHECK(sceNgsVoiceGetParamsOutOfRange(voices[0], 0, message) == 0);
-    CHECK(strcmp(message, "No value was out of range\n") == 0);
-    CHECK(sceNgsVoiceSetParamsBlock(voices[0], &header, sizeof(header), &errors) == 0);
-    CHECK(errors == 0);
-    CHECK(sceNgsVoiceSetPreset(voices[0], NULL) == 0);
-    CHECK(sceNgsVoiceSetFinishedCallback(voices[0], finished_callback, NULL) == 0);
-    CHECK(sceNgsVoiceSetModuleCallback(voices[0], 0, finished_callback, NULL) == 0);
+    REQUIRE(sceNgsVoiceGetStateData(voices[0], 0, state, sizeof(state)) == 0);
+    REQUIRE(state[0] == 0 && state[sizeof(state) - 1] == 0);
+    REQUIRE(sceNgsVoiceGetParamsOutOfRange(voices[0], 0, message) == 0);
+    REQUIRE(strcmp(message, "No value was out of range\n") == 0);
+    REQUIRE(sceNgsVoiceSetParamsBlock(voices[0], &header, sizeof(header), &errors) == 0);
+    REQUIRE(errors == 0);
+    REQUIRE(sceNgsVoiceSetPreset(voices[0], NULL) == 0);
+    REQUIRE(sceNgsVoiceSetFinishedCallback(voices[0], finished_callback, NULL) == 0);
+    REQUIRE(sceNgsVoiceSetModuleCallback(voices[0], 0, finished_callback, NULL) == 0);
 
     patch_info.source_voice = voices[0];
     patch_info.source_output_index = 0;
     patch_info.source_output_sub_index = -1;
     patch_info.destination_voice = voices[1];
     patch_info.destination_input_index = 0;
-    CHECK(sceNgsPatchCreateRouting(&patch_info, &patch0) == 0);
-    CHECK(patch0 != 0);
+    REQUIRE(sceNgsPatchCreateRouting(&patch_info, &patch0) == 0);
+    REQUIRE(patch0 != 0);
 
     patch_info.source_output_sub_index = -1;
-    CHECK(sceNgsPatchCreateRouting(&patch_info, &patch1) == 0);
-    CHECK(patch1 != 0 && patch1 != patch0);
+    REQUIRE(sceNgsPatchCreateRouting(&patch_info, &patch1) == 0);
+    REQUIRE(patch1 != 0 && patch1 != patch0);
 
-    CHECK(sceNgsVoiceGetOutputPatch(voices[0], 0, 0, &found) == 0);
-    CHECK(found == patch0);
-    CHECK(sceNgsVoiceGetOutputPatch(voices[0], 0, 1, &found) == 0);
-    CHECK(found == patch1);
+    REQUIRE(sceNgsVoiceGetOutputPatch(voices[0], 0, 0, &found) == 0);
+    REQUIRE(found == patch0);
+    REQUIRE(sceNgsVoiceGetOutputPatch(voices[0], 0, 1, &found) == 0);
+    REQUIRE(found == patch1);
 
     memset(&route_info, 0xcc, sizeof(route_info));
     memset(&patch_setup, 0, sizeof(patch_setup));
-    CHECK(sceNgsPatchGetInfo(patch0, &route_info, &patch_setup) == 0);
-    CHECK(route_info.output_channels == 2 && route_info.input_channels == 2);
-    CHECK(patch_setup.source_voice == voices[0]);
-    CHECK(patch_setup.destination_voice == voices[1]);
-    CHECK(patch_setup.source_output_sub_index == 0);
+    REQUIRE(sceNgsPatchGetInfo(patch0, &route_info, &patch_setup) == 0);
+    REQUIRE(route_info.output_channels == 2 && route_info.input_channels == 2);
+    REQUIRE(patch_setup.source_voice == voices[0]);
+    REQUIRE(patch_setup.destination_voice == voices[1]);
+    REQUIRE(patch_setup.source_output_sub_index == 0);
 
-    CHECK(sceNgsVoicePatchSetVolume(patch0, 0, 0, 0.5f) == 0);
+    REQUIRE(sceNgsVoicePatchSetVolume(patch0, 0, 0, 0.5f) == 0);
     {
         const float row[2] = { 0.25f, 0.75f };
-        CHECK(sceNgsVoicePatchSetVolumes(patch0, 1, row, 2) == 0);
+        REQUIRE(sceNgsVoicePatchSetVolumes(patch0, 1, row, 2) == 0);
     }
     memset(&matrix, 0, sizeof(matrix));
     matrix.matrix[0][0] = 0.125f;
     matrix.matrix[0][1] = 0.25f;
     matrix.matrix[1][0] = 0.5f;
     matrix.matrix[1][1] = 0.75f;
-    CHECK(sceNgsVoicePatchSetVolumesMatrix(patch0, &matrix) == 0);
-    CHECK(sceNgsPatchGetInfo(patch0, &route_info, NULL) == 0);
-    CHECK(route_info.volume_matrix.matrix[0][0] == 0.125f);
-    CHECK(route_info.volume_matrix.matrix[1][1] == 0.75f);
-    CHECK(sceNgsVoicePatchSetVolume(patch0, 2, 0, 1.0f) == SCE_NGS_ERROR_INVALID_PARAM);
+    REQUIRE(sceNgsVoicePatchSetVolumesMatrix(patch0, &matrix) == 0);
+    REQUIRE(sceNgsPatchGetInfo(patch0, &route_info, NULL) == 0);
+    REQUIRE(route_info.volume_matrix.matrix[0][0] == 0.125f);
+    REQUIRE(route_info.volume_matrix.matrix[1][1] == 0.75f);
+    REQUIRE(sceNgsVoicePatchSetVolume(patch0, 2, 0, 1.0f) == SCE_NGS_ERROR_INVALID_PARAM);
 
-    CHECK(sceNgsPatchRemoveRouting(patch0) == 0);
-    CHECK(sceNgsPatchRemoveRouting(patch1) == 0);
-    CHECK(sceNgsVoiceGetOutputPatch(voices[0], 0, 0, &found) == 0);
-    CHECK(found == 0);
+    REQUIRE(sceNgsPatchRemoveRouting(patch0) == 0);
+    REQUIRE(sceNgsPatchRemoveRouting(patch1) == 0);
+    REQUIRE(sceNgsVoiceGetOutputPatch(voices[0], 0, 0, &found) == 0);
+    REQUIRE(found == 0);
 
     /* config: 0xFE magic, sample-rate code 4 (128 samples/frame), 16 -> 129 bytes. */
-    CHECK(sceNgsAT9GetSectionDetails(0, 128, 0x001040fe, &at9_info) == 0);
-    CHECK(at9_info.start_byte_offset == 0);
-    CHECK(at9_info.start_skip == 128);
-    CHECK(at9_info.num_bytes == 258);
-    CHECK(at9_info.end_skip == 0);
-    CHECK(sceNgsAT9GetSectionDetails(0, -1, 0x001040fe, &at9_info) == SCE_NGS_ERROR);
-    CHECK(sceNgsAT9GetSectionDetails(0, 128, 0x001040ff, &at9_info) == SCE_NGS_ERROR);
+    REQUIRE(sceNgsAT9GetSectionDetails(0, 128, 0x001040fe, &at9_info) == 0);
+    REQUIRE(at9_info.start_byte_offset == 0);
+    REQUIRE(at9_info.start_skip == 128);
+    REQUIRE(at9_info.num_bytes == 258);
+    REQUIRE(at9_info.end_skip == 0);
+    REQUIRE(sceNgsAT9GetSectionDetails(0, -1, 0x001040fe, &at9_info) == SCE_NGS_ERROR);
+    REQUIRE(sceNgsAT9GetSectionDetails(0, 128, 0x001040ff, &at9_info) == SCE_NGS_ERROR);
 
-    CHECK(sceSulphaNgsGetDefaultConfig(&sulpha_config) == 0);
-    CHECK(sulpha_config.max_named_samples == 1024);
-    CHECK(sulpha_config.api_trace_buffer_size == 4096);
-    CHECK(sceSulphaNgsGetNeededMemory(&sulpha_config, &sulpha_size) == 0);
-    CHECK(sulpha_size >= 4096);
+    REQUIRE(sceSulphaNgsGetDefaultConfig(&sulpha_config) == 0);
+    REQUIRE(sulpha_config.max_named_samples == 1024);
+    REQUIRE(sulpha_config.api_trace_buffer_size == 4096);
+    REQUIRE(sceSulphaNgsGetNeededMemory(&sulpha_config, &sulpha_size) == 0);
+    REQUIRE(sulpha_size >= 4096);
     memory = malloc(sulpha_size);
-    CHECK(memory != NULL);
-    CHECK(sceSulphaNgsInit(&sulpha_config, memory, sulpha_size) == 0);
-    CHECK(sceSulphaNgsSetRackName(rack, "rack") == 0);
-    CHECK(sceSulphaNgsSetSynthName(system, "synth") == 0);
-    CHECK(sceSulphaNgsSetVoiceName(voices[0], "voice") == 0);
-    CHECK(sceSulphaNgsSetSampleName(memory, 16, "sample") == 0);
-    CHECK(sceSulphaNgsTrace("trace") == 0);
-    CHECK(sceSulphaNgsShutdown() == 0);
+    REQUIRE(memory != NULL);
+    REQUIRE(sceSulphaNgsInit(&sulpha_config, memory, sulpha_size) == 0);
+    REQUIRE(sceSulphaNgsSetRackName(rack, "rack") == 0);
+    REQUIRE(sceSulphaNgsSetSynthName(system, "synth") == 0);
+    REQUIRE(sceSulphaNgsSetVoiceName(voices[0], "voice") == 0);
+    REQUIRE(sceSulphaNgsSetSampleName(memory, 16, "sample") == 0);
+    REQUIRE(sceSulphaNgsTrace("trace") == 0);
+    REQUIRE(sceSulphaNgsShutdown() == 0);
 
-    CHECK(sceNgsRackRelease(rack, NULL) == 0);
+    REQUIRE(sceNgsRackRelease(rack, NULL) == 0);
     rc = sceNgsVoicePlay(voices[0]);
-    CHECK(rc == SCE_NGS_ERROR_INVALID_HANDLE);
-    CHECK(sceNgsSystemRelease(system) == 0);
+    REQUIRE(rc == SCE_NGS_ERROR_INVALID_HANDLE);
+    REQUIRE(sceNgsSystemRelease(system) == 0);
     rc = sceNgsSystemUpdate(system);
-    CHECK(rc == SCE_NGS_ERROR_INVALID_HANDLE);
-    CHECK(sceNgsVoicePlay((SceNgsHVoice)0x12345678u) == SCE_NGS_ERROR_INVALID_HANDLE);
+    REQUIRE(rc == SCE_NGS_ERROR_INVALID_HANDLE);
+    REQUIRE(sceNgsVoicePlay((SceNgsHVoice)0x12345678u) == SCE_NGS_ERROR_INVALID_HANDLE);
 
-    CHECK(run_hevag_render_test() == 0);
+    REQUIRE(run_hevag_render_test() == 0);
 
     puts("ngs_smoke: ok");
     return 0;

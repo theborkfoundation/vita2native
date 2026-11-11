@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <psp2/avplayer.h>
+#include "test.h"
 
 const void *module_get_func_export(uint32_t lib_nid, uint32_t func_nid, void *importer);
 
@@ -14,17 +15,6 @@ int sceAvPlayerPostInit(SceAvPlayerHandle handle);
 int sceAvPlayerStreamCount(SceAvPlayerHandle handle);
 int sceAvPlayerEnableStream(SceAvPlayerHandle handle, uint32_t stream_no);
 int sceAvPlayerDisableStream(SceAvPlayerHandle handle, uint32_t stream_no);
-
-static int failures;
-
-#define CHECK(condition, ...)                                                                      \
-    do {                                                                                           \
-        if (!(condition)) {                                                                        \
-            fprintf(stderr, __VA_ARGS__);                                                          \
-            fprintf(stderr, "\n");                                                                 \
-            failures++;                                                                            \
-        }                                                                                          \
-    } while (0)
 
 static int check_export(uint32_t lib_nid, uint32_t func_nid, const char *what)
 {
@@ -58,8 +48,8 @@ int main(void)
     CHECK(sceAvPlayerGetStreamInfo(player, 0, &stream) == 0, "video stream info failed");
     CHECK(stream.type == SCE_AVPLAYER_VIDEO && stream.details.video.width == 960 &&
               stream.details.video.height == 544,
-          "video stream is %ux%u type %u", stream.details.video.width,
-          stream.details.video.height, stream.type);
+          "video stream is %ux%u type %u", stream.details.video.width, stream.details.video.height,
+          stream.type);
     memset(&stream, 0, sizeof(stream));
     CHECK(sceAvPlayerGetStreamInfo(player, 1, &stream) == 0, "audio stream info failed");
     CHECK(stream.type == SCE_AVPLAYER_AUDIO && stream.details.audio.channelCount == 2 &&
@@ -108,11 +98,5 @@ int main(void)
     CHECK(sceAvPlayerClose(player) == 0, "close failed");
     CHECK(sceAvPlayerClose(player) < 0, "double close was accepted");
 
-    if (failures) {
-        fprintf(stderr, "avplayer_smoke: %d failure(s)\n", failures);
-        return 1;
-    }
-
-    printf("avplayer_smoke: ok\n");
-    return 0;
+    return test_status("avplayer_smoke");
 }

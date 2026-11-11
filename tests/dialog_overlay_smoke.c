@@ -12,19 +12,9 @@
 #include <psp2/message_dialog.h>
 
 #include "modules/common_dialog_overlay.h"
+#include "test.h"
 
 const void *module_get_func_export(uint32_t lib_nid, uint32_t func_nid, void *importer);
-
-static int failures;
-
-#define CHECK(condition, ...)                                                                      \
-    do {                                                                                           \
-        if (!(condition)) {                                                                        \
-            fprintf(stderr, __VA_ARGS__);                                                          \
-            fprintf(stderr, "\n");                                                                 \
-            failures++;                                                                            \
-        }                                                                                          \
-    } while (0)
 
 static int check_export(uint32_t lib_nid, uint32_t func_nid, const char *what)
 {
@@ -130,10 +120,12 @@ int main(void)
           "dialog did not finish after two presents and one second");
     memset(&result, 0, sizeof(result));
     CHECK(sceMsgDialogGetResult(&result) == 0, "get result failed");
-    CHECK(result.mode == SCE_MSG_DIALOG_MODE_USER_MSG && result.result == SCE_COMMON_DIALOG_RESULT_OK,
+    CHECK(result.mode == SCE_MSG_DIALOG_MODE_USER_MSG &&
+              result.result == SCE_COMMON_DIALOG_RESULT_OK,
           "result is mode %d result %d", result.mode, result.result);
     CHECK(sceMsgDialogTerm() == 0, "term failed");
-    CHECK(sceMsgDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_NONE, "dialog still active after term");
+    CHECK(sceMsgDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_NONE,
+          "dialog still active after term");
     CHECK(!SceCommonDialog_getOverlay(&overlay), "overlay still active after term");
 
     /* System message. */
@@ -168,8 +160,8 @@ int main(void)
     CHECK(sceMsgDialogInit(&param) == 0, "progress dialog init failed");
     CHECK(sceMsgDialogProgressBarSetValue(SCE_MSG_DIALOG_PROGRESSBAR_TARGET_BAR_DEFAULT, 50) == 0,
           "progress set failed");
-    CHECK(SceCommonDialog_getOverlay(&overlay) && overlay.progress == 50,
-          "progress is %d", overlay.progress);
+    CHECK(SceCommonDialog_getOverlay(&overlay) && overlay.progress == 50, "progress is %d",
+          overlay.progress);
     finish_dialog();
     CHECK(sceMsgDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_RUNNING,
           "progress dialog auto-finished");
@@ -193,18 +185,11 @@ int main(void)
         CHECK(SceCommonDialog_getOverlay(&overlay) && strcmp(overlay.message, "hello") == 0,
               "IME overlay message is '%s'", overlay.message);
         finish_dialog();
-        CHECK(sceImeDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_FINISHED,
-              "IME did not finish");
+        CHECK(sceImeDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_FINISHED, "IME did not finish");
         CHECK(sceImeDialogGetResult(NULL) < 0, "null IME result was accepted");
         sceImeDialogTerm();
         CHECK(sceImeDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_NONE, "IME still active");
     }
 
-    if (failures) {
-        fprintf(stderr, "dialog_overlay_smoke: %d failure(s)\n", failures);
-        return 1;
-    }
-
-    printf("dialog_overlay_smoke: ok\n");
-    return 0;
+    return test_status("dialog_overlay_smoke");
 }

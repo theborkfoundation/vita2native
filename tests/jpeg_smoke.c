@@ -14,27 +14,18 @@
 #include <psp2/jpegenc.h>
 
 #include "stb_image_write.h"
+#include "test.h"
 
 const void *module_get_func_export(uint32_t lib_nid, uint32_t func_nid, void *importer);
 
 #define SCE_JPEG_PIXEL_RGBA8888 0
 
 int sceJpegDecodeMJpeg(const uint8_t *pJpeg, SceSize isize, uint8_t *pRGBA, SceSize osize,
-                       int decodeMode, void *pTempBuffer, SceSize tempBufferSize,
-                       void *pCoefBuffer, SceSize coefBufferSize);
+                       int decodeMode, void *pTempBuffer, SceSize tempBufferSize, void *pCoefBuffer,
+                       SceSize coefBufferSize);
 
-static int failures;
 static uint8_t g_jpeg[200000];
 static size_t g_jpeg_size;
-
-#define CHECK(condition, ...)                                                                      \
-    do {                                                                                           \
-        if (!(condition)) {                                                                        \
-            fprintf(stderr, __VA_ARGS__);                                                          \
-            fprintf(stderr, "\n");                                                                 \
-            failures++;                                                                            \
-        }                                                                                          \
-    } while (0)
 
 static void write_memory(void *context, void *data, int size)
 {
@@ -108,7 +99,7 @@ int main(void)
 
         memset(&arm_info, 0, sizeof(arm_info));
         CHECK(sceJpegArmGetOutputInfo(g_jpeg, g_jpeg_size, 0, SCE_JPEG_PIXEL_RGBA8888, &arm_info) ==
-                  0 &&
+                      0 &&
                   arm_info.width == 64 && arm_info.height == 64,
               "Arm GetOutputInfo failed");
     }
@@ -173,7 +164,8 @@ int main(void)
         CHECK(encoded[0] == 0xFF && encoded[1] == 0xD8, "encoder did not write a JPEG header");
 
         memset(&info, 0, sizeof(info));
-        CHECK(sceJpegGetOutputInfo(encoded, (SceSize)result, SCE_JPEG_PIXEL_RGBA8888, 0, &info) == 0 &&
+        CHECK(sceJpegGetOutputInfo(encoded, (SceSize)result, SCE_JPEG_PIXEL_RGBA8888, 0, &info) ==
+                      0 &&
                   info.width == 64 && info.height == 64,
               "encoded JPEG did not report 64x64");
         CHECK(sceJpegEncoderEnd(encoder) == 0, "encoder end failed");
@@ -182,11 +174,5 @@ int main(void)
 
     CHECK(sceJpegFinishMJpeg() == 0, "sceJpegFinishMJpeg failed");
 
-    if (failures) {
-        fprintf(stderr, "jpeg_smoke: %d failure(s)\n", failures);
-        return 1;
-    }
-
-    printf("jpeg_smoke: ok\n");
-    return 0;
+    return test_status("jpeg_smoke");
 }

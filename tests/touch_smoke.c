@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include <psp2/touch.h>
+#include "test.h"
 
 int sceTouchPeek(SceUInt32 port, SceTouchData *pData, SceUInt32 nBufs);
 int sceTouchPeek2(SceUInt32 port, SceTouchData *pData, SceUInt32 nBufs);
@@ -31,14 +32,6 @@ int sceTouchGetDeviceInfo(void *info);
 int sceTouchGetProcessInfo(void *info);
 int sceTouchSetProcessPrivilege(int privilege);
 
-#define CHECK(cond, message)                                                                       \
-    do {                                                                                           \
-        if (!(cond)) {                                                                             \
-            printf("touch_smoke: %s (line %d)\n", message, __LINE__);                              \
-            return 1;                                                                              \
-        }                                                                                          \
-    } while (0)
-
 int main(void)
 {
     SceTouchPanelInfo panel;
@@ -46,66 +39,66 @@ int main(void)
     SceTouchData data[2];
     float d1 = 0, d2 = 0, d3 = 0, d4 = 0;
 
-    CHECK(sceTouchGetPanelInfo(SCE_TOUCH_PORT_FRONT, &panel) == 0, "front panel info failed");
-    CHECK(panel.maxAaX == 1919 && panel.maxAaY == 1087, "front panel dimensions are wrong");
-    CHECK(sceTouchGetPanelInfo(SCE_TOUCH_PORT_BACK, &panel) == 0, "back panel info failed");
-    CHECK(panel.maxAaX == 1919 && panel.maxAaY == 889, "back panel dimensions are wrong");
-    CHECK(sceTouchGetPanelInfo(2, &panel) == SCE_TOUCH_ERROR_INVALID_ARG,
-          "an invalid port was accepted");
-    CHECK(sceTouchGetPanelInfo(SCE_TOUCH_PORT_FRONT, NULL) == SCE_TOUCH_ERROR_INVALID_ARG,
-          "a null panel pointer was accepted");
+    REQUIRE(sceTouchGetPanelInfo(SCE_TOUCH_PORT_FRONT, &panel) == 0, "front panel info failed");
+    REQUIRE(panel.maxAaX == 1919 && panel.maxAaY == 1087, "front panel dimensions are wrong");
+    REQUIRE(sceTouchGetPanelInfo(SCE_TOUCH_PORT_BACK, &panel) == 0, "back panel info failed");
+    REQUIRE(panel.maxAaX == 1919 && panel.maxAaY == 889, "back panel dimensions are wrong");
+    REQUIRE(sceTouchGetPanelInfo(2, &panel) == SCE_TOUCH_ERROR_INVALID_ARG,
+            "an invalid port was accepted");
+    REQUIRE(sceTouchGetPanelInfo(SCE_TOUCH_PORT_FRONT, NULL) == SCE_TOUCH_ERROR_INVALID_ARG,
+            "a null panel pointer was accepted");
 
-    CHECK(sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_STOP) == 0,
-          "SetSamplingState failed");
+    REQUIRE(sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_STOP) == 0,
+            "SetSamplingState failed");
     state = SCE_TOUCH_SAMPLING_STATE_START;
-    CHECK(sceTouchGetSamplingState(SCE_TOUCH_PORT_FRONT, &state) == 0 &&
-              state == SCE_TOUCH_SAMPLING_STATE_STOP,
-          "the sampling state did not round-trip");
-    CHECK(sceTouchGetSamplingState(SCE_TOUCH_PORT_FRONT, NULL) == SCE_TOUCH_ERROR_INVALID_ARG,
-          "a null sampling state was accepted");
+    REQUIRE(sceTouchGetSamplingState(SCE_TOUCH_PORT_FRONT, &state) == 0 &&
+                state == SCE_TOUCH_SAMPLING_STATE_STOP,
+            "the sampling state did not round-trip");
+    REQUIRE(sceTouchGetSamplingState(SCE_TOUCH_PORT_FRONT, NULL) == SCE_TOUCH_ERROR_INVALID_ARG,
+            "a null sampling state was accepted");
 
     memset(data, 0xa5, sizeof(data));
-    CHECK(sceTouchPeek(SCE_TOUCH_PORT_FRONT, data, 1) == 1, "Peek failed");
-    CHECK(data[0].reportNum == 0, "headless Peek reported touch input");
-    CHECK(data[0].timeStamp > 0, "Peek did not timestamp the data");
+    REQUIRE(sceTouchPeek(SCE_TOUCH_PORT_FRONT, data, 1) == 1, "Peek failed");
+    REQUIRE(data[0].reportNum == 0, "headless Peek reported touch input");
+    REQUIRE(data[0].timeStamp > 0, "Peek did not timestamp the data");
 
     memset(data, 0, sizeof(data));
-    CHECK(sceTouchPeek2(SCE_TOUCH_PORT_FRONT, data, 2) == 2, "Peek2 failed");
-    CHECK(data[1].reportNum == 0, "Peek2 wrote unexpected touch data");
+    REQUIRE(sceTouchPeek2(SCE_TOUCH_PORT_FRONT, data, 2) == 2, "Peek2 failed");
+    REQUIRE(data[1].reportNum == 0, "Peek2 wrote unexpected touch data");
 
     memset(data, 0, sizeof(data));
-    CHECK(sceTouchRead(SCE_TOUCH_PORT_BACK, data, 1) == 1, "Read failed");
-    CHECK(data[0].reportNum == 0, "the back panel reported touch input");
+    REQUIRE(sceTouchRead(SCE_TOUCH_PORT_BACK, data, 1) == 1, "Read failed");
+    REQUIRE(data[0].reportNum == 0, "the back panel reported touch input");
 
-    CHECK(sceTouchPeekRegion(SCE_TOUCH_PORT_FRONT, data, 1, 0) == 1, "PeekRegion failed");
-    CHECK(sceTouchReadRegion(SCE_TOUCH_PORT_FRONT, data, 1, 1) == 1, "ReadRegion failed");
-    CHECK(sceTouchRead2(SCE_TOUCH_PORT_FRONT, data, 1) == 1, "Read2 failed");
+    REQUIRE(sceTouchPeekRegion(SCE_TOUCH_PORT_FRONT, data, 1, 0) == 1, "PeekRegion failed");
+    REQUIRE(sceTouchReadRegion(SCE_TOUCH_PORT_FRONT, data, 1, 1) == 1, "ReadRegion failed");
+    REQUIRE(sceTouchRead2(SCE_TOUCH_PORT_FRONT, data, 1) == 1, "Read2 failed");
 
-    CHECK(sceTouchPeek(SCE_TOUCH_PORT_FRONT, NULL, 1) == SCE_TOUCH_ERROR_INVALID_ARG,
-          "a null data pointer was accepted");
-    CHECK(sceTouchPeek(SCE_TOUCH_PORT_FRONT, data, 0) == SCE_TOUCH_ERROR_INVALID_ARG,
-          "a zero buffer count was accepted");
+    REQUIRE(sceTouchPeek(SCE_TOUCH_PORT_FRONT, NULL, 1) == SCE_TOUCH_ERROR_INVALID_ARG,
+            "a null data pointer was accepted");
+    REQUIRE(sceTouchPeek(SCE_TOUCH_PORT_FRONT, data, 0) == SCE_TOUCH_ERROR_INVALID_ARG,
+            "a zero buffer count was accepted");
 
-    CHECK(sceTouchGetPixelDensity(&d1, &d2) == 0 && d1 == 22.0f && d2 == 22.0f,
-          "GetPixelDensity is wrong");
-    CHECK(sceTouchGetPixelDensity2(&d1, &d2, &d3, &d4) == 0 && d3 == 22.0f && d4 == 22.0f,
-          "GetPixelDensity2 is wrong");
-    CHECK(sceTouchGetPixelDensity(NULL, &d2) == SCE_TOUCH_ERROR_INVALID_ARG,
-          "a null pixel density pointer was accepted");
+    REQUIRE(sceTouchGetPixelDensity(&d1, &d2) == 0 && d1 == 22.0f && d2 == 22.0f,
+            "GetPixelDensity is wrong");
+    REQUIRE(sceTouchGetPixelDensity2(&d1, &d2, &d3, &d4) == 0 && d3 == 22.0f && d4 == 22.0f,
+            "GetPixelDensity2 is wrong");
+    REQUIRE(sceTouchGetPixelDensity(NULL, &d2) == SCE_TOUCH_ERROR_INVALID_ARG,
+            "a null pixel density pointer was accepted");
 
-    CHECK(sceTouchEnableTouchForce(SCE_TOUCH_PORT_FRONT) == 0, "EnableTouchForce failed");
-    CHECK(sceTouchDisableTouchForce(SCE_TOUCH_PORT_FRONT) == 0, "DisableTouchForce failed");
-    CHECK(sceTouchEnableTouchForce(2) == SCE_TOUCH_ERROR_INVALID_ARG,
-          "EnableTouchForce accepted an invalid port");
+    REQUIRE(sceTouchEnableTouchForce(SCE_TOUCH_PORT_FRONT) == 0, "EnableTouchForce failed");
+    REQUIRE(sceTouchDisableTouchForce(SCE_TOUCH_PORT_FRONT) == 0, "DisableTouchForce failed");
+    REQUIRE(sceTouchEnableTouchForce(2) == SCE_TOUCH_ERROR_INVALID_ARG,
+            "EnableTouchForce accepted an invalid port");
 
-    CHECK(sceTouchActivateRegion(0) == 0, "ActivateRegion failed");
-    CHECK(sceTouchSetRegion(0, NULL) == 0, "SetRegion failed");
-    CHECK(sceTouchSetRegionAttr(0, NULL) == 0, "SetRegionAttr failed");
-    CHECK(sceTouchClearRegion(0) == 0, "ClearRegion failed");
+    REQUIRE(sceTouchActivateRegion(0) == 0, "ActivateRegion failed");
+    REQUIRE(sceTouchSetRegion(0, NULL) == 0, "SetRegion failed");
+    REQUIRE(sceTouchSetRegionAttr(0, NULL) == 0, "SetRegionAttr failed");
+    REQUIRE(sceTouchClearRegion(0) == 0, "ClearRegion failed");
 
-    CHECK(sceTouchGetDeviceInfo(NULL) == 0, "GetDeviceInfo failed");
-    CHECK(sceTouchGetProcessInfo(NULL) == 0, "GetProcessInfo failed");
-    CHECK(sceTouchSetProcessPrivilege(0) == 0, "SetProcessPrivilege failed");
+    REQUIRE(sceTouchGetDeviceInfo(NULL) == 0, "GetDeviceInfo failed");
+    REQUIRE(sceTouchGetProcessInfo(NULL) == 0, "GetProcessInfo failed");
+    REQUIRE(sceTouchSetProcessPrivilege(0) == 0, "SetProcessPrivilege failed");
 
     puts("touch_smoke: ok");
     return 0;

@@ -14,6 +14,7 @@
 #include <psp2/udcd.h>
 #include <psp2/usbstorvstor.h>
 #include <psp2/videoexport.h>
+#include "test.h"
 
 /* Present in the NID database but not in the public header. */
 int scePhotoExportIsAvailableFromFile(const char *path);
@@ -25,20 +26,9 @@ static int check_export(uint32_t lib_nid, uint32_t func_nid, const char *what)
 {
     if (module_get_func_export(lib_nid, func_nid, NULL))
         return 0;
-    fprintf(stderr, "%s (0x%08x/0x%08x) is not in the export table\n", what, lib_nid,
-            func_nid);
+    fprintf(stderr, "%s (0x%08x/0x%08x) is not in the export table\n", what, lib_nid, func_nid);
     return 1;
 }
-
-static int failures;
-
-#define CHECK(condition, message)                                                                  \
-    do {                                                                                           \
-        if (!(condition)) {                                                                        \
-            fprintf(stderr, "%s\n", message);                                                      \
-            failures++;                                                                            \
-        }                                                                                          \
-    } while (0)
 
 int main(void)
 {
@@ -58,8 +48,7 @@ int main(void)
     CHECK(sceNetAdhocInit() == 0, "sceNetAdhocInit failed");
     CHECK(sceNetAdhocPtpOpen(NULL, 0, NULL, 0, 0, 0, 0, 0) < 0, "ptp open unexpectedly worked");
     value = -1;
-    CHECK(sceNetAdhocctlGetPeerList(&value, NULL) == 0 && value == 0,
-          "peer list was not empty");
+    CHECK(sceNetAdhocctlGetPeerList(&value, NULL) == 0 && value == 0, "peer list was not empty");
     {
         SceNetEtherAddr addr;
 
@@ -77,8 +66,8 @@ int main(void)
               "photo export claimed to be available");
         CHECK(scePhotoExportIsAvailableFromData(out, sizeof(out)) == 0,
               "photo data export claimed to be available");
-        CHECK(scePhotoExportFromFile("ux0:/photo.jpg", NULL, NULL, NULL, NULL, out,
-                                     sizeof(out)) < 0,
+        CHECK(scePhotoExportFromFile("ux0:/photo.jpg", NULL, NULL, NULL, NULL, out, sizeof(out)) <
+                  0,
               "photo export unexpectedly succeeded");
         CHECK(sceMusicExportFromFile("ux0:/song.mp3", NULL, NULL, NULL, NULL, NULL, out,
                                      sizeof(out)) < 0,
@@ -122,11 +111,5 @@ int main(void)
     CHECK(sceUdcdUnregisterCallback(1) == 0, "udcd unregister failed");
     CHECK(sceUdcdWaitState(NULL, 0) < 0, "udcd wait unexpectedly matched");
 
-    if (failures) {
-        fprintf(stderr, "extra_imports_smoke: %d failure(s)\n", failures);
-        return 1;
-    }
-
-    printf("extra_imports_smoke: ok\n");
-    return 0;
+    return test_status("extra_imports_smoke");
 }

@@ -12,6 +12,7 @@
 #include <psp2/ime_dialog.h>
 #include <psp2/message_dialog.h>
 #include <psp2/types.h>
+#include "test.h"
 
 int sceCommonDialogIsRunning(void);
 int sceCommonDialogUpdate(const SceCommonDialogUpdateParam *param);
@@ -44,14 +45,6 @@ struct savedata_result {
     uint32_t userdata;
 };
 
-#define CHECK(cond, message)                                                                       \
-    do {                                                                                           \
-        if (!(cond)) {                                                                             \
-            printf("dialog_smoke: %s (line %d)\n", message, __LINE__);                             \
-            return 1;                                                                              \
-        }                                                                                          \
-    } while (0)
-
 int main(void)
 {
     SceImeDialogResult ime_result;
@@ -61,50 +54,50 @@ int main(void)
     SceWChar16 initial_text[] = { 'h', 'e', 'l', 'l', 'o', 0 };
     SceWChar16 input_text[16];
 
-    CHECK(sceCommonDialogIsRunning() == 0, "a dialog is running before Init");
+    REQUIRE(sceCommonDialogIsRunning() == 0, "a dialog is running before Init");
 
     memset(&msg_param, 0, sizeof(msg_param));
     msg_param.mode = SCE_MSG_DIALOG_MODE_USER_MSG;
-    CHECK(sceMsgDialogInit(&msg_param) == 0, "MsgDialogInit failed");
-    CHECK(sceCommonDialogIsRunning() == 1, "the message dialog is not reported as running");
-    CHECK(sceMsgDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_RUNNING,
-          "the message dialog did not start running");
+    REQUIRE(sceMsgDialogInit(&msg_param) == 0, "MsgDialogInit failed");
+    REQUIRE(sceCommonDialogIsRunning() == 1, "the message dialog is not reported as running");
+    REQUIRE(sceMsgDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_RUNNING,
+            "the message dialog did not start running");
     for (int i = 0; i < 4; i++)
         sceCommonDialogUpdate(NULL);
     usleep(1100000);
-    CHECK(sceMsgDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_FINISHED,
-          "the message dialog did not finish");
+    REQUIRE(sceMsgDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_FINISHED,
+            "the message dialog did not finish");
     memset(&msg_result, 0, sizeof(msg_result));
-    CHECK(sceMsgDialogGetResult(&msg_result) == 0, "MsgDialogGetResult failed");
-    CHECK(msg_result.result == SCE_COMMON_DIALOG_RESULT_OK, "the message dialog did not return OK");
-    CHECK(sceMsgDialogTerm() == 0, "MsgDialogTerm failed");
-    CHECK(sceCommonDialogIsRunning() == 0, "the message dialog is still running");
+    REQUIRE(sceMsgDialogGetResult(&msg_result) == 0, "MsgDialogGetResult failed");
+    REQUIRE(msg_result.result == SCE_COMMON_DIALOG_RESULT_OK,
+            "the message dialog did not return OK");
+    REQUIRE(sceMsgDialogTerm() == 0, "MsgDialogTerm failed");
+    REQUIRE(sceCommonDialogIsRunning() == 0, "the message dialog is still running");
 
     memset(&ime_param, 0, sizeof(ime_param));
     memset(input_text, 0, sizeof(input_text));
     ime_param.inputTextBuffer = input_text;
     ime_param.initialText = initial_text;
     ime_param.maxTextLength = 16;
-    CHECK(sceImeDialogInit(&ime_param) == 0, "ImeDialogInit failed");
-    CHECK(sceCommonDialogIsRunning() == 1, "the IME is not reported as running");
-    CHECK(sceImeDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_RUNNING,
-          "the IME did not start running");
+    REQUIRE(sceImeDialogInit(&ime_param) == 0, "ImeDialogInit failed");
+    REQUIRE(sceCommonDialogIsRunning() == 1, "the IME is not reported as running");
+    REQUIRE(sceImeDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_RUNNING,
+            "the IME did not start running");
     for (int i = 0; i < 4; i++)
         sceCommonDialogUpdate(NULL);
     usleep(1100000);
-    CHECK(sceImeDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_FINISHED,
-          "the IME did not finish");
-    CHECK(input_text[0] == 'h' && input_text[4] == 'o', "the initial text was not copied");
+    REQUIRE(sceImeDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_FINISHED, "the IME did not finish");
+    REQUIRE(input_text[0] == 'h' && input_text[4] == 'o', "the initial text was not copied");
 
     memset(&ime_result, 0, sizeof(ime_result));
-    CHECK(sceImeDialogGetResult(&ime_result) == 0, "ImeDialogGetResult failed");
-    CHECK(ime_result.result == SCE_COMMON_DIALOG_RESULT_OK, "the IME did not return OK");
-    CHECK(ime_result.button == SCE_IME_DIALOG_BUTTON_ENTER, "the IME did not return ENTER");
-    CHECK(sceImeDialogTerm() == 0, "ImeDialogTerm failed");
+    REQUIRE(sceImeDialogGetResult(&ime_result) == 0, "ImeDialogGetResult failed");
+    REQUIRE(ime_result.result == SCE_COMMON_DIALOG_RESULT_OK, "the IME did not return OK");
+    REQUIRE(ime_result.button == SCE_IME_DIALOG_BUTTON_ENTER, "the IME did not return ENTER");
+    REQUIRE(sceImeDialogTerm() == 0, "ImeDialogTerm failed");
 
-    CHECK(sceImeDialogInit(&ime_param) == 0, "the IME could not be restarted");
-    CHECK(sceImeDialogAbort() == 0, "ImeDialogAbort failed");
-    CHECK(sceImeDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_NONE, "the IME is still active");
+    REQUIRE(sceImeDialogInit(&ime_param) == 0, "the IME could not be restarted");
+    REQUIRE(sceImeDialogAbort() == 0, "ImeDialogAbort failed");
+    REQUIRE(sceImeDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_NONE, "the IME is still active");
 
     /*
      * The save-data dialog fills the caller's slot description in place. Titles
@@ -131,19 +124,19 @@ int main(void)
         memset(&result, 0, sizeof(result));
         result.slot_info = (uint32_t)(uintptr_t)&info;
 
-        CHECK(sceSaveDataDialogInit(dialog_param) == 0, "SaveDataDialogInit failed");
-        CHECK(sceSaveDataDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_FINISHED,
-              "the save-data dialog did not finish");
-        CHECK(sceSaveDataDialogGetSubStatus() == SCE_COMMON_DIALOG_STATUS_FINISHED,
-              "the save-data dialog has no success substatus");
-        CHECK(sceSaveDataDialogGetResult(&result) == 0, "SaveDataDialogGetResult failed");
-        CHECK(result.mode == 1, "the save-data result mode is wrong");
-        CHECK(result.result == SCE_COMMON_DIALOG_RESULT_OK, "the save-data result is not OK");
-        CHECK(result.slot_id == 0, "the save-data result slot is wrong");
-        CHECK(result.slot_info == (uint32_t)(uintptr_t)&info,
-              "GetResult replaced the caller's slotInfo pointer");
-        CHECK(info.is_exist == 0, "the empty slot was reported as existing");
-        CHECK(sceSaveDataDialogTerm() == 0, "SaveDataDialogTerm failed");
+        REQUIRE(sceSaveDataDialogInit(dialog_param) == 0, "SaveDataDialogInit failed");
+        REQUIRE(sceSaveDataDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_FINISHED,
+                "the save-data dialog did not finish");
+        REQUIRE(sceSaveDataDialogGetSubStatus() == SCE_COMMON_DIALOG_STATUS_FINISHED,
+                "the save-data dialog has no success substatus");
+        REQUIRE(sceSaveDataDialogGetResult(&result) == 0, "SaveDataDialogGetResult failed");
+        REQUIRE(result.mode == 1, "the save-data result mode is wrong");
+        REQUIRE(result.result == SCE_COMMON_DIALOG_RESULT_OK, "the save-data result is not OK");
+        REQUIRE(result.slot_id == 0, "the save-data result slot is wrong");
+        REQUIRE(result.slot_info == (uint32_t)(uintptr_t)&info,
+                "GetResult replaced the caller's slotInfo pointer");
+        REQUIRE(info.is_exist == 0, "the empty slot was reported as existing");
+        REQUIRE(sceSaveDataDialogTerm() == 0, "SaveDataDialogTerm failed");
     }
 
     puts("dialog_smoke: ok");

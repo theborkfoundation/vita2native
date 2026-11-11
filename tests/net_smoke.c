@@ -14,6 +14,7 @@
 #include <psp2/net/netctl.h>
 
 #include "module.h"
+#include "test.h"
 
 int sceNetSocket(const char *name, int domain, int type, int protocol);
 int sceNetSocketClose(int s);
@@ -57,14 +58,6 @@ typedef struct {
     SceUInt32 reserved[8];
 } TestIfStat;
 
-#define CHECK(cond, message)                                                                       \
-    do {                                                                                           \
-        if (!(cond)) {                                                                             \
-            printf("net_smoke: %s (line %d)\n", message, __LINE__);                                \
-            return 1;                                                                              \
-        }                                                                                          \
-    } while (0)
-
 static void make_addr(SceNetSockaddr *addr, unsigned int port, unsigned int ip)
 {
     uint16_t net_port = htons((uint16_t)port);
@@ -104,49 +97,49 @@ int main(void)
     int ret;
 
     receiver = sceNetSocket("receiver", SCE_NET_AF_INET, SCE_NET_SOCK_DGRAM, 0);
-    CHECK(receiver >= 0, "could not create the receiver socket");
+    REQUIRE(receiver >= 0, "could not create the receiver socket");
 
     make_addr(&local, 0, INADDR_LOOPBACK);
-    CHECK(sceNetBind(receiver, &local, sizeof(local)) == 0, "bind failed");
+    REQUIRE(sceNetBind(receiver, &local, sizeof(local)) == 0, "bind failed");
 
     addr_len = sizeof(local);
     memset(&local, 0, sizeof(local));
-    CHECK(sceNetGetsockname(receiver, &local, &addr_len) == 0, "getsockname failed");
-    CHECK(local.sa_family == SCE_NET_AF_INET, "getsockname returned the wrong family");
+    REQUIRE(sceNetGetsockname(receiver, &local, &addr_len) == 0, "getsockname failed");
+    REQUIRE(local.sa_family == SCE_NET_AF_INET, "getsockname returned the wrong family");
 
     memset(&info, 0, sizeof(info));
-    CHECK(sceNetGetSockInfo(receiver, &info, 1, 0) == 1, "GetSockInfo did not report a socket");
-    CHECK(info.s == receiver, "GetSockInfo reported the wrong descriptor");
-    CHECK(info.socket_type == SCE_NET_SOCK_DGRAM, "GetSockInfo reported the wrong type");
-    CHECK(info.local_port != 0, "GetSockInfo did not report the bound port");
-    CHECK(info.flags & SCE_NET_SOCKINFO_F_SELF, "GetSockInfo did not mark the owner");
+    REQUIRE(sceNetGetSockInfo(receiver, &info, 1, 0) == 1, "GetSockInfo did not report a socket");
+    REQUIRE(info.s == receiver, "GetSockInfo reported the wrong descriptor");
+    REQUIRE(info.socket_type == SCE_NET_SOCK_DGRAM, "GetSockInfo reported the wrong type");
+    REQUIRE(info.local_port != 0, "GetSockInfo did not report the bound port");
+    REQUIRE(info.flags & SCE_NET_SOCKINFO_F_SELF, "GetSockInfo did not mark the owner");
 
-    CHECK(sceNetGetSockInfo(-1, &info, 1, 0) == 1, "GetSockInfo enumeration failed");
+    REQUIRE(sceNetGetSockInfo(-1, &info, 1, 0) == 1, "GetSockInfo enumeration failed");
 
     memset(&fdset, 0, sizeof(fdset));
-    CHECK(sceNetGetSockIdInfo(&fdset, 0, 0) == 0, "GetSockIdInfo failed");
-    CHECK(fdset.bits[receiver / 32] & (1u << (receiver % 32)),
-          "GetSockIdInfo did not report the socket");
+    REQUIRE(sceNetGetSockIdInfo(&fdset, 0, 0) == 0, "GetSockIdInfo failed");
+    REQUIRE(fdset.bits[receiver / 32] & (1u << (receiver % 32)),
+            "GetSockIdInfo did not report the socket");
 
-    CHECK(sceNetGetStatisticsInfo(&statistics, 0) == 0, "GetStatisticsInfo failed");
-    CHECK(statistics.libnet_mem_free_size > 0, "statistics reported no memory");
+    REQUIRE(sceNetGetStatisticsInfo(&statistics, 0) == 0, "GetStatisticsInfo failed");
+    REQUIRE(statistics.libnet_mem_free_size > 0, "statistics reported no memory");
 
     memset(&emulation, 0, sizeof(emulation));
     emulation.version = 1;
     emulation.seed = 0x1234;
-    CHECK(sceNetEmulationSet(&emulation, 0) == 0, "EmulationSet failed");
+    REQUIRE(sceNetEmulationSet(&emulation, 0) == 0, "EmulationSet failed");
     memset(&emulation, 0, sizeof(emulation));
-    CHECK(sceNetEmulationGet(&emulation, 0) == 0, "EmulationGet failed");
-    CHECK(emulation.seed == 0x1234, "the emulation parameters did not round-trip");
+    REQUIRE(sceNetEmulationGet(&emulation, 0) == 0, "EmulationGet failed");
+    REQUIRE(emulation.seed == 0x1234, "the emulation parameters did not round-trip");
 
     memset(&dns, 0, sizeof(dns));
-    CHECK(sceNetSetDnsInfo(&dns, 0) == 0, "SetDnsInfo failed");
-    CHECK(sceNetShowIfconfig(NULL, 0) == 0, "ShowIfconfig failed");
-    CHECK(sceNetShowRoute() == 0, "ShowRoute failed");
-    CHECK(sceNetShowNetstat() == 0, "ShowNetstat failed");
+    REQUIRE(sceNetSetDnsInfo(&dns, 0) == 0, "SetDnsInfo failed");
+    REQUIRE(sceNetShowIfconfig(NULL, 0) == 0, "ShowIfconfig failed");
+    REQUIRE(sceNetShowRoute() == 0, "ShowRoute failed");
+    REQUIRE(sceNetShowNetstat() == 0, "ShowNetstat failed");
 
     sender = sceNetSocket("sender", SCE_NET_AF_INET, SCE_NET_SOCK_DGRAM, 0);
-    CHECK(sender >= 0, "could not create the sender socket");
+    REQUIRE(sender >= 0, "could not create the sender socket");
 
     iov[0].iov_base = (void *)part1;
     iov[0].iov_len = (unsigned int)strlen(part1);
@@ -160,7 +153,7 @@ int main(void)
     msg.msg_iovlen = 2;
 
     ret = sceNetSendmsg(sender, &msg, 0);
-    CHECK(ret == (int)(strlen(part1) + strlen(part2)), "Sendmsg returned the wrong length");
+    REQUIRE(ret == (int)(strlen(part1) + strlen(part2)), "Sendmsg returned the wrong length");
 
     iov[0].iov_base = buf1;
     iov[0].iov_len = (unsigned int)strlen(part1);
@@ -172,19 +165,19 @@ int main(void)
     msg.msg_iovlen = 2;
 
     ret = sceNetRecvmsg(receiver, &msg, 0);
-    CHECK(ret == (int)(strlen(part1) + strlen(part2)), "Recvmsg returned the wrong length");
-    CHECK(memcmp(buf1, part1, strlen(part1)) == 0, "the first message vector was corrupted");
-    CHECK(memcmp(buf2, part2, strlen(part2)) == 0, "the second message vector was corrupted");
+    REQUIRE(ret == (int)(strlen(part1) + strlen(part2)), "Recvmsg returned the wrong length");
+    REQUIRE(memcmp(buf1, part1, strlen(part1)) == 0, "the first message vector was corrupted");
+    REQUIRE(memcmp(buf2, part2, strlen(part2)) == 0, "the second message vector was corrupted");
 
     dump = sceNetDumpCreate("smoke", 64, 0);
-    CHECK(dump >= 0, "DumpCreate failed");
-    CHECK(sceNetDumpRead(dump, buf1, sizeof(buf1), NULL) == 0, "DumpRead returned data");
-    CHECK(sceNetDumpDestroy(dump) == 0, "DumpDestroy failed");
-    CHECK(sceNetDumpAbort(dump, 0) == 0, "DumpAbort failed");
+    REQUIRE(dump >= 0, "DumpCreate failed");
+    REQUIRE(sceNetDumpRead(dump, buf1, sizeof(buf1), NULL) == 0, "DumpRead returned data");
+    REQUIRE(sceNetDumpDestroy(dump) == 0, "DumpDestroy failed");
+    REQUIRE(sceNetDumpAbort(dump, 0) == 0, "DumpAbort failed");
 
-    CHECK(sceNetSocketAbort(sender, 0) == 0, "SocketAbort failed");
-    CHECK(sceNetSocketClose(sender) == 0, "close sender failed");
-    CHECK(sceNetSocketClose(receiver) == 0, "close receiver failed");
+    REQUIRE(sceNetSocketAbort(sender, 0) == 0, "SocketAbort failed");
+    REQUIRE(sceNetSocketClose(sender) == 0, "close sender failed");
+    REQUIRE(sceNetSocketClose(receiver) == 0, "close receiver failed");
 
     /* --- SceNetCtl ---------------------------------------------------- */
     {
@@ -196,42 +189,42 @@ int main(void)
         int callback_id = 0;
         int64_t max_size = 0;
 
-        CHECK(sceNetCtlInit() == 0, "NetCtlInit failed");
-        CHECK(sceNetCtlInetGetState(&state) == 0, "InetGetState failed");
-        CHECK(state == SCE_NETCTL_STATE_CONNECTED || state == SCE_NETCTL_STATE_DISCONNECTED,
-              "InetGetState returned an unknown state");
+        REQUIRE(sceNetCtlInit() == 0, "NetCtlInit failed");
+        REQUIRE(sceNetCtlInetGetState(&state) == 0, "InetGetState failed");
+        REQUIRE(state == SCE_NETCTL_STATE_CONNECTED || state == SCE_NETCTL_STATE_DISCONNECTED,
+                "InetGetState returned an unknown state");
 
         memset(&netctl_info, 0, sizeof(netctl_info));
-        CHECK(sceNetCtlInetGetInfo(SCE_NETCTL_INFO_GET_IP_ADDRESS, &netctl_info) == 0 ||
-                  state == SCE_NETCTL_STATE_DISCONNECTED,
-              "InetGetInfo failed");
+        REQUIRE(sceNetCtlInetGetInfo(SCE_NETCTL_INFO_GET_IP_ADDRESS, &netctl_info) == 0 ||
+                    state == SCE_NETCTL_STATE_DISCONNECTED,
+                "InetGetInfo failed");
         if (state == SCE_NETCTL_STATE_CONNECTED)
-            CHECK(netctl_info.ip_address[0] != '\0', "the connected interface has no address");
+            REQUIRE(netctl_info.ip_address[0] != '\0', "the connected interface has no address");
 
         memset(&nat_info, 0, sizeof(nat_info));
-        CHECK(sceNetCtlGetNatInfo(&nat_info) == 0, "GetNatInfo failed");
-        CHECK(nat_info.size == sizeof(nat_info), "GetNatInfo did not set the size");
+        REQUIRE(sceNetCtlGetNatInfo(&nat_info) == 0, "GetNatInfo failed");
+        REQUIRE(nat_info.size == sizeof(nat_info), "GetNatInfo did not set the size");
 
         memset(&ifstat, 0, sizeof(ifstat));
-        CHECK(sceNetCtlGetIfStat(0, &ifstat) == 0, "GetIfStat failed");
-        CHECK(ifstat.size == sizeof(ifstat), "GetIfStat did not set the size");
+        REQUIRE(sceNetCtlGetIfStat(0, &ifstat) == 0, "GetIfStat failed");
+        REQUIRE(ifstat.size == sizeof(ifstat), "GetIfStat did not set the size");
 
-        CHECK(sceNetCtlGetPhoneMaxDownloadableSize(&max_size) == 0, "GetPhoneMax failed");
-        CHECK(max_size == INT64_MAX, "the downloadable size is not unlimited");
+        REQUIRE(sceNetCtlGetPhoneMaxDownloadableSize(&max_size) == 0, "GetPhoneMax failed");
+        REQUIRE(max_size == INT64_MAX, "the downloadable size is not unlimited");
 
-        CHECK(sceNetCtlInetRegisterCallback(NULL, NULL, &callback_id) < 0,
-              "a null NetCtl callback was accepted");
-        CHECK(sceNetCtlInetRegisterCallback((SceNetCtlCallback)net_smoke_callback, NULL,
-                                           &callback_id) == 0,
-              "NetCtl callback registration failed");
-        CHECK(sceNetCtlInetUnregisterCallback(callback_id) == 0,
-              "NetCtl callback unregistration failed");
+        REQUIRE(sceNetCtlInetRegisterCallback(NULL, NULL, &callback_id) < 0,
+                "a null NetCtl callback was accepted");
+        REQUIRE(sceNetCtlInetRegisterCallback((SceNetCtlCallback)net_smoke_callback, NULL,
+                                              &callback_id) == 0,
+                "NetCtl callback registration failed");
+        REQUIRE(sceNetCtlInetUnregisterCallback(callback_id) == 0,
+                "NetCtl callback unregistration failed");
 
-        CHECK(sceNetCtlAdhocGetState(&state) == 0 && state == SCE_NETCTL_STATE_DISCONNECTED,
-              "adhoc is not disconnected");
+        REQUIRE(sceNetCtlAdhocGetState(&state) == 0 && state == SCE_NETCTL_STATE_DISCONNECTED,
+                "adhoc is not disconnected");
         memset(&adhoc_addr, 0xff, sizeof(adhoc_addr));
-        CHECK(sceNetCtlAdhocGetInAddr(&adhoc_addr) == 0, "AdhocGetInAddr failed");
-        CHECK(adhoc_addr.s_addr == 0, "adhoc returned an address");
+        REQUIRE(sceNetCtlAdhocGetInAddr(&adhoc_addr) == 0, "AdhocGetInAddr failed");
+        REQUIRE(adhoc_addr.s_addr == 0, "adhoc returned an address");
         sceNetCtlTerm();
     }
 

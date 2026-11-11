@@ -33,6 +33,7 @@
 #include "modules/SceSqlite.h"
 
 #include "sqlite3.h"
+#include "test.h"
 
 #define TEST_MAX_FILES 32
 
@@ -226,14 +227,6 @@ static int guest_delete(sqlite3_vfs *vfs, const char *name, int sync_dir)
     return original->xDelete(original, name, sync_dir);
 }
 
-#define CHECK(cond, message)                                                                       \
-    do {                                                                                           \
-        if (!(cond)) {                                                                             \
-            printf("sqlite_smoke: %s (line %d)\n", message, __LINE__);                             \
-            return 1;                                                                              \
-        }                                                                                          \
-    } while (0)
-
 static int count_callback(void *arg, int columns, char **values, char **names)
 {
     (void)columns;
@@ -267,100 +260,100 @@ int main(void)
     }
     mkdir(app_dir, 0755);
 
-    CHECK(SceSqlite_init() == 0, "could not initialize SQLite");
-    CHECK(sqlite3_libversion_number() >= 3011000, "unexpected SQLite version");
-    CHECK(sqlite3_threadsafe() != 0, "SQLite was built without thread safety");
+    REQUIRE(SceSqlite_init() == 0, "could not initialize SQLite");
+    REQUIRE(sqlite3_libversion_number() >= 3011000, "unexpected SQLite version");
+    REQUIRE(sqlite3_threadsafe() != 0, "SQLite was built without thread safety");
 
-    ret = sqlite3_open_v2("ux0:/smoke.db", &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
-                          "psp2");
-    CHECK(ret == SQLITE_OK, sqlite3_errmsg(db));
+    ret = sqlite3_open_v2("ux0:/smoke.db", &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "psp2");
+    REQUIRE(ret == SQLITE_OK, sqlite3_errmsg(db));
 
     ret = sqlite3_exec(db, "CREATE TABLE t(a INTEGER, b TEXT)", NULL, NULL, &error);
     if (ret != SQLITE_OK) {
-        printf("sqlite_smoke: create table failed: %s (code %d extended %d)\n",
-               error ? error : "?", sqlite3_errcode(db), sqlite3_extended_errcode(db));
+        printf("sqlite_smoke: create table failed: %s (code %d extended %d)\n", error ? error : "?",
+               sqlite3_errcode(db), sqlite3_extended_errcode(db));
         return 1;
     }
-    CHECK(sqlite3_exec(db, "INSERT INTO t VALUES(1, 'one')", NULL, NULL, &error) == SQLITE_OK,
-          error ? error : "first insert failed");
+    REQUIRE(sqlite3_exec(db, "INSERT INTO t VALUES(1, 'one')", NULL, NULL, &error) == SQLITE_OK,
+            error ? error : "first insert failed");
 
-    CHECK(sqlite3_prepare_v2(db, "INSERT INTO t VALUES(?, ?)", -1, &stmt, NULL) == SQLITE_OK,
-          "prepare insert failed");
+    REQUIRE(sqlite3_prepare_v2(db, "INSERT INTO t VALUES(?, ?)", -1, &stmt, NULL) == SQLITE_OK,
+            "prepare insert failed");
     sqlite3_bind_int(stmt, 1, 42);
     sqlite3_bind_text(stmt, 2, "hello", -1, SQLITE_TRANSIENT);
-    CHECK(sqlite3_step(stmt) == SQLITE_DONE, "bound insert did not finish");
-    CHECK(sqlite3_finalize(stmt) == SQLITE_OK, "finalize insert failed");
+    REQUIRE(sqlite3_step(stmt) == SQLITE_DONE, "bound insert did not finish");
+    REQUIRE(sqlite3_finalize(stmt) == SQLITE_OK, "finalize insert failed");
 
-    CHECK(sqlite3_prepare_v2(db, "SELECT a, b FROM t ORDER BY a", -1, &stmt, NULL) == SQLITE_OK,
-          "prepare select failed");
-    CHECK(sqlite3_step(stmt) == SQLITE_ROW, "select returned no rows");
-    CHECK(sqlite3_column_int(stmt, 0) == 1, "first row value mismatch");
-    CHECK(strcmp((const char *)sqlite3_column_text(stmt, 1), "one") == 0,
-          "first row text mismatch");
-    CHECK(sqlite3_step(stmt) == SQLITE_ROW, "select returned only one row");
-    CHECK(sqlite3_column_int(stmt, 0) == 42, "second row value mismatch");
-    CHECK(strcmp((const char *)sqlite3_column_text(stmt, 1), "hello") == 0,
-          "second row text mismatch");
-    CHECK(sqlite3_column_bytes(stmt, 1) == 5, "column_bytes mismatch");
-    CHECK(sqlite3_step(stmt) == SQLITE_DONE, "select had extra rows");
-    CHECK(sqlite3_finalize(stmt) == SQLITE_OK, "finalize select failed");
+    REQUIRE(sqlite3_prepare_v2(db, "SELECT a, b FROM t ORDER BY a", -1, &stmt, NULL) == SQLITE_OK,
+            "prepare select failed");
+    REQUIRE(sqlite3_step(stmt) == SQLITE_ROW, "select returned no rows");
+    REQUIRE(sqlite3_column_int(stmt, 0) == 1, "first row value mismatch");
+    REQUIRE(strcmp((const char *)sqlite3_column_text(stmt, 1), "one") == 0,
+            "first row text mismatch");
+    REQUIRE(sqlite3_step(stmt) == SQLITE_ROW, "select returned only one row");
+    REQUIRE(sqlite3_column_int(stmt, 0) == 42, "second row value mismatch");
+    REQUIRE(strcmp((const char *)sqlite3_column_text(stmt, 1), "hello") == 0,
+            "second row text mismatch");
+    REQUIRE(sqlite3_column_bytes(stmt, 1) == 5, "column_bytes mismatch");
+    REQUIRE(sqlite3_step(stmt) == SQLITE_DONE, "select had extra rows");
+    REQUIRE(sqlite3_finalize(stmt) == SQLITE_OK, "finalize select failed");
 
-    CHECK(sqlite3_exec(db, "SELECT a FROM t", count_callback, &rows, &error) == SQLITE_OK,
-          error ? error : "exec select failed");
-    CHECK(rows == 2, "exec callback saw the wrong row count");
-    CHECK(sqlite3_changes(db) >= 0, "sqlite3_changes failed");
-    CHECK(sqlite3_last_insert_rowid(db) > 0, "insert rowid was not reported");
-    CHECK(sqlite3_close(db) == SQLITE_OK, "close failed");
+    REQUIRE(sqlite3_exec(db, "SELECT a FROM t", count_callback, &rows, &error) == SQLITE_OK,
+            error ? error : "exec select failed");
+    REQUIRE(rows == 2, "exec callback saw the wrong row count");
+    REQUIRE(sqlite3_changes(db) >= 0, "sqlite3_changes failed");
+    REQUIRE(sqlite3_last_insert_rowid(db) > 0, "insert rowid was not reported");
+    REQUIRE(sqlite3_close(db) == SQLITE_OK, "close failed");
 
     /* Reopen: the second connection must observe the committed rows. */
     ret = sqlite3_open("ux0:/smoke.db", &db);
-    CHECK(ret == SQLITE_OK, sqlite3_errmsg(db));
+    REQUIRE(ret == SQLITE_OK, sqlite3_errmsg(db));
     rows = 0;
-    CHECK(sqlite3_exec(db, "SELECT a FROM t", count_callback, &rows, &error) == SQLITE_OK,
-          error ? error : "reopen select failed");
-    CHECK(rows == 2, "the reopened database lost rows");
-    CHECK(sqlite3_close(db) == SQLITE_OK, "second close failed");
+    REQUIRE(sqlite3_exec(db, "SELECT a FROM t", count_callback, &rows, &error) == SQLITE_OK,
+            error ? error : "reopen select failed");
+    REQUIRE(rows == 2, "the reopened database lost rows");
+    REQUIRE(sqlite3_close(db) == SQLITE_OK, "second close failed");
 
     /* Guest-style wrapper: copies the default VFS and replaces xOpen/xDelete. */
     {
         sqlite3_vfs *base = sqlite3_vfs_find(NULL);
 
-        CHECK(base != NULL, "no default VFS was registered");
+        REQUIRE(base != NULL, "no default VFS was registered");
         memcpy(&guest_vfs, base, sizeof(guest_vfs));
         guest_vfs.zName = "psp2_rw";
         guest_vfs.pAppData = base;
         guest_vfs.xOpen = guest_open;
         guest_vfs.xDelete = guest_delete;
 
-        CHECK(sqlite3_vfs_register(&guest_vfs, 1) == SQLITE_OK, "guest VFS registration failed");
+        REQUIRE(sqlite3_vfs_register(&guest_vfs, 1) == SQLITE_OK, "guest VFS registration failed");
 
         rows = 0;
         ret = sqlite3_open_v2("ux0:/smoke.db", &db, SQLITE_OPEN_READWRITE, "psp2_rw");
-        CHECK(ret == SQLITE_OK, sqlite3_errmsg(db));
-        CHECK(sqlite3_exec(db, "INSERT INTO t VALUES(7, 'seven')", NULL, NULL, &error) == SQLITE_OK,
-              error ? error : "guest VFS insert failed");
-        CHECK(atomic_load(&g_guest_writes) > 0, "the guest xWrite override was never called");
-        CHECK(g_guest_bad_fd == 0, "the guest file layout did not expose a valid SceUID");
-        CHECK(sqlite3_close(db) == SQLITE_OK, "guest VFS close failed");
+        REQUIRE(ret == SQLITE_OK, sqlite3_errmsg(db));
+        REQUIRE(sqlite3_exec(db, "INSERT INTO t VALUES(7, 'seven')", NULL, NULL, &error) ==
+                    SQLITE_OK,
+                error ? error : "guest VFS insert failed");
+        REQUIRE(atomic_load(&g_guest_writes) > 0, "the guest xWrite override was never called");
+        REQUIRE(g_guest_bad_fd == 0, "the guest file layout did not expose a valid SceUID");
+        REQUIRE(sqlite3_close(db) == SQLITE_OK, "guest VFS close failed");
 
-        CHECK(sqlite3_vfs_unregister(&guest_vfs) == SQLITE_OK, "guest VFS unregister failed");
+        REQUIRE(sqlite3_vfs_unregister(&guest_vfs) == SQLITE_OK, "guest VFS unregister failed");
     }
 
-    CHECK(sqlite3_vfs_find("psp2") != NULL, "the psp2 VFS disappeared");
+    REQUIRE(sqlite3_vfs_find("psp2") != NULL, "the psp2 VFS disappeared");
 
     /* Delete through the VFS and confirm the file is gone. */
     {
         sqlite3_vfs *vfs = sqlite3_vfs_find("psp2");
         char host_path[1024];
 
-        CHECK(vfs != NULL, "no psp2 VFS");
-        CHECK(vfs->xDelete(vfs, "ux0:/smoke.db", 0) == SQLITE_OK, "VFS delete failed");
-        CHECK(host_fs_resolve_path("ux0:/smoke.db", host_path, sizeof(host_path)) == 0,
-              "could not resolve the database path");
-        CHECK(access(host_path, F_OK) != 0, "the database file still exists");
+        REQUIRE(vfs != NULL, "no psp2 VFS");
+        REQUIRE(vfs->xDelete(vfs, "ux0:/smoke.db", 0) == SQLITE_OK, "VFS delete failed");
+        REQUIRE(host_fs_resolve_path("ux0:/smoke.db", host_path, sizeof(host_path)) == 0,
+                "could not resolve the database path");
+        REQUIRE(access(host_path, F_OK) != 0, "the database file still exists");
     }
 
-    CHECK(SceSqlite_finish() == 0, "could not shut SQLite down");
+    REQUIRE(SceSqlite_finish() == 0, "could not shut SQLite down");
     rmdir(app_dir);
     rmdir(root);
 

@@ -7,19 +7,9 @@
 #include <string.h>
 
 #include <psp2/camera.h>
+#include "test.h"
 
 const void *module_get_func_export(uint32_t lib_nid, uint32_t func_nid, void *importer);
-
-static int failures;
-
-#define CHECK(condition, ...)                                                                      \
-    do {                                                                                           \
-        if (!(condition)) {                                                                        \
-            fprintf(stderr, __VA_ARGS__);                                                          \
-            fprintf(stderr, "\n");                                                                 \
-            failures++;                                                                            \
-        }                                                                                          \
-    } while (0)
 
 static int check_export(uint32_t lib_nid, uint32_t func_nid, const char *what)
 {
@@ -130,11 +120,5 @@ int main(void)
     CHECK(sceCameraStop(SCE_CAMERA_DEVICE_BACK) == 0, "ARGB stop failed");
     CHECK(sceCameraClose(SCE_CAMERA_DEVICE_BACK) == 0, "ARGB close failed");
 
-    if (failures) {
-        fprintf(stderr, "camera_smoke: %d failure(s)\n", failures);
-        return 1;
-    }
-
-    printf("camera_smoke: ok\n");
-    return 0;
+    return test_status("camera_smoke");
 }

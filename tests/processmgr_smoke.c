@@ -11,6 +11,7 @@
 #include <psp2/kernel/processmgr.h>
 
 #include "modules/SceProcessmgr.h"
+#include "test.h"
 
 typedef struct {
     int tm_sec;
@@ -62,14 +63,6 @@ typedef struct {
     SceUInt32 unk;
 } TestProcessParam;
 
-#define CHECK(cond, message)                                                                       \
-    do {                                                                                           \
-        if (!(cond)) {                                                                             \
-            printf("processmgr_smoke: %s (line %d)\n", message, __LINE__);                         \
-            return 1;                                                                              \
-        }                                                                                          \
-    } while (0)
-
 static int g_callback_count;
 static void *g_callback_arg;
 
@@ -89,70 +82,71 @@ int main(void)
     SceKernelTime now;
     int marker;
 
-    CHECK(SceProcessmgr_init() == 0, "init failed");
+    REQUIRE(SceProcessmgr_init() == 0, "init failed");
 
-    CHECK(sceKernelGetCurrentProcess() == 1, "current process is not 1");
-
-    memset(buffer, 0, sizeof(buffer));
-    CHECK(sceKernelGetProcessName(buffer, sizeof(buffer)) == 0, "GetProcessName failed");
-    CHECK(strcmp(buffer, "vita2native") == 0, "unexpected process name");
-    CHECK(sceKernelGetProcessName(buffer, 0) < 0, "a zero-length name buffer was accepted");
+    REQUIRE(sceKernelGetCurrentProcess() == 1, "current process is not 1");
 
     memset(buffer, 0, sizeof(buffer));
-    CHECK(sceKernelGetProcessTitleId(buffer, sizeof(buffer)) == 0, "GetProcessTitleId failed");
-    CHECK(strcmp(buffer, "V2N000001") == 0, "unexpected title id");
+    REQUIRE(sceKernelGetProcessName(buffer, sizeof(buffer)) == 0, "GetProcessName failed");
+    REQUIRE(strcmp(buffer, "vita2native") == 0, "unexpected process name");
+    REQUIRE(sceKernelGetProcessName(buffer, 0) < 0, "a zero-length name buffer was accepted");
+
+    memset(buffer, 0, sizeof(buffer));
+    REQUIRE(sceKernelGetProcessTitleId(buffer, sizeof(buffer)) == 0, "GetProcessTitleId failed");
+    REQUIRE(strcmp(buffer, "V2N000001") == 0, "unexpected title id");
 
     param = sceKernelGetProcessParam();
-    CHECK(param != NULL, "GetProcessParam returned NULL");
-    CHECK(param->size == sizeof(TestProcessParam), "the process param size is wrong");
-    CHECK(strcmp(param->process_name, "vita2native") == 0, "the process name pointer is wrong");
+    REQUIRE(param != NULL, "GetProcessParam returned NULL");
+    REQUIRE(param->size == sizeof(TestProcessParam), "the process param size is wrong");
+    REQUIRE(strcmp(param->process_name, "vita2native") == 0, "the process name pointer is wrong");
 
-    CHECK(sceKernelGetProcessTimeCore(&clock) == 0, "GetProcessTimeCore failed");
+    REQUIRE(sceKernelGetProcessTimeCore(&clock) == 0, "GetProcessTimeCore failed");
     before = sceKernelGetProcessTimeWideCore();
-    CHECK(before > 0, "the process time is zero");
+    REQUIRE(before > 0, "the process time is zero");
     after = sceKernelGetProcessTimeWideCore();
-    CHECK(after >= before, "the process time went backwards");
-    CHECK(sceKernelGetProcessTimeLowCore() >= (SceUInt32)before,
-          "the low process time went backwards");
+    REQUIRE(after >= before, "the process time went backwards");
+    REQUIRE(sceKernelGetProcessTimeLowCore() >= (SceUInt32)before,
+            "the low process time went backwards");
 
-    CHECK(sceKernelIsCDialogAvailable() == 1, "common dialogs are reported unavailable");
-    CHECK(sceKernelIsGameBudget() == 1, "no game budget");
+    REQUIRE(sceKernelIsCDialogAvailable() == 1, "common dialogs are reported unavailable");
+    REQUIRE(sceKernelIsGameBudget() == 1, "no game budget");
 
-    CHECK(sceKernelLibcClock() > 0, "LibcClock returned zero");
+    REQUIRE(sceKernelLibcClock() > 0, "LibcClock returned zero");
 
     now = sceKernelLibcTime(NULL);
-    CHECK(now > 0, "LibcTime returned zero");
+    REQUIRE(now > 0, "LibcTime returned zero");
 
     memset(&tm, 0, sizeof(tm));
-    CHECK(sceKernelLibcGmtime_r(&now, &tm) == &tm, "Gmtime_r failed");
-    CHECK(tm.tm_year >= 120 && tm.tm_mon >= 0 && tm.tm_mon < 12, "Gmtime_r filled bad fields");
-    CHECK(sceKernelLibcMktime(&tm) > 0, "Mktime failed");
+    REQUIRE(sceKernelLibcGmtime_r(&now, &tm) == &tm, "Gmtime_r failed");
+    REQUIRE(tm.tm_year >= 120 && tm.tm_mon >= 0 && tm.tm_mon < 12, "Gmtime_r filled bad fields");
+    REQUIRE(sceKernelLibcMktime(&tm) > 0, "Mktime failed");
 
     memset(&tm, 0, sizeof(tm));
-    CHECK(sceKernelLibcLocaltime_r(&now, &tm) == &tm, "Localtime_r failed");
-    CHECK(tm.tm_year >= 120, "Localtime_r filled bad fields");
+    REQUIRE(sceKernelLibcLocaltime_r(&now, &tm) == &tm, "Localtime_r failed");
+    REQUIRE(tm.tm_year >= 120, "Localtime_r filled bad fields");
 
-    CHECK(sceKernelPowerLock(SCE_KERNEL_POWER_TICK_DEFAULT) == 0, "PowerLock failed");
-    CHECK(sceKernelPowerUnlock(SCE_KERNEL_POWER_TICK_DEFAULT) == 0, "PowerUnlock failed");
-    CHECK(sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND) == 0, "PowerTick failed");
+    REQUIRE(sceKernelPowerLock(SCE_KERNEL_POWER_TICK_DEFAULT) == 0, "PowerLock failed");
+    REQUIRE(sceKernelPowerUnlock(SCE_KERNEL_POWER_TICK_DEFAULT) == 0, "PowerUnlock failed");
+    REQUIRE(sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND) == 0,
+            "PowerTick failed");
 
     g_callback_count = 0;
     marker = 42;
-    CHECK(sceKernelRegisterProcessTerminationCallback(termination_callback, &marker) == 0,
-          "could not register the termination callback");
+    REQUIRE(sceKernelRegisterProcessTerminationCallback(termination_callback, &marker) == 0,
+            "could not register the termination callback");
     SceProcessmgr_run_termination_callbacks();
-    CHECK(g_callback_count == 1, "the termination callback did not run");
-    CHECK(g_callback_arg == &marker, "the termination callback lost its argument");
+    REQUIRE(g_callback_count == 1, "the termination callback did not run");
+    REQUIRE(g_callback_arg == &marker, "the termination callback lost its argument");
 
-    CHECK(sceKernelRegisterProcessTerminationCallback(termination_callback, &marker) == 0,
-          "could not re-register the termination callback");
-    CHECK(sceKernelUnregisterProcessTerminationCallback(termination_callback) == 0,
-          "could not unregister the termination callback");
+    REQUIRE(sceKernelRegisterProcessTerminationCallback(termination_callback, &marker) == 0,
+            "could not re-register the termination callback");
+    REQUIRE(sceKernelUnregisterProcessTerminationCallback(termination_callback) == 0,
+            "could not unregister the termination callback");
     g_callback_count = 0;
     SceProcessmgr_run_termination_callbacks();
-    CHECK(g_callback_count == 0, "an unregistered callback still ran");
+    REQUIRE(g_callback_count == 0, "an unregistered callback still ran");
 
-    CHECK(SceProcessmgr_finish() == 0, "finish failed");
+    REQUIRE(SceProcessmgr_finish() == 0, "finish failed");
 
     puts("processmgr_smoke: ok");
     return 0;

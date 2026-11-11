@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include <psp2/registrymgr.h>
+#include "test.h"
 
 int sceRegMgrResetRegistryLv(void);
 int sceRegMgrRegisterCallback(void *callback);
@@ -14,17 +15,6 @@ int sceRegMgrSystemParamSetInt(const int id, const int value);
 int sceRegMgrSystemParamSetStr(const int id, const char *buffer, const int size);
 int sceRegMgrSystemParamGetBin(const int id, void *buffer, const int size);
 int sceRegMgrSystemParamSetBin(const int id, const void *buffer, const int size);
-
-static int failures;
-
-#define CHECK(condition, ...)                                                                      \
-    do {                                                                                           \
-        if (!(condition)) {                                                                        \
-            fprintf(stderr, __VA_ARGS__);                                                          \
-            fprintf(stderr, "\n");                                                                 \
-            failures++;                                                                            \
-        }                                                                                          \
-    } while (0)
 
 int main(void)
 {
@@ -98,11 +88,5 @@ int main(void)
     CHECK(sceRegMgrGetKeyInt("/CONFIG/SYSTEM/", "language", &value) == 0 && value == 1,
           "reset removed the built-in language default");
 
-    if (failures) {
-        fprintf(stderr, "regmgr_smoke: %d failure(s)\n", failures);
-        return 1;
-    }
-
-    printf("regmgr_smoke: ok\n");
-    return 0;
+    return test_status("regmgr_smoke");
 }
