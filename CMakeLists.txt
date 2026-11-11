@@ -156,6 +156,7 @@ add_executable(vita2native
     source/modules/SceShellUtil.c
     source/modules/SceSysmodule.c
     source/modules/SceSysmem.c
+    source/modules/SceSystemGesture.c
     source/modules/SceTouch_linux.c
 )
 
