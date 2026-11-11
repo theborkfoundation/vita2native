@@ -67,13 +67,56 @@ fi
 
 cd "$V2N_STATE_DIR" || exit 1
 
+game_name=$(basename "$V2N_BIN")
+
+# Sweep up a game left behind by a previous session. logind only creates the
+# PAM session scope this shell runs in; it is not part of the unit's control
+# group, and Ubuntu ships KillUserProcesses=no, so stopping the kiosk leaves
+# the child running. Two or three of them saturate this board's four cores and
+# starve the new instance, which looks exactly like a hung title.
+for pid in $(pgrep -x "$game_name" 2>/dev/null); do
+    kill -TERM "$pid" 2>/dev/null
+done
+sleep 1
+pkill -KILL -x "$game_name" 2>/dev/null
+
 # The kiosk restarts the whole session to stop the game, so the child has to
-# follow its shell. Without this it is reparented into the login session scope
-# when the X server exits and keeps running in the background.
+# follow its shell. SDL turns SIGTERM into an SDL_QUIT event, so a guest that
+# is busy rendering and not polling events ignores it; escalate to SIGKILL.
 stopping=0
+stop_game() {
+    stopping=1
+    kill -TERM "$game_pid" 2>/dev/null
+    n=0
+    while kill -0 "$game_pid" 2>/dev/null && [ "$n" -lt 15 ]; do
+        sleep 0.2
+        n=$((n + 1))
+    done
+    kill -KILL "$game_pid" 2>/dev/null
+}
+
 setarch armv7l -R "$V2N_BIN" "$V2N_APP" > "$V2N_LOG" 2>&1 &
 game_pid=$!
-trap 'stopping=1; kill "$game_pid" 2>/dev/null' HUP INT TERM
+trap stop_game HUP INT TERM
+
+# Stopping the unit signals Xtigervnc, not this shell, so also watch the
+# display: when it goes away the session is over and the game has to follow.
+(
+    misses=0
+    while kill -0 "$game_pid" 2>/dev/null; do
+        if xdpyinfo >/dev/null 2>&1; then
+            misses=0
+        else
+            misses=$((misses + 1))
+            if [ "$misses" -ge 2 ]; then
+                stop_game
+                exit 0
+            fi
+        fi
+        sleep 2
+    done
+) &
+
 wait "$game_pid"
 status=$?
 trap - HUP INT TERM

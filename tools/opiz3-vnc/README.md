@@ -76,8 +76,14 @@ so the 960x544 frame is displayed 1:1 and stays sharp.
   `savedata0:<Title>/Saves\`. `host_fs_resolve_path` normalises `\` to `/`;
   without that the save enumeration fails and the game aborts with an
   unhandled `System::Exception`.
-- The launcher kills its child when the session is stopped; otherwise the game
-  is reparented into the login session scope and keeps running after the X
-  server is gone.
+- The game runs in the logind PAM session scope TigerVNC creates, not in the
+  unit's control group, so `systemctl stop` never signals it and Ubuntu's
+  `KillUserProcesses=no` keeps it alive. `xstartup` therefore does three
+  things: it kills a leftover `v2n-arm` before starting a new one, escalates
+  `SIGTERM` to `SIGKILL` (SDL turns `SIGTERM` into an `SDL_QUIT` event that a
+  busy guest never reads), and kills the game when `xdpyinfo` stops answering.
+  Without this a few restarts stack up several instances that saturate the
+  board's four cores and stall the visible one — which looks exactly like a
+  hung title.
 - To keep port 5901 off the LAN, set `localhost=yes` in `~/.vnc/config` and use
   `ssh -N -L 5901:127.0.0.1:5901 opiz3`, then connect to `vnc://localhost:5901`.
