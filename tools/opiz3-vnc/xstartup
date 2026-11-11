@@ -23,7 +23,9 @@ fi
 : "${V2N_LOG:=$V2N_STATE_DIR/vnc-game.log}"
 : "${V2N_WINDOW_SIZE:=${VNC_GEOMETRY:-960x544}}"
 : "${V2N_RENDER_SCALE:=1}"
-: "${V2N_FINISH_PER_FRAME:=1}"
+# Debugging knob, off by default: it forces a glFinish before the readback, which
+# serialises the CPU behind the GPU every frame.
+: "${V2N_FINISH_PER_FRAME:=0}"
 : "${V2N_FPS:=0}"
 : "${V2N_FPS_OVERLAY:=0}"
 : "${V2N_NGS_DEBUG:=0}"

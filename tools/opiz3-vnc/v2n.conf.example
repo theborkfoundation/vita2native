@@ -13,7 +13,8 @@ V2N_LOG=/home/bachnx/v2n-run/vnc-game.log
 # V2N_WINDOW_SIZE=960x544   # defaults to the geometry in ~/.vnc/config
 # 1 is readable at ~3.5 fps; 0.6667 is faster but blurs the font.
 V2N_RENDER_SCALE=1
-V2N_FINISH_PER_FRAME=1
+# Debugging knob, off by default: forces a glFinish before the readback.
+# V2N_FINISH_PER_FRAME=1
 
 # Debug knobs (1 = enabled)
 V2N_FPS=1

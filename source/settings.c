@@ -111,7 +111,7 @@ static const Setting g_settings[] = {
     /* Display and presentation. */
     STR("VITA2NATIVE_DUMP_FRAME", "write guest framebuffer BMPs here (%u = frame number)"),
     STR("VITA2NATIVE_DUMP_FRAME_AT", "comma-separated swap indices to capture"),
-    FLAG("VITA2NATIVE_FINISH_PER_FRAME", "glFinish each frame is on by default; set to disable"),
+    FLAG("VITA2NATIVE_FINISH_PER_FRAME", "glFinish before each readback (skipped by default)"),
     FLAG("VITA2NATIVE_FPS", "log the frame rate once a second"),
     FLAG("VITA2NATIVE_FPS_OVERLAY", "draw the FPS graph in the corner of the frame"),
     STR("VITA2NATIVE_METRICS_FILE", "append <ms>,<fps>,<frames> per second for fps_chart.py"),
