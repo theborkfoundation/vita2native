@@ -33,6 +33,7 @@
 #include "host_gfx_gl.h"
 #include "log.h"
 #include "module.h"
+#include "settings.h"
 #include "spirv_cross_glsl_es.h"
 #include "util.h"
 
@@ -526,11 +527,8 @@ static int gxm_depth_alias_enabled(void)
 {
     static int enabled = -1;
 
-    if (enabled < 0) {
-        const char *value = getenv("VITA2NATIVE_DEPTH_ALIAS");
-
-        enabled = value ? atoi(value) != 0 : 1;
-    }
+    if (enabled < 0)
+        enabled = vita2native_env_int("VITA2NATIVE_DEPTH_ALIAS", 1) != 0;
     return enabled;
 }
 
@@ -556,7 +554,7 @@ static int gxm_no_msaa(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_NO_MSAA") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_NO_MSAA");
     return enabled;
 }
 
@@ -1027,7 +1025,7 @@ static int gxm_debug_program_colors(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_DEBUG_PROGRAM_COLORS") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_DEBUG_PROGRAM_COLORS");
     return enabled;
 }
 
@@ -1038,7 +1036,7 @@ static uint32_t gxm_skip_program(void)
     static uint32_t hash;
 
     if (!loaded) {
-        const char *value = getenv("VITA2NATIVE_SKIP_PROGRAM");
+        const char *value = vita2native_env_str("VITA2NATIVE_SKIP_PROGRAM");
 
         if (value)
             hash = (uint32_t)strtoul(value, NULL, 16);
@@ -1053,7 +1051,7 @@ static int gxm_debug_texcolor(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_DEBUG_TEXCOLOR") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_DEBUG_TEXCOLOR");
     return enabled;
 }
 
@@ -1203,7 +1201,7 @@ static bool gxm_framebuffer_fetch_enabled(void)
     static int forced = -1;
 
     if (forced < 0)
-        forced = getenv("VITA2NATIVE_NO_FB_FETCH") ? 0 : 1;
+        forced = !vita2native_env_flag("VITA2NATIVE_NO_FB_FETCH");
 
     return forced && g_framebuffer_fetch_state >= 0 && gxm_framebuffer_fetch_kind() != GXM_FETCH_NONE;
 }
@@ -1221,7 +1219,7 @@ static int gxm_program_draw_index_location(const SceGxmProgram *program)
     int location = 0;
 
     if (disabled < 0)
-        disabled = getenv("VITA2NATIVE_NO_DRAW_UNIFORMS") != NULL;
+        disabled = vita2native_env_flag("VITA2NATIVE_NO_DRAW_UNIFORMS");
     if (disabled || !program)
         return -1;
     /* Without either kind of uniform container there is no vertexDataType
@@ -1307,7 +1305,7 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
             uint32_t *spirv = NULL;
             uint32_t num_instr = 0;
             bool applied = false;
-            const char *dump_dir = getenv("VITA2NATIVE_GXM_SHADER_DUMP");
+            const char *dump_dir = vita2native_env_str("VITA2NATIVE_GXM_SHADER_DUMP");
 
             g_shader_dump_hash = cache_hash;
             g_shader_dump_dir = dump_dir ? dump_dir : NULL;
@@ -1388,7 +1386,7 @@ static int gxm_program_trace(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_GXM_PROGRAM_TRACE") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_GXM_PROGRAM_TRACE");
 
     return enabled;
 }
@@ -1542,7 +1540,7 @@ static int gxm_trace_textures(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_TRACE_TEXTURES") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_TRACE_TEXTURES");
     return enabled;
 }
 
@@ -1634,7 +1632,7 @@ static void gxm_texture_params(const SceGxmTextureInner *texture, GLenum target,
     bool float_format;
 
     if (float_textures < 0)
-        float_textures = getenv("VITA2NATIVE_FLOAT_TEXTURES") != NULL;
+        float_textures = vita2native_env_flag("VITA2NATIVE_FLOAT_TEXTURES");
     float_format = base == SCE_GXM_TEXTURE_BASE_FORMAT_F32M ||
                    (float_textures && base == SCE_GXM_TEXTURE_BASE_FORMAT_F32);
 
@@ -1729,7 +1727,7 @@ static uint64_t gxm_texture_cache_budget(void)
     static uint64_t budget;
 
     if (!budget) {
-        const char *env = getenv("VITA2NATIVE_TEXTURE_CACHE_MB");
+        const char *env = vita2native_env_str("VITA2NATIVE_TEXTURE_CACHE_MB");
 
         if (env) {
             long mb = strtol(env, NULL, 0);
@@ -1873,9 +1871,7 @@ static int gxm_texture_hash_interval(const GxmTextureCache *cache)
     static int forced = -2;
 
     if (forced == -2) {
-        const char *env = getenv("VITA2NATIVE_TEXTURE_HASH_INTERVAL");
-
-        forced = env ? atoi(env) : 0;
+        forced = (int)vita2native_env_int("VITA2NATIVE_TEXTURE_HASH_INTERVAL", 0);
         if (forced < 0)
             forced = 0;
     }
@@ -1904,7 +1900,7 @@ static bool gxm_skip_finish(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_FINISH_PER_FRAME") == NULL;
+        enabled = !vita2native_env_flag("VITA2NATIVE_FINISH_PER_FRAME");
     return enabled;
 }
 
@@ -1927,13 +1923,13 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
     /* Diagnostic: ignore the mip chain so the scene can be compared against a
        level-0-only baseline. */
     if (force_level0 < 0)
-        force_level0 = getenv("VITA2NATIVE_TEXTURE_LEVEL0") != NULL;
+        force_level0 = vita2native_env_flag("VITA2NATIVE_TEXTURE_LEVEL0");
     if (force_lit_shadow < 0)
-        force_lit_shadow = getenv("VITA2NATIVE_FORCE_SHADOW_LIT") != NULL;
+        force_lit_shadow = vita2native_env_flag("VITA2NATIVE_FORCE_SHADOW_LIT");
     if (force_level0)
         mip_count = 1;
     if (trace_textures < 0)
-        trace_textures = getenv("VITA2NATIVE_TRACE_TEXTURES") != NULL;
+        trace_textures = vita2native_env_flag("VITA2NATIVE_TRACE_TEXTURES");
     GxmTextureCache *cache;
     uint8_t *rgba = NULL;
     uint16_t *rgba4 = NULL;
@@ -2067,11 +2063,11 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
         if (enabled < 0) {
             const char *renderer = host_gpu_description(host_gpu_current());
 
-            if (getenv("VITA2NATIVE_RGBA4"))
+            if (vita2native_env_flag("VITA2NATIVE_RGBA4"))
                 enabled = 1;
-            else if (getenv("VITA2NATIVE_NO_RGBA4") ||
-                     getenv("VITA2NATIVE_DUMP_TEXTURES") ||
-                     getenv("VITA2NATIVE_DUMP_TEXTURE_MIPS"))
+            else if (vita2native_env_flag("VITA2NATIVE_NO_RGBA4") ||
+                     vita2native_env_flag("VITA2NATIVE_DUMP_TEXTURES") ||
+                     vita2native_env_flag("VITA2NATIVE_DUMP_TEXTURE_MIPS"))
                 enabled = 0;
             else
                 enabled = strstr(renderer, "Panfrost") == NULL &&
@@ -2101,7 +2097,7 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
         static int float_textures = -1;
 
         if (float_textures < 0)
-            float_textures = getenv("VITA2NATIVE_FLOAT_TEXTURES") != NULL;
+            float_textures = vita2native_env_flag("VITA2NATIVE_FLOAT_TEXTURES");
         depth_texture = base == SCE_GXM_TEXTURE_BASE_FORMAT_F32M;
         /* A mask texture is a depth-like single float. Uploading it as R32F
            keeps full precision and decodes ~5x faster than RGBA8. F32 (not
@@ -2238,7 +2234,7 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
                 static unsigned int dumped;
 
                 if (!dump_dir)
-                    dump_dir = getenv("VITA2NATIVE_DUMP_TEXTURES");
+                    dump_dir = vita2native_env_str("VITA2NATIVE_DUMP_TEXTURES");
                 if (dump_dir && dumped < 200) {
                     char path[PATH_MAX];
 
@@ -2255,7 +2251,7 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
                 static unsigned int dumped_mips;
 
                 if (!mip_dir)
-                    mip_dir = getenv("VITA2NATIVE_DUMP_TEXTURE_MIPS");
+                    mip_dir = vita2native_env_str("VITA2NATIVE_DUMP_TEXTURE_MIPS");
                 if (mip_dir && dumped_mips < 4000) {
                     char path[PATH_MAX];
 
@@ -2309,7 +2305,7 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
     free(rgba4);
     free(f32);
 
-    if (getenv("VITA2NATIVE_TRACE_TEXTURES") || gxm_time_ns() - started >= 50000000ull) {
+    if (vita2native_env_flag("VITA2NATIVE_TRACE_TEXTURES") || gxm_time_ns() - started >= 50000000ull) {
         LOG("SceGxm: texture upload frame %llu unit %u %ux%u fmt=0x%08x type=%d mips=%u data=%p "
             "hash=%08x decode %.1f ms upload %.1f ms total %.1f ms",
             (unsigned long long)g_gxm_frame, unit, width, height,
@@ -2327,7 +2323,7 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
         static int trace_f32m = -1;
 
         if (trace_f32m < 0)
-            trace_f32m = getenv("VITA2NATIVE_TRACE_F32M") != NULL;
+            trace_f32m = vita2native_env_flag("VITA2NATIVE_TRACE_F32M");
         if (trace_f32m && (uint32_t)gxm_texture_get_format(texture) == 0x13000000u) {
             static unsigned int traced;
 
@@ -2646,15 +2642,11 @@ static float gxm_render_scale(void)
     static float scale = 1.0f;
 
     if (!loaded) {
-        const char *env = getenv("VITA2NATIVE_RENDER_SCALE");
+        double value = vita2native_env_double("VITA2NATIVE_RENDER_SCALE", 0.0);
 
         loaded = 1;
-        if (env) {
-            float value = (float)atof(env);
-
-            if (value >= 0.25f && value <= 1.0f)
-                scale = value;
-        }
+        if (value >= 0.25 && value <= 1.0)
+            scale = (float)value;
         if (scale < 1.0f)
             LOG("SceGxm: rendering at %.0f%% resolution", (double)(scale * 100.0f));
     }
@@ -2687,7 +2679,7 @@ static void gxm_apply_viewport(SceGxmContext *context)
         if (ih < 1)
             ih = 1;
         g_gl->glViewport(ix, iy, iw, ih);
-        if (getenv("VITA2NATIVE_TRACE_VIEWPORT")) {
+        if (vita2native_env_flag("VITA2NATIVE_TRACE_VIEWPORT")) {
             static unsigned int logged;
 
             if (logged++ < 16)
@@ -2745,7 +2737,7 @@ static int gxm_no_cull(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_NO_CULL") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_NO_CULL");
     return enabled;
 }
 
@@ -2754,7 +2746,7 @@ static int gxm_no_depth_test(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_NO_DEPTH") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_NO_DEPTH");
     return enabled;
 }
 
@@ -2787,7 +2779,7 @@ static void gxm_gl_check(const char *where)
     GLenum error;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_GL_CHECK") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_GL_CHECK");
     if (!enabled)
         return;
 
@@ -2809,11 +2801,8 @@ static int gxm_force_blend(void)
 {
     static int mode = -1;
 
-    if (mode < 0) {
-        const char *value = getenv("VITA2NATIVE_FORCE_BLEND");
-
-        mode = value ? atoi(value) : 0;
-    }
+    if (mode < 0)
+        mode = (int)vita2native_env_int("VITA2NATIVE_FORCE_BLEND", 0);
     return mode;
 }
 
@@ -3458,7 +3447,7 @@ EXPORT(SceGxm, 0x4ED2E49D, int, sceGxmShaderPatcherCreateFragmentProgram,
         static int blend_trace = -1;
 
         if (blend_trace < 0)
-            blend_trace = getenv("VITA2NATIVE_BLEND_TRACE") != NULL;
+            blend_trace = vita2native_env_flag("VITA2NATIVE_BLEND_TRACE");
         if (blend_trace) {
             uint32_t raw = 0;
 
@@ -4445,7 +4434,7 @@ static bool gxm_ds_load_surface(SceGxmRenderTarget *rt,
     if (rt->depth_is_texture && rt->ds_gl_valid && rt->ds_depth_data == surface->depthData &&
         rt->ds_stencil_data == surface->stencilData &&
         rt->ds_format == (uint32_t)gxm_ds_surface_get_format(surface)) {
-        if (getenv("VITA2NATIVE_DS_DEBUG"))
+        if (vita2native_env_flag("VITA2NATIVE_DS_DEBUG"))
             LOG("SceGxm: depth load skipped: attachment already current");
         return true;
     }
@@ -4860,7 +4849,7 @@ static bool gxm_render_target_depth_copy(SceGxmRenderTarget *rt, uint32_t width,
     g_gl->glBindTexture(GL_TEXTURE_2D, rt->depth);
     g_gl->glUniform1i(g_depth_copy_uniform, 7);
     g_gl->glDrawArrays(GL_TRIANGLES, 0, 3);
-    if (getenv("VITA2NATIVE_DS_DEBUG")) {
+    if (vita2native_env_flag("VITA2NATIVE_DS_DEBUG")) {
         g_gl->glFinish();
         LOG("SceGxm: depth copy %ux%u took %.1f ms", width, height,
             (double)(gxm_time_ns() - started) / 1e6);
@@ -5010,7 +4999,7 @@ static void gxm_ds_store_surface(SceGxmRenderTarget *rt,
     bool have_stencil = false;
     bool have_depth = false;
     uint64_t read_started, read_ns, write_started;
-    bool debug = getenv("VITA2NATIVE_DS_DEBUG") != NULL;
+    bool debug = vita2native_env_flag("VITA2NATIVE_DS_DEBUG");
 
     if (debug)
         LOG("SceGxm: depth store entry: surface=%p depthData=%p zls=0x%x rt_depth=%d/%p",
@@ -5270,7 +5259,7 @@ static int gxm_trace_draws(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_TRACE_DRAWS") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_TRACE_DRAWS");
     return enabled;
 }
 
@@ -5357,7 +5346,7 @@ EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsign
         g_gl->glDisable(GL_SCISSOR_TEST);
 
         {
-            const char *color = getenv("VITA2NATIVE_CLEAR_COLOR");
+            const char *color = vita2native_env_str("VITA2NATIVE_CLEAR_COLOR");
 
             if (color) {
                 uint32_t rgb = (uint32_t)strtoul(color, NULL, 16);
@@ -5613,7 +5602,7 @@ static void gxm_profile_frame(uint64_t resolve_ns, uint64_t finish_ns, uint64_t 
     static unsigned int frames;
     uint64_t now;
 
-    if (!getenv("VITA2NATIVE_PROFILE"))
+    if (!vita2native_env_flag("VITA2NATIVE_PROFILE"))
         return;
 
     resolve_total += resolve_ns;
@@ -5698,7 +5687,7 @@ static int gxm_frame_trace(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_GXM_FRAME_TRACE") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_GXM_FRAME_TRACE");
     return enabled;
 }
 
@@ -5707,7 +5696,7 @@ static int gxm_state_trace(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_GXM_STATE_TRACE") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_GXM_STATE_TRACE");
     return enabled;
 }
 
@@ -5717,7 +5706,7 @@ static int gxm_skip_readback(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_SKIP_READBACK") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_SKIP_READBACK");
     return enabled;
 }
 
@@ -5732,7 +5721,7 @@ static int gxm_present_overlap_enabled(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_NO_PRESENT_OVERLAP") == NULL;
+        enabled = !vita2native_env_flag("VITA2NATIVE_NO_PRESENT_OVERLAP");
     return enabled;
 }
 
@@ -5765,7 +5754,7 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
         static int trace_f32m = -1;
 
         if (trace_f32m < 0)
-            trace_f32m = getenv("VITA2NATIVE_TRACE_F32M") != NULL;
+            trace_f32m = vita2native_env_flag("VITA2NATIVE_TRACE_F32M");
         if (trace_f32m) {
             LOG("SceGxm frame %llu: F32M uploads %u took %.1f ms", (unsigned long long)g_gxm_frame,
                 g_f32m_uploads_frame, (double)g_f32m_upload_ns_frame / 1e6);
@@ -5807,7 +5796,7 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
                          ? !host_gpu_last_present_is_current_thread(g_device)
                          : true;
         }
-        if (getenv("VITA2NATIVE_DIRECT_PRESENT_DEBUG")) {
+        if (vita2native_env_flag("VITA2NATIVE_DIRECT_PRESENT_DEBUG")) {
             static unsigned int logged;
 
             if (logged++ < 20)
@@ -5834,7 +5823,7 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
 
     surface = context->color_surface;
     if (surface && surface->data && !surface->disabled) {
-        if (getenv("VITA2NATIVE_TRACE_F32M") &&
+        if (vita2native_env_flag("VITA2NATIVE_TRACE_F32M") &&
             (surface->width != 960 || surface->height != 544)) {
             static unsigned int traced;
 
@@ -5892,7 +5881,7 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
             g_present_frame.texture = target->color;
             g_present_frame.width = (int)target->render_width;
             g_present_frame.height = (int)target->render_height;
-            if (getenv("VITA2NATIVE_DIRECT_PRESENT_DEBUG")) {
+            if (vita2native_env_flag("VITA2NATIVE_DIRECT_PRESENT_DEBUG")) {
                 static unsigned int logged;
 
                 if (logged < 20) {
@@ -6075,7 +6064,7 @@ convert_done:
                 /* The guest samples the exported texture; guest memory stays stale. */
             } else if (rt->ds_sampled) {
                 gxm_ds_store_surface(rt, context->ds_store_surface);
-            } else if (getenv("VITA2NATIVE_DS_DEBUG")) {
+            } else if (vita2native_env_flag("VITA2NATIVE_DS_DEBUG")) {
                 LOG("SceGxm: depth store skipped: surface is never sampled");
             }
         }
@@ -6201,11 +6190,8 @@ static uint32_t gxm_uniform_padding(void)
 {
     static int padding = -1;
 
-    if (padding < 0) {
-        const char *value = getenv("VITA2NATIVE_UNIFORM_PADDING");
-
-        padding = value ? atoi(value) : 0;
-    }
+    if (padding < 0)
+        padding = (int)vita2native_env_int("VITA2NATIVE_UNIFORM_PADDING", 0);
 
     return padding > 0 ? (uint32_t)padding : 0;
 }
@@ -6241,7 +6227,7 @@ EXPORT(SceGxm, 0x97118913, int, sceGxmReserveVertexDefaultUniformBuffer, SceGxmC
     context->vertex_uniforms = context->vertex_uniform_arena + context->vertex_uniform_head;
     context->vertex_uniform_size = size;
     /* Diagnose which default-uniform words a title actually writes. */
-    if (getenv("VITA2NATIVE_POISON_UNIFORMS"))
+    if (vita2native_env_flag("VITA2NATIVE_POISON_UNIFORMS"))
         memset(context->vertex_uniforms, 0xCD, size + padding);
     context->vertex_uniform_head += size + padding;
     *uniformBuffer = context->vertex_uniforms;
@@ -6287,7 +6273,7 @@ EXPORT(SceGxm, 0x7B1FABB6, int, sceGxmReserveFragmentDefaultUniformBuffer, SceGx
 
     context->fragment_uniforms = context->fragment_uniform_arena + context->fragment_uniform_head;
     context->fragment_uniform_size = size;
-    if (getenv("VITA2NATIVE_POISON_UNIFORMS"))
+    if (vita2native_env_flag("VITA2NATIVE_POISON_UNIFORMS"))
         memset(context->fragment_uniforms, 0xCD, size + padding);
     context->fragment_uniform_head += size + padding;
     *uniformBuffer = context->fragment_uniforms;
@@ -6857,7 +6843,7 @@ GXM_PARAM_GETTER(0x5C79D59A, GetResourceIndex, uint32_t, parameter->resource_ind
 EXPORT(SceGxm, 0x7B9023C3, SceGxmParameterType, sceGxmProgramParameterGetType,
        const SceGxmProgramParameter *parameter)
 {
-    if (getenv("VITA2NATIVE_TRACE_PARAMS") && parameter) {
+    if (vita2native_env_flag("VITA2NATIVE_TRACE_PARAMS") && parameter) {
         static unsigned int logged;
 
         if (logged < 32) {
@@ -7261,7 +7247,7 @@ static void gxm_trace_uniform_diff(const char *what, const uint8_t *batch_data,
     static unsigned int logged;
     uint32_t first = 0, last = 0, count = 0;
 
-    if (!getenv("VITA2NATIVE_BATCH_DEBUG") || logged >= 24)
+    if (!vita2native_env_flag("VITA2NATIVE_BATCH_DEBUG") || logged >= 24)
         return;
 
     for (uint32_t i = 0; i < size; i++) {
@@ -7331,7 +7317,7 @@ static bool gxm_batch_matches(SceGxmContext *context, const GxmDrawState *state,
                    batch->state.back_stencil_pass != state->back_stencil_pass) {
             g_batch_break_depth++;
             g_batch_break_stencil++;
-            if (getenv("VITA2NATIVE_BATCH_DEBUG")) {
+            if (vita2native_env_flag("VITA2NATIVE_BATCH_DEBUG")) {
                 static unsigned int shown;
 
                 if (shown++ < 12)
@@ -7390,10 +7376,8 @@ static int gxm_flush_trace_from(void)
 {
     static int frame = -2;
 
-    if (frame == -2) {
-        const char *value = getenv("VITA2NATIVE_GXM_FLUSH_TRACE");
-        frame = value ? atoi(value) : -1;
-    }
+    if (frame == -2)
+        frame = (int)vita2native_env_int("VITA2NATIVE_GXM_FLUSH_TRACE", -1);
     return frame;
 }
 
@@ -7443,14 +7427,12 @@ static void gxm_dump_flush(SceGxmContext *context, const GxmDrawBatch *batch)
     static unsigned int seq;
     const char *dir;
 
-    if (frame == -2) {
-        const char *value = getenv("VITA2NATIVE_GXM_FRAME_DUMP");
-        frame = value ? atoi(value) : -1;
-    }
+    if (frame == -2)
+        frame = (int)vita2native_env_int("VITA2NATIVE_GXM_FRAME_DUMP", -1);
     if (frame < 0 || g_gxm_frame != (uint64_t)frame)
         return;
 
-    dir = getenv("VITA2NATIVE_GXM_FRAME_DUMP_DIR");
+    dir = vita2native_env_str("VITA2NATIVE_GXM_FRAME_DUMP_DIR");
     if (!dir)
         dir = "/tmp";
 
@@ -7474,7 +7456,7 @@ static bool gxm_probe_frame_active(void)
     if (g_probe_state == 2)
         return false;
 
-    value = getenv("VITA2NATIVE_PROBE_AFTER");
+    value = vita2native_env_str("VITA2NATIVE_PROBE_AFTER");
     if (!value) {
         g_probe_state = 2;
         return false;
@@ -7647,7 +7629,7 @@ static void gxm_probe_texture_units(const GxmDrawBatch *batch, unsigned int seq)
             (const void *)gxm_texture_get_data(desc), (unsigned)width, (unsigned)height, (int)name,
             px, g_bound_texture[unit]);
 
-        if (getenv("VITA2NATIVE_PROBE_TEXDUMP"))
+        if (vita2native_env_flag("VITA2NATIVE_PROBE_TEXDUMP"))
             gxm_probe_texture_dump(fbo, desc, unit, seq);
     }
 
@@ -7684,7 +7666,7 @@ static void gxm_probe_after_draw(SceGxmContext *context, const GxmDrawBatch *bat
                                                    ? context->render_target->msaa_fbo
                                                    : context->render_target->fbo);
 
-    pixel = getenv("VITA2NATIVE_PROBE_PIXEL");
+    pixel = vita2native_env_str("VITA2NATIVE_PROBE_PIXEL");
     if (pixel) {
         int parsed = sscanf(pixel, "%d,%d", &px, &py);
 
@@ -7725,13 +7707,13 @@ static void gxm_probe_after_draw(SceGxmContext *context, const GxmDrawBatch *bat
             (unsigned)src_a, (unsigned)dst_rgb, (unsigned)dst_a);
     }
 
-    if (batch->index_count == 6 || getenv("VITA2NATIVE_PROBE_TEXDUMP")) {
+    if (batch->index_count == 6 || vita2native_env_flag("VITA2NATIVE_PROBE_TEXDUMP")) {
         gxm_probe_texture_units(batch, seq);
-        if (getenv("VITA2NATIVE_PROBE_VERTS"))
+        if (vita2native_env_flag("VITA2NATIVE_PROBE_VERTS"))
             gxm_probe_vertex_data(context, batch, seq);
     }
 
-    if (getenv("VITA2NATIVE_PROBE_DUMP"))
+    if (vita2native_env_flag("VITA2NATIVE_PROBE_DUMP"))
         gxm_dump_render_target(context, batch, "/tmp", "probe", seq);
 }
 
@@ -7743,7 +7725,7 @@ static void gxm_log_program_samplers(GLuint program, uint32_t vs_hash, uint32_t 
     GLint count = 0;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_SAMPLER_TRACE") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_SAMPLER_TRACE");
     if (!enabled)
         return;
 
@@ -7769,10 +7751,8 @@ static void gxm_trace_batch(SceGxmContext *context, const GxmDrawBatch *batch)
     const uint32_t *td = gxm_texture_get_data(t0);
     static int vert_frame = -2;
 
-    if (vert_frame == -2) {
-        const char *value = getenv("VITA2NATIVE_GXM_VERT_TRACE");
-        vert_frame = value ? atoi(value) : -1;
-    }
+    if (vert_frame == -2)
+        vert_frame = (int)vita2native_env_int("VITA2NATIVE_GXM_VERT_TRACE", -1);
 
     if (vert_frame >= 0 && g_gxm_frame == (uint64_t)vert_frame) {
         const SceGxmVertexProgram *vp = batch->vertex_program;
@@ -7880,7 +7860,7 @@ static bool gxm_sync_draws(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_SYNC_DRAWS") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_SYNC_DRAWS");
 
     return enabled != 0;
 }
@@ -7996,10 +7976,10 @@ static void gxm_batch_flush(SceGxmContext *context)
 
         if ((gxm_flush_trace_from() >= 0 &&
              g_gxm_frame >= (uint64_t)gxm_flush_trace_from()) ||
-            getenv("VITA2NATIVE_GXM_VERT_TRACE"))
+            vita2native_env_flag("VITA2NATIVE_GXM_VERT_TRACE"))
             gxm_trace_batch(context, batch);
 
-        if (getenv("VITA2NATIVE_GXM_FLUSH_PIXEL") && batch->state.surface_width &&
+        if (vita2native_env_flag("VITA2NATIVE_GXM_FLUSH_PIXEL") && batch->state.surface_width &&
             batch->state.surface_height) {
             uint8_t px[4] = {0, 0, 0, 0};
 
@@ -8011,7 +7991,7 @@ static void gxm_batch_flush(SceGxmContext *context)
                 px[1], px[2], px[3]);
         }
 
-        if (getenv("VITA2NATIVE_GXM_FRAME_DUMP"))
+        if (vita2native_env_flag("VITA2NATIVE_GXM_FRAME_DUMP"))
             gxm_dump_flush(context, batch);
 
         if (batch->draw_uniforms && batch->vertex_program &&
@@ -8312,7 +8292,7 @@ static int gxm_uniform_names_trace(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = getenv("VITA2NATIVE_UNIFORM_NAMES") != NULL;
+        enabled = vita2native_env_flag("VITA2NATIVE_UNIFORM_NAMES");
     return enabled;
 }
 
@@ -8406,9 +8386,9 @@ static void gxm_trace_draw_color(SceGxmContext *context, uint32_t shader_hash)
     const SceGxmRegisteredProgram *program;
 
     if (enabled < 0) {
-        const char *value = getenv("VITA2NATIVE_DRAW_COLOR_TRACE");
+        const char *value = vita2native_env_str("VITA2NATIVE_DRAW_COLOR_TRACE");
 
-        enabled = value != NULL || getenv("VITA2NATIVE_FORCE_COLOR") != NULL;
+        enabled = value != NULL || vita2native_env_flag("VITA2NATIVE_FORCE_COLOR");
         start_frame = value ? (uint64_t)strtoull(value, NULL, 10) : 0;
     }
     if (!enabled || g_gxm_frame < start_frame || logged >= 200000)
@@ -8431,7 +8411,7 @@ static void gxm_trace_draw_color(SceGxmContext *context, uint32_t shader_hash)
             static uint32_t force_rgb;
 
             if (!force_loaded) {
-                const char *force = getenv("VITA2NATIVE_FORCE_COLOR");
+                const char *force = vita2native_env_str("VITA2NATIVE_FORCE_COLOR");
 
                 if (force)
                     force_rgb = (uint32_t)strtoul(force, NULL, 16);
@@ -8542,7 +8522,7 @@ static void gxm_trace_named_uniforms(SceGxmContext *context, uint32_t shader_has
     }
 
     {
-        const char *dump = getenv("VITA2NATIVE_UNIFORM_DUMP");
+        const char *dump = vita2native_env_str("VITA2NATIVE_UNIFORM_DUMP");
         const uint32_t dump_hash = dump ? (uint32_t)strtoul(dump, NULL, 16) : 0;
 
         if (dump_hash && dump_hash == shader_hash) {
@@ -8567,7 +8547,7 @@ static void gxm_uniform_trace(SceGxmContext *context, unsigned int indexCount)
     static unsigned int traces;
     static uint32_t last_signature[4];
     static unsigned int last_count;
-    const char *value = getenv("VITA2NATIVE_GXM_UNIFORM_TRACE");
+    const char *value = vita2native_env_str("VITA2NATIVE_GXM_UNIFORM_TRACE");
     const uint32_t *vu, *fu;
     uint32_t vwords, fwords;
     uint32_t hash;
@@ -8694,7 +8674,7 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
 
     /* A rejected draw is invisible: the guest believes it rendered, so tracing
        only the flushed batches makes missing geometry impossible to explain. */
-    if (getenv("VITA2NATIVE_GXM_DRAW_ERRORS")) {
+    if (vita2native_env_flag("VITA2NATIVE_GXM_DRAW_ERRORS")) {
         static unsigned int logged;
 
         if (logged < 32) {
@@ -8739,7 +8719,7 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
 
     program = gxm_get_linked_program(context->vertex_program, context->fragment_program, &linked);
     if (!program) {
-        if (getenv("VITA2NATIVE_GXM_DRAW_ERRORS")) {
+        if (vita2native_env_flag("VITA2NATIVE_GXM_DRAW_ERRORS")) {
             static unsigned int logged;
 
             if (logged < 64) {
@@ -8894,13 +8874,11 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
 
     gxm_fill_draw_state(context, program, primType, indexType, instances, &state);
 
-    if (getenv("VITA2NATIVE_GXM_VERT_TRACE")) {
+    if (vita2native_env_flag("VITA2NATIVE_GXM_VERT_TRACE")) {
         static int blend_frame = -2;
 
-        if (blend_frame == -2) {
-            const char *value = getenv("VITA2NATIVE_GXM_VERT_TRACE");
-            blend_frame = value ? atoi(value) : -1;
-        }
+        if (blend_frame == -2)
+            blend_frame = (int)vita2native_env_int("VITA2NATIVE_GXM_VERT_TRACE", -1);
         if (blend_frame >= 0 && g_gxm_frame == (uint64_t)blend_frame &&
             context->fragment_program) {
             const SceGxmBlendInfo *b = &context->fragment_program->blendInfo;
@@ -8951,7 +8929,7 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
         }
     }
 
-    if (getenv("VITA2NATIVE_BATCH_DEBUG")) {
+    if (vita2native_env_flag("VITA2NATIVE_BATCH_DEBUG")) {
         static bool logged;
 
         if (!logged) {
@@ -8962,12 +8940,12 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
     }
 
     can_merge = gxm_batch_matches(context, &state, vertex_uniform_size, fragment_uniform_size);
-    if (getenv("VITA2NATIVE_NO_BATCH"))
+    if (vita2native_env_flag("VITA2NATIVE_NO_BATCH"))
         can_merge = false;
     if (can_merge) {
-        const char *limit = getenv("VITA2NATIVE_BATCH_LIMIT");
+        long limit = vita2native_env_int("VITA2NATIVE_BATCH_LIMIT", -1);
 
-        if (limit && context->batch.draws >= (uint32_t)atoi(limit))
+        if (limit >= 0 && context->batch.draws >= (uint32_t)limit)
             can_merge = false;
     }
 
@@ -9028,7 +9006,7 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
         return SCE_GXM_ERROR_OUT_OF_MEMORY;
     }
 
-    if (getenv("VITA2NATIVE_TRACE_BATCH")) {
+    if (vita2native_env_flag("VITA2NATIVE_TRACE_BATCH")) {
         static unsigned int traced;
 
         if (traced < 24) {
@@ -10355,7 +10333,7 @@ DECLARE_LIBRARY(SceGxmInternalForVsh, 0xc98aeb79);
 
 bool SceGxm_get_present_frame(const void *data, unsigned int *texture, int *width, int *height)
 {
-    if (getenv("VITA2NATIVE_DIRECT_PRESENT_DEBUG")) {
+    if (vita2native_env_flag("VITA2NATIVE_DIRECT_PRESENT_DEBUG")) {
         static unsigned int logged;
 
         if (logged < 20) {

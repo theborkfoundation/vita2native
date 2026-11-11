@@ -393,6 +393,7 @@ vita2native_add_smoke(gxm_draw_smoke
         source/host/host_fs.c
         ${VITA2NATIVE_GXM_TEXTURE_SOURCES}
         source/modules/SceGxm.c
+        source/settings.c
         source/spirv_cross_glsl_es.cpp
         source/vita3k_shader_recompiler_iface_c.cpp
         source/stb_image_write_impl.c
