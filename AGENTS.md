@@ -38,13 +38,25 @@ are the judgement that goes with those commands, not a second copy of them.
   environment. `SDL_VIDEODRIVER=kmsdrm` lets SDL own the panel and present
   through its own KMSDRM driver, which is what works on this vendor kernel.
 
-  Do **not** set `VITA2NATIVE_KMS_PRESENT=1` here. That switches to the raw
-  KMS/DRM presenter, and on the R36S's vendor kernel the VOP accepts every
+- `VITA2NATIVE_KMS_PRESENT=1` switches to the raw KMS/DRM presenter, which
+  blits the render-target texture straight to the scanout buffer and skips the
+  per-frame readback. It is **not** broken on every title: Angry Birds Trilogy
+  runs correctly through it, and is much faster for it (14.8 fps with the
+  readback vs 27.5 fps with direct present, both a correct picture).
+
+  It has failed on at least one title, though: the VOP accepted every
   `drmModePageFlip` while continuing to scan the buffer installed by
-  `drmModeSetCrtc` — frames advance in the log (`SceGxm present texture ...`,
-  `SceDisplay: N frames in 1.0 s`), `dri/0/summary` shows an ACTIVE plane, and
-  the panel still shows the first (black) frame. Raw KMS is opt-in and stays
-  off by default for that reason.
+  `drmModeSetCrtc`, so frames advanced in the log (`SceGxm present texture ...`,
+  `SceDisplay: N frames in 1.0 s`), `dri/0/summary` showed an ACTIVE plane, and
+  the panel stayed on the first (black) frame. Which title that was is not
+  recorded here — if you reach for this flag, confirm the picture on the panel
+  rather than trusting the log, and fall back to the SDL presenter
+  (`SDL_VIDEODRIVER=kmsdrm` alone) if it does not come up.
+
+  Note that dropping the readback *without* direct present is worse than either:
+  `VITA2NATIVE_SKIP_READBACK=1` leaves the guest framebuffer stale, so the panel
+  shows only the CPU-composited overlays (dialogs, FPS pane) on an old frame.
+  It measures the render path (38.9 fps) but is not playable.
 
 - Maximum performance mode uses the ArkOS helper, not raw sysfs:
 
