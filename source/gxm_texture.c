@@ -1231,6 +1231,20 @@ static void decode_linear_fast8(uint8_t *dest, const uint8_t *input, uint32_t wi
                                 uint32_t height, uint32_t layout_width, const uint8_t map[4],
                                 uint32_t count)
 {
+    /*
+     * The common case is U8U8U8U8 with the ABGR swizzle, where the byte swap
+     * below and the channel map cancel out: dest[i] = p[i]. Worth a special
+     * case because the general loop costs ~31 ns/px against ~3 ns/px for a
+     * row copy, and a 1152x648 render-target texture re-decoded every few
+     * frames is tens of milliseconds a frame.
+     */
+    if (count == 4 && map[0] == 3 && map[1] == 2 && map[2] == 1 && map[3] == 0) {
+        for (uint32_t y = 0; y < height; y++)
+            memcpy(dest + (size_t)y * width * 4, input + (size_t)y * layout_width * 4,
+                   (size_t)width * 4);
+        return;
+    }
+
     for (uint32_t y = 0; y < height; y++) {
         uint8_t *row = dest + (size_t)y * width * 4;
         const uint8_t *source = input + (size_t)y * layout_width * count;
