@@ -28,7 +28,7 @@ static _Atomic SceUID g_last_uid = 1;
  * host allocator happens to put them.
  */
 #define VITA_MEMBLOCK_BASE 0x8a000000u
-#define VITA_MEMBLOCK_LIMIT 0xb0000000u
+#define VITA_MEMBLOCK_LIMIT 0xc0000000u
 
 static _Atomic uintptr_t g_memblock_hint = VITA_MEMBLOCK_BASE;
 
@@ -36,6 +36,7 @@ static void *alloc_vita_range(size_t size, size_t alignment)
 {
     size_t page = (size_t)sysconf(_SC_PAGESIZE);
     size_t length = (size + page - 1) & ~(page - 1);
+    int wrapped = 0;
 
     if (page == 0)
         page = 4096;
@@ -45,8 +46,19 @@ static void *alloc_vita_range(size_t size, size_t alignment)
                          ~(uintptr_t)(alignment - 1);
         void *mapped;
 
-        if (hint < VITA_MEMBLOCK_BASE || hint + length > VITA_MEMBLOCK_LIMIT)
-            return NULL;
+        /*
+         * The bump pointer only moves forward, so a title that allocates
+         * enough blocks runs it off the end of the range. Returning NULL there
+         * sends every later block to the host allocator, which places guest
+         * memory outside the Vita range entirely - titles validate pointers
+         * against it. Restart from the base once instead.
+         */
+        if (hint < VITA_MEMBLOCK_BASE || hint + length > VITA_MEMBLOCK_LIMIT) {
+            if (wrapped++)
+                return NULL;
+            atomic_store(&g_memblock_hint, VITA_MEMBLOCK_BASE + length + alignment);
+            continue;
+        }
 
         mapped = mmap((void *)hint, length, PROT_READ | PROT_WRITE,
                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
