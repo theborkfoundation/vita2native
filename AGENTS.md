@@ -126,3 +126,55 @@ are the judgement that goes with those commands, not a second copy of them.
 - `VITA2NATIVE_TRACE_ABORT=1` logs the guest call stack in
   `sceKernelCallAbortHandler`, which is the quickest way to place an abort in
   guest code.
+
+## Rendering traps
+
+- **A black panel with a healthy fps counter means every draw is being
+  dropped, not that the guest is slow.** Set `VITA2NATIVE_GL_CHECK=1` and read
+  the log. `GL error 0x506` is `GL_INVALID_FRAMEBUFFER_OPERATION`, and GL
+  silently discards the draw that triggered it.
+
+  `gxm_gl_check()` reports the bound framebuffer and its status for that error,
+  which is what names the cause:
+
+  ```
+  SceGxm: GL error 0x506 at draw (fbo 1 status 0x8cd7)
+  ```
+
+  `0x8cd5` is `GL_FRAMEBUFFER_COMPLETE`; `0x8cd7` is
+  `GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT`.
+
+- **A framebuffer's attachment list does not follow its name across threads**
+  on the Mali blob. A title that creates its render target on one thread and
+  draws from another sees the same framebuffer come back with *no attachments*
+  and every draw rejected — while presenting at full frame rate. Shakedown:
+  Hawaii did exactly this (created on `<main>`, drew from `thread_render`):
+  4964 rejected draws, black panel, 60 fps.
+
+  `sceGxmBeginScene` now re-attaches the colour/depth objects whenever the
+  drawing thread changes, tracked in `SceGxmRenderTarget.attached_thread`. If
+  a title renders black with `0x8cd7` at draw time, check that re-attach is
+  still in place before looking anywhere else.
+
+  Angry Birds Trilogy never hits this because it creates and uses its render
+  targets on one thread — which is why "it works on title X" proves nothing
+  about the thread handling.
+
+- **The `.dsm` shader dump is guest GXP disassembly, not what reaches GL.**
+  `VITA2NATIVE_GXM_SHADER_DUMP=<dir>` writes both now: `.dsm` plus the
+  translated `.vert`/`.frag`. Read the GLSL when a draw renders black or
+  wrong-coloured. Note the dump only writes on a cache *miss*, so clear
+  `vita2native/cache/shaders` first.
+
+- **Validate a diagnostic knob before trusting a negative result.** Three that
+  silently did nothing and produced false "ruled out" conclusions:
+  - `VITA2NATIVE_NO_FB_FETCH` — the shader cache is read *before* the flag is
+    consulted, so cached shaders are reused. Clear the cache to test it.
+  - `VITA2NATIVE_FORCE_COLOR` — needs a `_Color` uniform in the program.
+  - `VITA2NATIVE_DEBUG_TEXCOLOR` — needs `fragTex_tex` and `v_TexCoord0` in the
+    GLSL.
+
+  `VITA2NATIVE_DEBUG_PROGRAM_COLORS` does work generally (each fragment program
+  gets a flat colour), which makes it the one to use to prove fragment output
+  reaches the framebuffer at all. Run the knob against a title known to render
+  and check the frame dump changed before concluding anything.
