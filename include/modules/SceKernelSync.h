@@ -20,7 +20,6 @@ typedef struct VitaLwMutex {
     int current_count;
     SceUID owner;
     uint32_t waiting;
-    struct VitaLwMutex *next;
 } VitaLwMutex;
 
 /*

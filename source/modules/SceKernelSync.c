@@ -737,9 +737,17 @@ EXPORT(SceThreadmgr, 0x9A68F547, int, sceKernelCloseEventFlag, SceUID uid)
  * allocated on create and its address is kept in the work area's first word,
  * while a small registry keeps the metadata needed by the introspection APIs
  * keyed by the UID the kernel would assign.
+ *
+ * Both lookups are on the hot path - a title that polls a mutex makes thousands
+ * of lock/unlock calls a second - so they are hash tables rather than list
+ * walks. Two tables are kept rather than one because the work area carries the
+ * object address while the introspection APIs carry the UID; a single table
+ * would need a linear scan for whichever key it is not indexed by.
  */
-
-static VitaLwMutex *g_lw_mutexes;
+DICT_DEF2(vita_lw_mutex_by_ptr_dict, uintptr_t, M_DEFAULT_OPLIST, VitaLwMutex *, M_POD_OPLIST)
+DICT_DEF2(vita_lw_mutex_by_uid_dict, SceUID, M_DEFAULT_OPLIST, VitaLwMutex *, M_POD_OPLIST)
+static vita_lw_mutex_by_ptr_dict_t g_lw_mutexes_by_ptr;
+static vita_lw_mutex_by_uid_dict_t g_lw_mutexes_by_uid;
 static pthread_mutex_t g_lw_mutex_table_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static SceUID sync_current_thread_uid(void)
@@ -753,6 +761,7 @@ VitaLwMutex *SceKernelSync_lw_mutex_from_work(SceKernelLwMutexWork *work)
 {
     void *pointer;
     VitaLwMutex *found = NULL;
+    VitaLwMutex **slot;
 
     /* Page zero is never mapped on Vita; reject obviously invalid work areas
      * instead of dereferencing them on the host. */
@@ -766,12 +775,9 @@ VitaLwMutex *SceKernelSync_lw_mutex_from_work(SceKernelLwMutexWork *work)
     /* Only hand out objects this module allocated: an uninitialised work area
      * can contain arbitrary game data. */
     pthread_mutex_lock(&g_lw_mutex_table_lock);
-    for (VitaLwMutex *it = g_lw_mutexes; it; it = it->next) {
-        if (it == pointer) {
-            found = it;
-            break;
-        }
-    }
+    slot = vita_lw_mutex_by_ptr_dict_get(g_lw_mutexes_by_ptr, (uintptr_t)pointer);
+    if (slot)
+        found = *slot;
     pthread_mutex_unlock(&g_lw_mutex_table_lock);
 
     return found;
@@ -780,14 +786,12 @@ VitaLwMutex *SceKernelSync_lw_mutex_from_work(SceKernelLwMutexWork *work)
 VitaLwMutex *SceKernelSync_lw_mutex_lookup(SceUID uid)
 {
     VitaLwMutex *result = NULL;
+    VitaLwMutex **slot;
 
     pthread_mutex_lock(&g_lw_mutex_table_lock);
-    for (VitaLwMutex *it = g_lw_mutexes; it; it = it->next) {
-        if (it->uid == uid) {
-            result = it;
-            break;
-        }
-    }
+    slot = vita_lw_mutex_by_uid_dict_get(g_lw_mutexes_by_uid, uid);
+    if (slot)
+        result = *slot;
     pthread_mutex_unlock(&g_lw_mutex_table_lock);
 
     return result;
@@ -796,8 +800,8 @@ VitaLwMutex *SceKernelSync_lw_mutex_lookup(SceUID uid)
 static int lw_mutex_register(VitaLwMutex *lw)
 {
     pthread_mutex_lock(&g_lw_mutex_table_lock);
-    lw->next = g_lw_mutexes;
-    g_lw_mutexes = lw;
+    vita_lw_mutex_by_ptr_dict_set_at(g_lw_mutexes_by_ptr, (uintptr_t)lw, lw);
+    vita_lw_mutex_by_uid_dict_set_at(g_lw_mutexes_by_uid, lw->uid, lw);
     pthread_mutex_unlock(&g_lw_mutex_table_lock);
 
     return 0;
@@ -806,12 +810,8 @@ static int lw_mutex_register(VitaLwMutex *lw)
 static void lw_mutex_unregister(VitaLwMutex *lw)
 {
     pthread_mutex_lock(&g_lw_mutex_table_lock);
-    for (VitaLwMutex **link = &g_lw_mutexes; *link; link = &(*link)->next) {
-        if (*link == lw) {
-            *link = lw->next;
-            break;
-        }
-    }
+    vita_lw_mutex_by_ptr_dict_erase(g_lw_mutexes_by_ptr, (uintptr_t)lw);
+    vita_lw_mutex_by_uid_dict_erase(g_lw_mutexes_by_uid, lw->uid);
     pthread_mutex_unlock(&g_lw_mutex_table_lock);
 }
 
@@ -1090,6 +1090,8 @@ int SceKernelSync_init(void)
 {
     vita_sema_dict_init(g_semas);
     vita_event_flag_dict_init(g_event_flags);
+    vita_lw_mutex_by_ptr_dict_init(g_lw_mutexes_by_ptr);
+    vita_lw_mutex_by_uid_dict_init(g_lw_mutexes_by_uid);
     rwlockInit(&g_semas_lock);
     rwlockInit(&g_event_flags_lock);
     return 0;
@@ -1099,6 +1101,8 @@ int SceKernelSync_finish(void)
 {
     vita_sema_dict_clear(g_semas);
     vita_event_flag_dict_clear(g_event_flags);
+    vita_lw_mutex_by_ptr_dict_clear(g_lw_mutexes_by_ptr);
+    vita_lw_mutex_by_uid_dict_clear(g_lw_mutexes_by_uid);
     rwlockDestroy(&g_semas_lock);
     rwlockDestroy(&g_event_flags_lock);
     return 0;
