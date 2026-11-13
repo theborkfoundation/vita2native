@@ -2803,31 +2803,71 @@ static void gxm_apply_cull(SceGxmContext *context)
 static void gxm_gl_check(const char *where)
 {
     static int enabled = -1;
+    static int fatal = -1;
+    /*
+     * A frame that drops every draw produces one error per draw, so a single
+     * run logged 20524 identical lines and buried everything else. Log each
+     * distinct (error, site) once and count the rest.
+     */
+    static struct {
+        GLenum error;
+        const char *where;
+    } seen[16];
+    static unsigned int seen_count;
+    static unsigned int repeat_count;
     GLenum error;
 
-    if (enabled < 0)
-        enabled = vita2native_env_flag("VITA2NATIVE_GL_CHECK");
+    if (enabled < 0) {
+        enabled = vita2native_env_flag("VITA2NATIVE_GL_CHECK") ||
+                  vita2native_env_flag("VITA2NATIVE_GL_CHECK_FATAL");
+        fatal = vita2native_env_flag("VITA2NATIVE_GL_CHECK_FATAL");
+    }
     if (!enabled)
         return;
 
     error = g_gl->glGetError();
+    if (error == GL_NO_ERROR)
+        return;
 
-    if (error != GL_NO_ERROR) {
-        /* On GL_INVALID_FRAMEBUFFER_OPERATION the draw is dropped silently and
-           nothing else in the log says why, so report the bound framebuffer and
-           its status. A complete FBO here means the error came from an earlier
-           bind that was never checked. */
-        if (error == GL_INVALID_FRAMEBUFFER_OPERATION) {
-            GLint fbo = 0;
-            GLenum status = GL_FRAMEBUFFER_UNDEFINED;
-
-            g_gl->glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fbo);
-            status = g_gl->glCheckFramebufferStatus(GL_FRAMEBUFFER);
-            LOG("SceGxm: GL error 0x%x at %s (fbo %d status 0x%x)", error, where, fbo, status);
+    for (unsigned int i = 0; i < seen_count; i++) {
+        if (seen[i].error == error && seen[i].where == where) {
+            repeat_count++;
+            if (fatal)
+                abort();
             return;
         }
+    }
 
+    if (seen_count < ARRAY_SIZE(seen)) {
+        seen[seen_count].error = error;
+        seen[seen_count].where = where;
+        seen_count++;
+        if (repeat_count) {
+            LOG("SceGxm: %u earlier GL errors suppressed", repeat_count);
+            repeat_count = 0;
+        }
+    } else {
+        repeat_count++;
+    }
+
+    /* On GL_INVALID_FRAMEBUFFER_OPERATION the draw is dropped silently and
+       nothing else in the log says why, so report the bound framebuffer and its
+       status. A complete FBO here means the error came from an earlier bind that
+       was never checked. */
+    if (error == GL_INVALID_FRAMEBUFFER_OPERATION) {
+        GLint fbo = 0;
+        GLenum status;
+
+        g_gl->glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fbo);
+        status = g_gl->glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        LOG("SceGxm: GL error 0x%x at %s (fbo %d status 0x%x)", error, where, fbo, status);
+    } else {
         LOG("SceGxm: GL error 0x%x at %s", error, where);
+    }
+
+    if (fatal) {
+        LOG("SceGxm: fatal GL error, aborting");
+        abort();
     }
 }
 

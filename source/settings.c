@@ -63,6 +63,8 @@ static const Setting g_settings[] = {
     FLAG("VITA2NATIVE_FORCE_COLOR", "ignore textures and draw from the vertex colour"),
     FLAG("VITA2NATIVE_FORCE_SHADOW_LIT", "treat the shadow map as lit when forcing level 0"),
     FLAG("VITA2NATIVE_GL_CHECK", "enable the per-draw glGetError checks (slow)"),
+    FLAG("VITA2NATIVE_GL_CHECK_FATAL",
+         "like GL_CHECK, but abort on the first rejected GL call (implies GL_CHECK)"),
     FLAG("VITA2NATIVE_GXM_DRAW_ERRORS", "log draws the GL rejects (first 32)"),
     FLAG("VITA2NATIVE_GXM_FLUSH_PIXEL", "read back one pixel per flushed batch"),
     INT("VITA2NATIVE_GXM_FLUSH_TRACE", "log every batch flushed from this frame on"),
