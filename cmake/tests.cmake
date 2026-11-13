@@ -386,6 +386,10 @@ vita2native_add_smoke(texture_smoke
     SOURCES tests/texture_smoke.c ${VITA2NATIVE_GXM_TEXTURE_SOURCES}
     INCLUDES external/Vita3K/vita3k/renderer/include)
 
+vita2native_add_smoke(texture_u1555_smoke
+    SOURCES tests/texture_u1555_smoke.c ${VITA2NATIVE_GXM_TEXTURE_SOURCES}
+    INCLUDES external/Vita3K/vita3k/renderer/include)
+
 vita2native_add_smoke(gxm_draw_smoke
     SOURCES
         tests/gxm_draw_smoke.c

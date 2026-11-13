@@ -632,6 +632,7 @@ typedef struct {
     uint32_t swizzle;
     bool fast8;
     bool fast4;     /* RGBA4444: four LUT-free nibbles per texel */
+    bool fast16;    /* U1U5U5U5: one 16-bit LUT entry per texel */
     uint8_t map[4]; /* index into values {r,g,b,a,255,0} */
 } TexelFormat;
 
@@ -696,6 +697,8 @@ static void texel_format_init(TexelFormat *tf, SceGxmTextureFormat format)
             tf->fast8 = false;
     }
     tf->fast4 = count == 4 && tf->base == SCE_GXM_TEXTURE_BASE_FORMAT_U4U4U4U4;
+    tf->fast16 = count == 4 && tf->base == SCE_GXM_TEXTURE_BASE_FORMAT_U1U5U5U5 &&
+                 !vita2native_env_flag("VITA2NATIVE_NO_TEXTURE_LUT");
 
     if (count == 4) {
         const char *letters = swizzle4_letters[tf->swizzle & 7];
@@ -1263,6 +1266,79 @@ static void decode_linear_fast8(uint8_t *dest, const uint8_t *input, uint32_t wi
             row[x * 4 + 2] = values[map[2]];
             row[x * 4 + 3] = values[map[3]];
         }
+    }
+}
+
+/*
+ * U1U5U5U5 is a 16-bit format whose channels are 1/5/5/5 bits wide, so it
+ * fails the fast8 test (which requires every channel to be 8 bits) and falls
+ * to the generic per-texel decoder: a switch over every layout and format on
+ * each texel, measured at ~350 ns/px on the R36S. Titles that stream an
+ * animated 512x320 surface in this format pay ~57 ms a frame for it.
+ *
+ * A 64K table of the finished RGBA8 word removes the inner-loop work
+ * entirely, the same way the RGBA4444 path above does. The swizzle is folded
+ * into the table, so the per-texel cost is one load and one 32-bit store.
+ * Texture uploads run on the rendering thread, so sharing the table needs no
+ * locking.
+ */
+static uint32_t g_u1555_lut[65536];
+static uint8_t g_u1555_lut_swizzle;
+static bool g_u1555_lut_valid;
+
+static const uint32_t *u1555_rgba_lut(uint32_t swizzle)
+{
+    /*
+     * The decoder reads the wire word MSB-first: values[0] is the 1-bit
+     * channel at bit 15, values[1..3] are the 5-bit channels at bits 10-14,
+     * 5-9 and 0-4. Which letter each of those carries comes from the swizzle,
+     * exactly as unpack_lettered() maps it, so derive the table from the same
+     * letters rather than assuming an ABGR wire order.
+     */
+    static const char *const letters[8] = {"ABGR", "ARGB", "RGBA", "BGRA",
+                                           "1BGR", "1RGB", "RGB1", "BGR1"};
+    const char *order = letters[swizzle & 7u];
+
+    if (!g_u1555_lut_valid || g_u1555_lut_swizzle != swizzle) {
+        for (uint32_t i = 0; i < 65536; i++) {
+            uint8_t values[4] = {
+                (uint8_t)((i >> 15) & 0x1u ? 255 : 0),                 /* 1-bit, bit 15 */
+                (uint8_t)((((i >> 10) & 0x1fu) * 255u + 15u) / 31u),   /* bits 10-14 */
+                (uint8_t)((((i >> 5) & 0x1fu) * 255u + 15u) / 31u),    /* bits 5-9 */
+                (uint8_t)(((i & 0x1fu) * 255u + 15u) / 31u),           /* bits 0-4 */
+            };
+            uint8_t channel[4];
+
+            for (uint32_t c = 0; c < 4; c++) {
+                const char *hit = strchr(order, "RGBA"[c]);
+
+                if (hit)
+                    channel[c] = values[hit - order];
+                else
+                    channel[c] = "RGBA"[c] == 'A' ? 255 : 0; /* letter_channel() */
+            }
+
+            g_u1555_lut[i] = (uint32_t)channel[0] | ((uint32_t)channel[1] << 8) |
+                             ((uint32_t)channel[2] << 16) | ((uint32_t)channel[3] << 24);
+        }
+        g_u1555_lut_swizzle = (uint8_t)(swizzle & 7u);
+        g_u1555_lut_valid = true;
+    }
+
+    return g_u1555_lut;
+}
+
+static void decode_linear_fast16(uint8_t *dest, const uint8_t *input, uint32_t width,
+                                 uint32_t height, uint32_t layout_width, uint32_t swizzle)
+{
+    const uint32_t *lut = u1555_rgba_lut(swizzle);
+
+    for (uint32_t y = 0; y < height; y++) {
+        const uint16_t *source = (const uint16_t *)(input + (size_t)y * layout_width * 2);
+        uint32_t *row = (uint32_t *)(dest + (size_t)y * width * 4);
+
+        for (uint32_t x = 0; x < width; x++)
+            row[x] = lut[source[x]];
     }
 }
 
@@ -2120,6 +2196,11 @@ static int decode_level_rgba8(uint8_t *dest, const uint8_t *input,
     if (!palette && texel.fast8) {
         decode_linear_fast8(dest, input, info->width, info->height, info->layout_width,
                             texel.map, texel.info.count);
+        return 0;
+    }
+    if (!palette && texel.fast16) {
+        decode_linear_fast16(dest, input, info->width, info->height, info->layout_width,
+                             texel.swizzle);
         return 0;
     }
 
