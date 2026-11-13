@@ -51,12 +51,15 @@ typedef struct SDL_Rect {
 
 typedef struct SDL_RendererInfo {
     const char *name;
-    unsigned int flags;
-    unsigned int num_texture_formats;
-    unsigned int texture_formats[16];
+    uint32_t flags;
+    uint32_t num_texture_formats;
+    uint32_t texture_formats[16];
     int max_texture_width;
     int max_texture_height;
 } SDL_RendererInfo;
+
+/* SDL_ScaleMode, from SDL_render.h. SDL is dlopen'd, so the value is local. */
+#define SDL_ScaleModeNearest 0
 
 typedef struct {
     uint32_t type;
@@ -84,6 +87,7 @@ typedef struct {
     void (*destroy_renderer)(SDL_Renderer *);
     SDL_Texture *(*create_texture)(SDL_Renderer *, unsigned int, int, int, int);
     void (*destroy_texture)(SDL_Texture *);
+    int (*set_texture_scale_mode)(SDL_Texture *, int);
     int (*update_texture)(SDL_Texture *, const SDL_Rect *, const void *, int);
     int (*render_clear)(SDL_Renderer *);
     int (*render_copy)(SDL_Renderer *, SDL_Texture *, const SDL_Rect *, const SDL_Rect *);
@@ -269,6 +273,15 @@ static void video_present(HostVideo *video, const void *rgba, int width, int hei
         }
         video->texture_width = width;
         video->texture_height = height;
+        /*
+         * SDL_RenderCopy filters linearly unless told otherwise, which blurs
+         * the guest's output: a 2D title drawn at 640x368 and presented onto a
+         * 640x480 panel is upscaled vertically, and an odd render scale makes
+         * the horizontal ratio fractional too. Nearest keeps pixel art sharp
+         * for the titles that care and costs nothing for the ones that do not.
+         */
+        if (api->set_texture_scale_mode)
+            api->set_texture_scale_mode(video->texture, SDL_ScaleModeNearest);
         if (!video->stretch)
             api->render_set_logical_size(video->renderer, width, height);
     }
@@ -989,6 +1002,20 @@ HostVideo *host_video_open(void)
     LOAD_SDL(get_renderer_info, "SDL_GetRendererInfo");
     LOAD_SDL(show_cursor, "SDL_ShowCursor");
     *(void **)(&api->get_current_video_driver) = dlsym(api->library, "SDL_GetCurrentVideoDriver");
+    *(void **)(&api->set_texture_scale_mode) =
+        dlsym(api->library, "SDL_SetTextureScaleMode");
+    /*
+     * SDL_RenderSetLogicalSize does the letterbox scaling itself, and it reads
+     * this hint rather than the texture's scale mode, so both are set. The
+     * hint must be in place before any texture or renderer exists.
+     */
+    {
+        int (*set_hint)(const char *, const char *) =
+            (int (*)(const char *, const char *))dlsym(api->library, "SDL_SetHint");
+
+        if (set_hint)
+            set_hint("SDL_RENDER_SCALE_QUALITY", "0"); /* nearest */
+    }
 
     /* Input is optional: every symbol below may be absent on a minimal SDL
        build, and missing video symbols are the only hard failures. */

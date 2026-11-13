@@ -38,6 +38,17 @@ are the judgement that goes with those commands, not a second copy of them.
   environment. `SDL_VIDEODRIVER=kmsdrm` lets SDL own the panel and present
   through its own KMSDRM driver, which is what works on this vendor kernel.
 
+- `VITA2NATIVE_RENDER_SCALE` is a **speed/quality** choice, and the right value
+  depends on the title's native surface, not on the panel. The panel here is
+  640x480, so a title that already draws at 640x368 fits it 1:1 and
+  `RENDER_SCALE=1` needs no resampling at all. `0.6667` shrinks that to 427x245
+  and then upscales back, which is faster (Iconoclasts: 40 vs 30 fps) but
+  resamples at a non-integer ratio (640/427 = 1.50), so some source pixels land
+  1 px wide and others 2 px - visible on pixel art. The 960x544 titles the line
+  above was written for do want `0.6667` on this panel; check what the title
+  actually asks for with `render target WxH (draw WxH)` in the log before
+  copying the value.
+
 - `VITA2NATIVE_KMS_PRESENT=1` switches to the raw KMS/DRM presenter, which
   blits the render-target texture straight to the scanout buffer and skips the
   per-frame readback. It is **not** broken on every title: Angry Birds Trilogy
