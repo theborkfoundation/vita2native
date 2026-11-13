@@ -461,6 +461,23 @@ typedef struct SceGxmRenderTarget {
     GLuint ds_copy_fbo;
     uint32_t ds_copy_width;
     uint32_t ds_copy_height;
+
+    /*
+     * The thread that last had this framebuffer's attachments bound.
+     *
+     * Measured on the Mali blob: a render target created on one thread reports
+     * GL_FRAMEBUFFER_COMPLETE with the colour and depth attachments present,
+     * and the same framebuffer bound from another thread reports
+     * GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT with neither attachment
+     * listed - even though the texture names are still valid there and the
+     * contexts are created sharing. Every draw in that scene is then dropped
+     * with GL_INVALID_FRAMEBUFFER_OPERATION and the panel stays black, which is
+     * what Shakedown: Hawaii did (it creates its render target on the main
+     * thread and draws from "thread_render"). Re-attaching the same textures on
+     * the drawing thread makes the framebuffer complete again.
+     */
+    pthread_t attached_thread;
+    bool attached_thread_valid;
 } SceGxmRenderTarget;
 
 #define GXM_MAX_RENDER_TARGETS 8
@@ -1331,6 +1348,16 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
 
             free(spirv);
             draw_uniforms = applied;
+
+            /* The .dsm dump is the guest GXP disassembly; it does not show what
+               actually reaches GL, which is what a black or wrong-coloured draw
+               needs. Write the translated GLSL next to it when dumping. */
+            if (dump_dir) {
+                g_shader_dump_dir = dump_dir;
+                g_shader_dump_hash = cache_hash;
+                gxm_shader_dump(stage == GL_FRAGMENT_SHADER ? "frag" : "vert", glsl);
+                g_shader_dump_dir = NULL;
+            }
 
             if (debug_colors)
                 glsl = gxm_patch_program_color(glsl, cache_hash);
@@ -2785,8 +2812,23 @@ static void gxm_gl_check(const char *where)
 
     error = g_gl->glGetError();
 
-    if (error != GL_NO_ERROR)
+    if (error != GL_NO_ERROR) {
+        /* On GL_INVALID_FRAMEBUFFER_OPERATION the draw is dropped silently and
+           nothing else in the log says why, so report the bound framebuffer and
+           its status. A complete FBO here means the error came from an earlier
+           bind that was never checked. */
+        if (error == GL_INVALID_FRAMEBUFFER_OPERATION) {
+            GLint fbo = 0;
+            GLenum status = GL_FRAMEBUFFER_UNDEFINED;
+
+            g_gl->glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fbo);
+            status = g_gl->glCheckFramebufferStatus(GL_FRAMEBUFFER);
+            LOG("SceGxm: GL error 0x%x at %s (fbo %d status 0x%x)", error, where, fbo, status);
+            return;
+        }
+
         LOG("SceGxm: GL error 0x%x at %s", error, where);
+    }
 }
 
 typedef struct {
@@ -3617,6 +3659,9 @@ EXPORT(SceGxm, 0x207AF96B, int, sceGxmCreateRenderTarget, const SceGxmRenderTarg
             }
         }
         g_gl->glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+        rt->attached_thread = pthread_self();
+        rt->attached_thread_valid = true;
     }
 
     *renderTarget = rt;
@@ -5331,7 +5376,33 @@ EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsign
     g_current_context = context;
 
     if (g_gl) {
-        GLuint draw_fbo = renderTarget->msaa_fbo ? renderTarget->msaa_fbo : renderTarget->fbo;
+        SceGxmRenderTarget *rt = (SceGxmRenderTarget *)renderTarget;
+        GLuint draw_fbo = rt->msaa_fbo ? rt->msaa_fbo : rt->fbo;
+
+        /*
+         * A framebuffer's attachment list is per-context state, so binding it
+         * from a thread other than the one that created it leaves it
+         * INCOMPLETE_MISSING_ATTACHMENT and every draw in the scene is dropped
+         * with GL_INVALID_FRAMEBUFFER_OPERATION. Re-attach the (shared) texture
+         * objects on the thread that is about to draw. Cheap, and only when the
+         * drawing thread actually changes.
+         */
+        if (!rt->attached_thread_valid || !pthread_equal(rt->attached_thread, pthread_self())) {
+            g_gl->glBindFramebuffer(GL_FRAMEBUFFER, draw_fbo);
+            if (!rt->msaa_fbo) {
+                g_gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                                             rt->color, 0);
+                if (rt->depth_is_texture)
+                    g_gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                                                 GL_TEXTURE_2D, rt->depth, 0);
+                else
+                    g_gl->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                                                    GL_RENDERBUFFER, rt->depth_rb);
+            }
+
+            rt->attached_thread = pthread_self();
+            rt->attached_thread_valid = true;
+        }
 
         /* The GPU is idle here (the previous frame ended with a finish), so
            orphaning the upload arenas once per frame is cheap. */
