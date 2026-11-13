@@ -100,6 +100,19 @@ static void deadline_from_us(struct timespec *ts, SceUInt microseconds)
     }
 }
 
+/* pthread_mutex_timedlock() measures against CLOCK_REALTIME, unlike
+   pthread_cond_timedwait(), which the semaphores use with CLOCK_MONOTONIC. */
+static void realtime_deadline_from_us(struct timespec *ts, SceUInt microseconds)
+{
+    clock_gettime(CLOCK_REALTIME, ts);
+    ts->tv_sec += (time_t)(microseconds / 1000000u);
+    ts->tv_nsec += (long)(microseconds % 1000000u) * 1000L;
+    if (ts->tv_nsec >= 1000000000L) {
+        ts->tv_nsec -= 1000000000L;
+        ts->tv_sec++;
+    }
+}
+
 /* Returns 0, or a negative SCE error. `timeout` is in microseconds. */
 static int sema_wait(VitaSemaInfo *sema, int need, const SceUInt *timeout)
 {
@@ -944,8 +957,6 @@ EXPORT(SceLibKernel, 0x46E7BE7B, int, sceKernelLockLwMutex, SceKernelLwMutexWork
 {
     VitaLwMutex *lw;
 
-    (void)timeout;
-
     if (trace_sync())
         LOG("LwMutexLock work=%p count=%d timeout=%p data0=%llx thid=0x%x", work, count,
             (void *)timeout, work ? (unsigned long long)work->data[0] : 0ull,
@@ -960,10 +971,42 @@ EXPORT(SceLibKernel, 0x46E7BE7B, int, sceKernelLockLwMutex, SceKernelLwMutexWork
     if (count < 0)
         return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
 
-    lw->waiting++;
-    for (int i = 0; i < count; i++)
-        pthread_mutex_lock(&lw->mutex);
-    lw->waiting--;
+    /*
+     * A NULL timeout means "wait forever"; otherwise the guest expects
+     * SCE_KERNEL_ERROR_WAIT_TIMEOUT when it is not granted in time. Dropping
+     * the timeout turned every bounded wait into an unbounded one, which
+     * changes the shape of a caller that polls under a deadline.
+     *
+     * The deadline is absolute, so it is computed once and shared by all the
+     * counts requested here rather than restarting per lock.
+     */
+    if (timeout) {
+        struct timespec deadline;
+
+        realtime_deadline_from_us(&deadline, *timeout);
+
+        for (int i = 0; i < count; i++) {
+            int rc;
+
+            lw->waiting++;
+            rc = pthread_mutex_timedlock(&lw->mutex, &deadline);
+            lw->waiting--;
+
+            if (rc == ETIMEDOUT) {
+                /* Release what this call already acquired, so a partial lock
+                   does not leave the mutex held by a caller that gives up. */
+                while (i-- > 0)
+                    pthread_mutex_unlock(&lw->mutex);
+                return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+            }
+        }
+    } else {
+        for (int i = 0; i < count; i++) {
+            lw->waiting++;
+            pthread_mutex_lock(&lw->mutex);
+            lw->waiting--;
+        }
+    }
 
     lw->current_count += count;
     if (count > 0)
