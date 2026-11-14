@@ -10444,6 +10444,22 @@ DECLARE_LIBRARY(SceGxmInternalForVsh, 0xc98aeb79);
 
 bool SceGxm_get_present_frame(const void *data, unsigned int *texture, int *width, int *height)
 {
+    /*
+     * The KMS presenter blits from this GL context and unbinds its own texture
+     * on unit 0 when it is done, behind the texture cache's back.
+     *
+     * Sampling with no texture bound returns black, and the unit memo makes the
+     * next bind a no-op, so a title that samples the same texture every frame
+     * keeps sampling nothing. That is why Shakedown: Hawaii goes black only once
+     * a screen settles: while it rotates textures the memo recovers by itself,
+     * and when it stops it does not.
+     */
+    if (host_display_uses_kms()) {
+        memset(g_bound_texture, 0, sizeof(g_bound_texture));
+        memset(g_unit_texture_valid, 0, sizeof(g_unit_texture_valid));
+        g_active_texture_unit = UINT_MAX;
+    }
+
     if (vita2native_env_flag("VITA2NATIVE_DIRECT_PRESENT_DEBUG")) {
         static unsigned int logged;
 
