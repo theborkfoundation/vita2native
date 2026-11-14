@@ -186,13 +186,12 @@ On this board VitaShell renders at ~1.3 fps; the blob's per-draw overhead is the
 bottleneck (about 5 ms per `glDrawElements`).
 
 Input follows the same split. While SDL video is running, its dedicated video
-thread samples input too: keyboards, plus pads that SDL recognises through its
-controller database, with a raw-joystick fallback for unknown devices. When
-evdev found a pad, SDL contributes the keyboard and stick axes only; pad
-buttons come from evdev, because SDL's controller database is label-based and
-can disagree with the Vita's positional layout (on the R36S the same face
-button would otherwise be reported as both square and triangle). When evdev
-found no pad, SDL's buttons are used instead. Keyboard mapping is arrows for
+thread samples input: keyboards, plus every pad SDL knows about through its
+controller database, with a raw-joystick fallback for unknown devices. All
+connected pads are opened, so a built-in pad and a USB, Bluetooth or virtual one
+work at the same time; buttons are the union of them and the sticks follow
+whichever pad is being used. Pads are rescanned once a second, which is what
+makes hot-plug work. Keyboard mapping is arrows for
 the D-pad, `Z`/`Enter` = cross, `X`/`Backspace` = circle, `A` = square,
 `S` = triangle, `Q`/`E` = L1/R1, `1`/`2` = L2/R2 and `Tab`/`Space` =
 Select/Start. Presses are latched until the guest polls, so a tap is not lost
@@ -206,15 +205,22 @@ the guest reads it. Clicks on the black bars are ignored. `sceCtrlSetActuator`
 feeds the attached controller's rumble motors through SDL, and closing the SDL
 window (or SDL_QUIT) exits the emulator cleanly.
 
-The headless build always reads the pad directly from evdev
-(`/dev/input/event*`), which is the reliable path on the R36S: face buttons,
-D-pad, shoulders, the Select/Start/L3/R3 buttons (reported as
-`BTN_TRIGGER_HAPPY1..4`) and both sticks. The Fn key (`BTN_TRIGGER_HAPPY5`) is
-a firmware hotkey modifier and is ignored. When evdev found a pad its buttons
-win over SDL's; otherwise SDL's buttons are ORed in. Axes come from SDL only
-when a controller is attached, so a keyboard-only session cannot overwrite the
-evdev stick values. Scripted input still works and
-is ORed with both. `tools/ctrl_test` is a guest-side probe for this path: build
+The headless build uses the same SDL input path; evdev is not read. That is what
+makes hot-plug and the trigger axes of an Xbox-style pad work, both of which the
+evdev path could not do (its nodes are opened once at startup and it has no
+mapping for `ABS_Z`/`ABS_RZ`). A pad SDL has no database entry for is still read
+positionally through the raw-joystick fallback.
+
+On a handheld, point SDL at the mapping database the firmware ships, so the
+pad's Select/Start/L3/R3 buttons (which the built-in SDL table leaves unbound)
+are mapped:
+
+```sh
+SDL_GAMECONTROLLERCONFIG_FILE=/opt/inttools/gamecontrollerdb.txt ./v2n-arm game
+```
+
+`VITA2NATIVE_INPUT_DEBUG=1` logs the pads opened and the mapping SDL chose.
+Scripted input still works and is ORed with the pad. `tools/ctrl_test` is a guest-side probe for this path: build
 it with `python3 tools/ctrl_test/build.py` and it draws the live pad state on a
 960x544 pane while logging every controller state change.
 

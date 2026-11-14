@@ -186,6 +186,9 @@ typedef struct {
 #define TOUCH_PANEL_HEIGHT 1088
 #define SDL_BUTTON_LMASK 0x01u
 
+/* Built-in pad plus whatever is plugged in: a handheld can have both at once. */
+#define MAX_SDL_PADS 4
+
 struct HostVideo {
     SdlApi *api;
 
@@ -220,8 +223,17 @@ struct HostVideo {
     bool stretch;
     bool windowed;
 
-    SDL_GameController *controller;
-    SDL_Joystick *joystick;
+    /*
+     * Every connected pad, not just the first: a handheld can have its built-in
+     * pad and a USB/Bluetooth/virtual one attached at the same time, and both
+     * should drive the guest.
+     */
+    struct {
+        SDL_GameController *controller;
+        SDL_Joystick *joystick;
+        int device_index;
+    } pads[MAX_SDL_PADS];
+    int pad_count;
     bool controller_ready;
     uint64_t controller_scan_at_ns;
     bool swap_ab;
@@ -295,16 +307,14 @@ static void video_present(HostVideo *video, const void *rgba, int width, int hei
 
 static void video_close_devices(HostVideo *video)
 {
-    if (video->joystick) {
-        if (video->api->joystick_close)
-            video->api->joystick_close(video->joystick);
-        video->joystick = NULL;
+    for (int i = 0; i < video->pad_count; i++) {
+        if (video->pads[i].joystick && video->api->joystick_close)
+            video->api->joystick_close(video->pads[i].joystick);
+        if (video->pads[i].controller && video->api->game_controller_close)
+            video->api->game_controller_close(video->pads[i].controller);
+        memset(&video->pads[i], 0, sizeof(video->pads[i]));
     }
-    if (video->controller) {
-        if (video->api->game_controller_close)
-            video->api->game_controller_close(video->controller);
-        video->controller = NULL;
-    }
+    video->pad_count = 0;
 }
 
 static void video_destroy_sdl(HostVideo *video)
@@ -404,73 +414,100 @@ static bool video_init_sdl(HostVideo *video)
 /* SDL input                                                                  */
 /* ------------------------------------------------------------------------- */
 
-static SDL_GameController *video_open_controller(HostVideo *video)
+static bool video_pad_open(const HostVideo *video, int device_index)
 {
-    SdlApi *api = video->api;
-    int count;
-
-    if (!video->controller_ready || !api->num_joysticks || !api->game_controller_open)
-        return NULL;
-
-    count = api->num_joysticks();
-    for (int i = 0; i < count; i++) {
-        SDL_GameController *controller;
-        const char *name;
-
-        if (api->is_game_controller && !api->is_game_controller(i))
-            continue;
-
-        controller = api->game_controller_open(i);
-        if (!controller)
-            continue;
-
-        name = api->game_controller_name ? api->game_controller_name(controller) : NULL;
-        fprintf(stderr, "vita2native: SDL opened controller %d%s%s\n", i, name ? ": " : "",
-                name ? name : "");
-        if (vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG") && api->game_controller_mapping) {
-            char *mapping = api->game_controller_mapping(controller);
-
-            if (mapping) {
-                fprintf(stderr, "vita2native: SDL mapping %s\n", mapping);
-                if (api->free)
-                    api->free(mapping);
-            }
-        }
-        return controller;
-    }
-
-    return NULL;
+    for (int i = 0; i < video->pad_count; i++)
+        if (video->pads[i].device_index == device_index)
+            return true;
+    return false;
 }
 
-/* Fallback for pads SDL has no game controller mapping for: read raw joystick
-   buttons and axes positionally. Generic vendor pads (including the R36S pad)
-   show up this way. */
-static SDL_Joystick *video_open_joystick(HostVideo *video)
+static void video_close_pad(HostVideo *video, int slot)
+{
+    SdlApi *api = video->api;
+
+    if (video->pads[slot].joystick && api->joystick_close)
+        api->joystick_close(video->pads[slot].joystick);
+    if (video->pads[slot].controller && api->game_controller_close)
+        api->game_controller_close(video->pads[slot].controller);
+
+    for (int i = slot; i + 1 < video->pad_count; i++)
+        video->pads[i] = video->pads[i + 1];
+    video->pad_count--;
+    memset(&video->pads[video->pad_count], 0, sizeof(video->pads[0]));
+}
+
+/*
+ * Opens every pad SDL knows about and drops the ones that went away. Pads SDL
+ * has no mapping for are read as raw joysticks, positionally. Runs about once a
+ * second: enumeration is not free and hot-plug does not need to be faster.
+ */
+static void video_scan_pads(HostVideo *video)
 {
     SdlApi *api = video->api;
     int count;
 
-    if (!video->controller_ready || !api->num_joysticks || !api->joystick_open)
-        return NULL;
+    if (!video->controller_ready || !api->num_joysticks)
+        return;
 
-    count = api->num_joysticks();
-    for (int i = 0; i < count; i++) {
-        SDL_Joystick *joystick = api->joystick_open(i);
-        const char *name;
-        int buttons, axes;
-
-        if (!joystick)
-            continue;
-
-        name = api->joystick_name ? api->joystick_name(joystick) : NULL;
-        buttons = api->joystick_num_buttons ? api->joystick_num_buttons(joystick) : 0;
-        axes = api->joystick_num_axes ? api->joystick_num_axes(joystick) : 0;
-        fprintf(stderr, "vita2native: SDL raw joystick %d%s%s (%d buttons, %d axes)\n", i,
-                name ? ": " : "", name ? name : "", buttons, axes);
-        return joystick;
+    for (int i = video->pad_count - 1; i >= 0; i--) {
+        if (video->pads[i].controller && api->game_controller_get_attached &&
+            !api->game_controller_get_attached(video->pads[i].controller)) {
+            fprintf(stderr, "vita2native: SDL controller %d disconnected\n",
+                    video->pads[i].device_index);
+            video_close_pad(video, i);
+        } else if (video->pads[i].joystick && api->joystick_get_attached &&
+                   !api->joystick_get_attached(video->pads[i].joystick)) {
+            fprintf(stderr, "vita2native: SDL joystick %d disconnected\n",
+                    video->pads[i].device_index);
+            video_close_pad(video, i);
+        }
     }
 
-    return NULL;
+    count = api->num_joysticks();
+    for (int i = 0; i < count && video->pad_count < MAX_SDL_PADS; i++) {
+        SDL_GameController *controller = NULL;
+        SDL_Joystick *joystick = NULL;
+        const char *name = NULL;
+
+        if (video_pad_open(video, i))
+            continue;
+
+        if (api->game_controller_open && (!api->is_game_controller || api->is_game_controller(i)))
+            controller = api->game_controller_open(i);
+        if (controller) {
+            name = api->game_controller_name ? api->game_controller_name(controller) : NULL;
+            fprintf(stderr, "vita2native: SDL opened controller %d%s%s\n", i, name ? ": " : "",
+                    name ? name : "");
+            if (vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG") &&
+                api->game_controller_mapping) {
+                char *mapping = api->game_controller_mapping(controller);
+
+                if (mapping) {
+                    fprintf(stderr, "vita2native: SDL mapping %s\n", mapping);
+                    if (api->free)
+                        api->free(mapping);
+                }
+            }
+        } else if (api->joystick_open) {
+            joystick = api->joystick_open(i);
+            if (joystick) {
+                name = api->joystick_name ? api->joystick_name(joystick) : NULL;
+                fprintf(stderr, "vita2native: SDL raw joystick %d%s%s (%d buttons, %d axes)\n", i,
+                        name ? ": " : "", name ? name : "",
+                        api->joystick_num_buttons ? api->joystick_num_buttons(joystick) : 0,
+                        api->joystick_num_axes ? api->joystick_num_axes(joystick) : 0);
+            }
+        }
+
+        if (!controller && !joystick)
+            continue;
+
+        video->pads[video->pad_count].controller = controller;
+        video->pads[video->pad_count].joystick = joystick;
+        video->pads[video->pad_count].device_index = i;
+        video->pad_count++;
+    }
 }
 
 static unsigned int raw_button_mask(const HostVideo *video, int button)
@@ -734,7 +771,7 @@ static void video_sample_input(HostVideo *video)
                one (Angry Birds' slingshot menu). Drive the left stick from the
                arrow keys when no physical pad is attached; d-pad titles still
                get the button mask above. */
-            if (!video->controller && !video->joystick) {
+            if (video->pad_count == 0) {
                 int x = (keys[SDL_SCANCODE_RIGHT] ? 1 : 0) - (keys[SDL_SCANCODE_LEFT] ? 1 : 0);
                 int y = (keys[SDL_SCANCODE_UP] ? 1 : 0) - (keys[SDL_SCANCODE_DOWN] ? 1 : 0);
 
@@ -749,63 +786,88 @@ static void video_sample_input(HostVideo *video)
         }
     }
 
-    if (video->controller && api->game_controller_get_attached &&
-        !api->game_controller_get_attached(video->controller)) {
-        fprintf(stderr, "vita2native: SDL controller disconnected\n");
-        video_close_devices(video);
-    }
-    if (video->joystick && api->joystick_get_attached &&
-        !api->joystick_get_attached(video->joystick)) {
-        fprintf(stderr, "vita2native: SDL joystick disconnected\n");
-        video_close_devices(video);
-    }
-
-    if (!video->controller && !video->joystick) {
+    {
         uint64_t now = video_now_ns();
 
         if (now >= video->controller_scan_at_ns) {
-            video->controller = video_open_controller(video);
-            if (!video->controller)
-                video->joystick = video_open_joystick(video);
+            video_scan_pads(video);
             /* Hotplug detection costs a joystick enumeration, so look once a
                second rather than on every 16 ms poll. */
             video->controller_scan_at_ns = now + 1000000000ull;
         }
     }
 
-    if (video->controller) {
-        active = true;
-        for (int button = 0; button <= SDL_CONTROLLER_BUTTON_DPAD_RIGHT; button++) {
-            if (api->game_controller_get_button(video->controller, button))
-                buttons |= controller_button_mask(video, button);
-        }
-        if (api->game_controller_get_axis(video->controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) >
-            8000)
-            buttons |= SCE_CTRL_L2;
-        if (api->game_controller_get_axis(video->controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) >
-            8000)
-            buttons |= SCE_CTRL_R2;
+    /* Buttons are the union of every pad. The axes come from whichever pad is
+       being used: the built-in pad sits centred while an attached one plays. */
+    {
+        int best_score = -1;
 
-        lx = sdl_axis_to_vita(
-            api->game_controller_get_axis(video->controller, SDL_CONTROLLER_AXIS_LEFTX));
-        ly = sdl_axis_to_vita(
-            api->game_controller_get_axis(video->controller, SDL_CONTROLLER_AXIS_LEFTY));
-        rx = sdl_axis_to_vita(
-            api->game_controller_get_axis(video->controller, SDL_CONTROLLER_AXIS_RIGHTX));
-        ry = sdl_axis_to_vita(
-            api->game_controller_get_axis(video->controller, SDL_CONTROLLER_AXIS_RIGHTY));
-    } else if (video->joystick && api->joystick_get_button && api->joystick_get_axis) {
-        active = true;
-        for (int button = 0; button <= 13; button++) {
-            if (api->joystick_get_button(video->joystick, button))
-                buttons |= raw_button_mask(video, button);
+        for (int p = 0; p < video->pad_count; p++) {
+            uint8_t plx = 128, ply = 128, prx = 128, pry = 128;
+            unsigned int pad_buttons = 0;
+            int score;
+
+            if (video->pads[p].controller && api->game_controller_get_button) {
+                for (int button = 0; button <= SDL_CONTROLLER_BUTTON_DPAD_RIGHT; button++)
+                    if (api->game_controller_get_button(video->pads[p].controller, button))
+                        pad_buttons |= controller_button_mask(video, button);
+                if (api->game_controller_get_axis) {
+                    if (api->game_controller_get_axis(video->pads[p].controller,
+                                                      SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 8000)
+                        pad_buttons |= SCE_CTRL_L2;
+                    if (api->game_controller_get_axis(video->pads[p].controller,
+                                                      SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 8000)
+                        pad_buttons |= SCE_CTRL_R2;
+
+                    plx = sdl_axis_to_vita(api->game_controller_get_axis(
+                        video->pads[p].controller, SDL_CONTROLLER_AXIS_LEFTX));
+                    ply = sdl_axis_to_vita(api->game_controller_get_axis(
+                        video->pads[p].controller, SDL_CONTROLLER_AXIS_LEFTY));
+                    prx = sdl_axis_to_vita(api->game_controller_get_axis(
+                        video->pads[p].controller, SDL_CONTROLLER_AXIS_RIGHTX));
+                    pry = sdl_axis_to_vita(api->game_controller_get_axis(
+                        video->pads[p].controller, SDL_CONTROLLER_AXIS_RIGHTY));
+                }
+            } else if (video->pads[p].joystick && api->joystick_get_button &&
+                       api->joystick_get_axis) {
+                for (int button = 0; button <= 13; button++)
+                    if (api->joystick_get_button(video->pads[p].joystick, button))
+                        pad_buttons |= raw_button_mask(video, button);
+                /* Linux gamepad axes are X, Y, RX, RY in this order. Triggers
+                   are buttons on generic pads, so they need no axis handling. */
+                plx = sdl_axis_to_vita(api->joystick_get_axis(video->pads[p].joystick, 0));
+                ply = sdl_axis_to_vita(api->joystick_get_axis(video->pads[p].joystick, 1));
+                prx = sdl_axis_to_vita(api->joystick_get_axis(video->pads[p].joystick, 2));
+                pry = sdl_axis_to_vita(api->joystick_get_axis(video->pads[p].joystick, 3));
+            } else {
+                continue;
+            }
+
+            active = true;
+            buttons |= pad_buttons;
+
+            score = pad_buttons ? 1000 : 0;
+            score += (plx > 128 ? plx - 128 : 128 - plx) + (ply > 128 ? ply - 128 : 128 - ply) +
+                     (prx > 128 ? prx - 128 : 128 - prx) + (pry > 128 ? pry - 128 : 128 - pry);
+            if (score > best_score) {
+                best_score = score;
+                lx = plx;
+                ly = ply;
+                rx = prx;
+                ry = pry;
+            }
         }
-        /* Linux gamepad axes are X, Y, RX, RY in this order. Triggers are
-           buttons on generic pads, so they need no axis handling here. */
-        lx = sdl_axis_to_vita(api->joystick_get_axis(video->joystick, 0));
-        ly = sdl_axis_to_vita(api->joystick_get_axis(video->joystick, 1));
-        rx = sdl_axis_to_vita(api->joystick_get_axis(video->joystick, 2));
-        ry = sdl_axis_to_vita(api->joystick_get_axis(video->joystick, 3));
+    }
+
+    if (vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG")) {
+        static unsigned int sampled;
+        static unsigned int last_buttons;
+
+        if (buttons != last_buttons || (sampled++ % 120) == 0) {
+            fprintf(stderr, "vita2native: SDL sample buttons=0x%x lx=%u ly=%u active=%d pads=%d\n",
+                    buttons, lx, ly, (int)active, video->pad_count);
+            last_buttons = buttons;
+        }
     }
 
     pthread_mutex_lock(&video->lock);
@@ -818,7 +880,7 @@ static void video_sample_input(HostVideo *video)
     video->pad.rx = rx;
     video->pad.ry = ry;
     video->pad.active = active;
-    if (video->controller && video->rumble_pending) {
+    if (video->pad_count > 0 && video->rumble_pending) {
         rumble = true;
         rumble_low = video->rumble_low;
         rumble_high = video->rumble_high;
@@ -826,8 +888,12 @@ static void video_sample_input(HostVideo *video)
     }
     pthread_mutex_unlock(&video->lock);
 
-    if (rumble && api->game_controller_rumble)
-        api->game_controller_rumble(video->controller, rumble_low, rumble_high, 0xFFFFFFFFu);
+    if (rumble && api->game_controller_rumble) {
+        for (int p = 0; p < video->pad_count; p++)
+            if (video->pads[p].controller)
+                api->game_controller_rumble(video->pads[p].controller, rumble_low, rumble_high,
+                                            0xFFFFFFFFu);
+    }
 }
 
 void host_video_rumble(uint8_t small, uint8_t large)
