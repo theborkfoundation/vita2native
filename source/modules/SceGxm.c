@@ -456,6 +456,15 @@ typedef struct SceGxmRenderTarget {
     bool ds_sampled;
     bool ds_cpu_read;
 
+    /*
+     * Guest colour surface last bound to this target. When a texture is created
+     * over that memory the guest is sampling this target's own pixels, which are
+     * already on the GPU as `color`.
+     */
+    const void *color_data;
+    uint32_t color_width;
+    uint32_t color_height;
+
     /* Depth exported to a sampleable R32F texture instead of guest memory. */
     GLuint ds_copy_tex;
     GLuint ds_copy_fbo;
@@ -1652,6 +1661,43 @@ static uint64_t gxm_time_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+static int gxm_color_alias_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = !vita2native_env_flag("VITA2NATIVE_NO_COLOR_ALIAS");
+    return enabled;
+}
+
+/*
+ * A colour surface the guest rendered into can be sampled straight from the
+ * target's own texture: the pixels are already on the GPU in the layout a
+ * texture over that memory would decode to. Going through guest memory instead
+ * costs a full readback plus a re-upload every frame, and shows stale data when
+ * the readback is skipped (direct presentation).
+ */
+static SceGxmRenderTarget *gxm_color_alias_find(const void *data, uint32_t width, uint32_t height)
+{
+    if (!data)
+        return NULL;
+
+    for (unsigned int i = 0; i < GXM_MAX_RENDER_TARGETS; i++) {
+        SceGxmRenderTarget *rt = g_render_targets[i];
+
+        if (!rt || !rt->color || rt->color_data != data)
+            continue;
+        if (rt->color_width != width || rt->color_height != height)
+            continue;
+        /* Sampling the target being drawn into would be a feedback loop. */
+        if (g_current_context && g_current_context->render_target == rt)
+            continue;
+        return rt;
+    }
+
+    return NULL;
+}
+
 static void gxm_texture_params(const SceGxmTextureInner *texture, GLenum target, uint32_t mip_count)
 {
     uint32_t base = gxm_texture_get_format(texture) & SCE_GXM_TEXTURE_BASE_FORMAT_MASK;
@@ -1997,6 +2043,27 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
                 g_gl->glBindTexture(GL_TEXTURE_2D, depth_rt->ds_copy_tex);
                 g_bound_texture[unit] = depth_rt->ds_copy_tex;
             }
+            return true;
+        }
+    }
+
+    /*
+     * A texture created over a colour surface this emulator rendered into is
+     * sampling the render target itself, so bind its GL texture. This is what
+     * keeps a title that composites through its own render target correct under
+     * direct presentation, where nothing is written back to guest memory.
+     */
+    if (gxm_color_alias_enabled() && target == GL_TEXTURE_2D && mip_count <= 1 &&
+        texture->gamma_mode == 0) {
+        SceGxmRenderTarget *color_rt = gxm_color_alias_find(data, width, height);
+
+        if (color_rt) {
+            if (g_bound_texture[unit] != color_rt->color) {
+                g_gl->glBindTexture(GL_TEXTURE_2D, color_rt->color);
+                g_bound_texture[unit] = color_rt->color;
+            }
+            /* One level only: a mip-mapped filter would make it incomplete. */
+            gxm_texture_params(texture, GL_TEXTURE_2D, 1);
             return true;
         }
     }
@@ -5402,6 +5469,13 @@ EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsign
         (colorSurface && !((const SceGxmColorSurfaceInner *)colorSurface)->disabled)
             ? (const SceGxmColorSurfaceInner *)colorSurface
             : NULL;
+    if (context->color_surface) {
+        SceGxmRenderTarget *bound_rt = (SceGxmRenderTarget *)renderTarget;
+
+        bound_rt->color_data = context->color_surface->data;
+        bound_rt->color_width = context->color_surface->width;
+        bound_rt->color_height = context->color_surface->height;
+    }
     context->ds_surface = (depthStencil && !gxm_ds_surface_is_disabled(depthStencil)) ? depthStencil
                                                                                         : NULL;
     context->ds_store_surface = context->ds_surface;

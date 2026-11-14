@@ -82,6 +82,7 @@ static const Setting g_settings[] = {
     FLAG("VITA2NATIVE_NO_DEPTH", "disable the depth test and write"),
     FLAG("VITA2NATIVE_NO_TEXTURE_LUT",
          "decode U1U5U5U5 texels one at a time instead of through the LUT"),
+    FLAG("VITA2NATIVE_NO_COLOR_ALIAS", "sample colour render targets through guest memory"),
     FLAG("VITA2NATIVE_NO_DRAW_UNIFORMS", "disable the per-draw uniform path"),
     FLAG("VITA2NATIVE_NO_FB_FETCH", "disable framebuffer fetch and read the colour back"),
     FLAG("VITA2NATIVE_NO_MSAA", "render without multisampling"),
