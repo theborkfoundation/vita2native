@@ -136,6 +136,7 @@ static const Setting g_settings[] = {
     FLAG("VITA2NATIVE_CTRL_SWAP_AB", "swap cross and circle on every input source"),
     FLAG("VITA2NATIVE_INPUT_DEBUG", "log the input mapping and the SDL controller choice"),
     FLAG("VITA2NATIVE_TIME_TRACE", "log clock reads (process, rtc, vcount) once a second"),
+    FLOAT("VITA2NATIVE_TIME_SCALE", "stretch the process clock (diagnostic, 1.0 = real time)"),
     STR("VITA2NATIVE_TOUCH_SCRIPT", "frame-keyed touch script, same syntax as CTRL_SCRIPT"),
     FLAG("VITA2NATIVE_TOUCH_SCRIPT_DEBUG", "log every scripted touch change"),
 

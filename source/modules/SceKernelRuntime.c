@@ -8,6 +8,7 @@
  */
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <psp2/kernel/cpu.h>
@@ -19,6 +20,7 @@
 #include "host.h"
 #include "module.h"
 #include "modules/time_trace.h"
+#include "settings.h"
 
 #define ATOMIC_SET(nid, name, T)                                                                   \
     EXPORT(SceLibKernel, nid, void, name, T *store, T value)                                       \
@@ -251,8 +253,30 @@ unsigned int g_time_trace_process;
 
 static uint64_t runtime_now_us(void)
 {
+    static double scale = -1.0;
+    static uint64_t base;
+    uint64_t now;
+
     g_time_trace_process++;
-    return host_monotonic_ns() / 1000ull;
+
+    if (scale < 0.0) {
+        const char *value = vita2native_env_str("VITA2NATIVE_TIME_SCALE");
+
+        scale = (value && value[0]) ? strtod(value, NULL) : 1.0;
+        if (scale <= 0.0)
+            scale = 1.0;
+        base = host_monotonic_ns() / 1000ull;
+    }
+
+    now = host_monotonic_ns() / 1000ull;
+
+    /* Diagnostic: report a stretched (or compressed) process clock, so a title
+       that applies its delta unclamped can be told apart from one that steps a
+       fixed 1/60 s per frame. Keep the value continuous. */
+    if (scale != 1.0)
+        return base + (uint64_t)((double)(now - base) * scale);
+
+    return now;
 }
 
 EXPORT(SceLibKernel, 0x4C4672BF, int, sceKernelGetProcessTime, SceKernelSysClock *clock)
