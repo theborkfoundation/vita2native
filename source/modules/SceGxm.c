@@ -465,6 +465,19 @@ typedef struct SceGxmRenderTarget {
     uint32_t color_width;
     uint32_t color_height;
 
+    /*
+     * Flipped copy of `color` for sampling. The readback writes a finished
+     * target into guest memory upside down (GL's origin is bottom-left, Vita
+     * surfaces are top-left), so a texture over that memory is stored top-down.
+     * Aliasing skips the readback, so the flip has to happen here instead.
+     */
+    GLuint alias_tex;
+    GLuint alias_fbo;
+    uint32_t alias_width;
+    uint32_t alias_height;
+    uint64_t alias_frame;
+    bool alias_valid;
+
     /* Depth exported to a sampleable R32F texture instead of guest memory. */
     GLuint ds_copy_tex;
     GLuint ds_copy_fbo;
@@ -1698,6 +1711,71 @@ static SceGxmRenderTarget *gxm_color_alias_find(const void *data, uint32_t width
     return NULL;
 }
 
+/*
+ * Brings the flipped copy of a render target up to date, at most once per frame.
+ *
+ * The guest's colour surfaces are top-down while the GL attachment is
+ * bottom-up, and the readback normally hides that by flipping on the way out.
+ * Aliasing has to reproduce the flip, or a title that samples its own target
+ * sees the world upside down while everything drawn straight to the display
+ * target stays upright.
+ */
+static bool gxm_color_alias_refresh(SceGxmRenderTarget *rt)
+{
+    GLint previous_fbo = 0;
+
+    if (!g_gl || !rt->fbo)
+        return false;
+    if (rt->alias_valid && rt->alias_frame == g_gxm_frame)
+        return true;
+
+    if (!rt->alias_tex || rt->alias_width != rt->render_width ||
+        rt->alias_height != rt->render_height) {
+        if (rt->alias_tex)
+            g_gl->glDeleteTextures(1, &rt->alias_tex);
+        if (rt->alias_fbo)
+            g_gl->glDeleteFramebuffers(1, &rt->alias_fbo);
+        rt->alias_tex = 0;
+        rt->alias_fbo = 0;
+        rt->alias_valid = false;
+
+        g_gl->glGenTextures(1, &rt->alias_tex);
+        g_gl->glBindTexture(GL_TEXTURE_2D, rt->alias_tex);
+        g_gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)rt->render_width,
+                           (GLsizei)rt->render_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        g_gl->glGenFramebuffers(1, &rt->alias_fbo);
+        g_gl->glBindFramebuffer(GL_FRAMEBUFFER, rt->alias_fbo);
+        g_gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                                     rt->alias_tex, 0);
+        if (g_gl->glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            g_gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0,
+                                         0);
+            g_gl->glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            g_gl->glDeleteFramebuffers(1, &rt->alias_fbo);
+            g_gl->glDeleteTextures(1, &rt->alias_tex);
+            rt->alias_fbo = 0;
+            rt->alias_tex = 0;
+            return false;
+        }
+
+        rt->alias_width = rt->render_width;
+        rt->alias_height = rt->render_height;
+    }
+
+    g_gl->glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous_fbo);
+    g_gl->glBindFramebuffer(GL_READ_FRAMEBUFFER, rt->fbo);
+    g_gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, rt->alias_fbo);
+    /* Source and destination rows are swapped: this is the flip. */
+    g_gl->glBlitFramebuffer(0, 0, (GLint)rt->render_width, (GLint)rt->render_height, 0,
+                            (GLint)rt->render_height, (GLint)rt->render_width, 0,
+                            GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    g_gl->glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)previous_fbo);
+
+    rt->alias_frame = g_gxm_frame;
+    rt->alias_valid = true;
+    return true;
+}
+
 static void gxm_texture_params(const SceGxmTextureInner *texture, GLenum target, uint32_t mip_count)
 {
     uint32_t base = gxm_texture_get_format(texture) & SCE_GXM_TEXTURE_BASE_FORMAT_MASK;
@@ -2057,10 +2135,10 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
         texture->gamma_mode == 0) {
         SceGxmRenderTarget *color_rt = gxm_color_alias_find(data, width, height);
 
-        if (color_rt) {
-            if (g_bound_texture[unit] != color_rt->color) {
-                g_gl->glBindTexture(GL_TEXTURE_2D, color_rt->color);
-                g_bound_texture[unit] = color_rt->color;
+        if (color_rt && gxm_color_alias_refresh(color_rt)) {
+            if (g_bound_texture[unit] != color_rt->alias_tex) {
+                g_gl->glBindTexture(GL_TEXTURE_2D, color_rt->alias_tex);
+                g_bound_texture[unit] = color_rt->alias_tex;
             }
             /* One level only: a mip-mapped filter would make it incomplete. */
             gxm_texture_params(texture, GL_TEXTURE_2D, 1);
