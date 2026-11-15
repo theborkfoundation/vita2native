@@ -227,11 +227,14 @@ it with `python3 tools/ctrl_test/build.py` and it draws the live pad state on a
 Video output goes through SDL, loaded with `dlopen` so the headless ARM binary
 keeps no SDL build dependency. SDL chooses the platform driver itself: KMSDRM
 on handhelds, X11 or Wayland on desktops, and offscreen/dummy on headless
-machines (`SDL_VIDEODRIVER=dummy` forces a no-op output). The guest frame is
-uploaded as `SDL_PIXELFORMAT_ABGR8888` — the guest's A8B8G8R8 byte order — so
-SDL does the scaling and letterboxing without a CPU conversion. Frames are
-handed to a dedicated video thread, so SDL's own GL context never touches the
-guest's rendering context.
+machines (`SDL_VIDEODRIVER=dummy` forces a no-op output). With direct KMS
+presentation the DRM device belongs to this emulator and SDL only supplies
+input, so it defaults to the offscreen driver (falling back to KMSDRM and then
+dummy when that is not built in); an explicit `SDL_VIDEODRIVER` always wins.
+The guest frame is uploaded as `SDL_PIXELFORMAT_ABGR8888` — the guest's
+A8B8G8R8 byte order — so SDL does the scaling and letterboxing without a CPU
+conversion. Frames are handed to a dedicated video thread, so SDL's own GL
+context never touches the guest's rendering context.
 `VITA2NATIVE_STRETCH=1` fills the display and `VITA2NATIVE_SDL_WINDOWED=1` keeps
 a window instead of going fullscreen.
 

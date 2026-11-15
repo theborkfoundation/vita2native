@@ -336,13 +336,44 @@ static void video_destroy_sdl(HostVideo *video)
     video->window = NULL;
 }
 
+/*
+ * Brings SDL's video subsystem up, without leaving the caller to pick a driver.
+ *
+ * With direct presentation the DRM device belongs to this emulator and SDL is
+ * only here for input, so any video driver will do - and the KMSDRM one is the
+ * worst choice, since it probes the same CRTC and connector. Prefer the
+ * offscreen driver, and only fall back to the others when it is not built in.
+ * An explicit SDL_VIDEODRIVER always wins.
+ */
+static bool video_init_video_subsystem(HostVideo *video)
+{
+    static const char *const kms_drivers[] = {"offscreen", "kmsdrm", "dummy"};
+    SdlApi *api = video->api;
+
+    if (!host_display_uses_kms() || getenv("SDL_VIDEODRIVER"))
+        return api->init_subsystem(SDL_INIT_VIDEO) == 0;
+
+    for (unsigned int i = 0; i < sizeof(kms_drivers) / sizeof(kms_drivers[0]); i++) {
+        setenv("SDL_VIDEODRIVER", kms_drivers[i], 1);
+        if (api->init_subsystem(SDL_INIT_VIDEO) == 0)
+            return true;
+
+        fprintf(stderr, "vita2native: SDL video driver '%s' unavailable: %s\n", kms_drivers[i],
+                api->get_error());
+        if (api->quit_subsystem)
+            api->quit_subsystem(SDL_INIT_VIDEO);
+    }
+
+    return false;
+}
+
 static bool video_init_sdl(HostVideo *video)
 {
     SdlApi *api = video->api;
     unsigned int window_flags = SDL_WINDOW_SHOWN;
     int panel_width = 0, panel_height = 0;
 
-    if (api->init_subsystem(SDL_INIT_VIDEO) != 0) {
+    if (!video_init_video_subsystem(video)) {
         fprintf(stderr, "vita2native: SDL video init failed: %s\n", api->get_error());
         return false;
     }
