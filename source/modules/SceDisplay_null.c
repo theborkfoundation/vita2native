@@ -11,6 +11,7 @@
 #include "module.h"
 #include "modules/SceDisplay.h"
 #include "modules/SceGxm.h"
+#include "modules/time_trace.h"
 #include "modules/common_dialog_overlay.h"
 #include "modules/fps_overlay.h"
 #include "settings.h"
@@ -218,6 +219,18 @@ static void display_log_fps(void)
         if (enabled)
             LOG("SceDisplay: %u frames in %.1f s (%.1f fps)", frames, elapsed, fps);
 
+        if (vita2native_env_flag("VITA2NATIVE_TIME_TRACE")) {
+            unsigned int total = g_time_trace_process + g_time_trace_rtc + g_time_trace_vcount;
+
+            LOG("SceDisplay: clock reads with %u frames: process %u, rtc %u, vcount %u (%.1f "
+                "per frame)",
+                frames, g_time_trace_process, g_time_trace_rtc, g_time_trace_vcount,
+                frames ? (double)total / (double)frames : 0.0);
+            g_time_trace_process = 0;
+            g_time_trace_rtc = 0;
+            g_time_trace_vcount = 0;
+        }
+
         fps_overlay_add_sample(fps);
 
         if (metrics_path) {
@@ -371,9 +384,13 @@ EXPORT(SceDisplay, 0x2EBFC7CB, int, sceDisplayGetMaximumFrameBufResolution, int 
     return 0;
 }
 
+unsigned int g_time_trace_vcount;
+
 EXPORT(SceDisplay, 0xB6FDE0BA, int, sceDisplayGetVcount, void)
 {
     uint64_t now = host_monotonic_ns();
+
+    g_time_trace_vcount++;
     uint64_t index =
         now > g_vblank_epoch_ns ? (now - g_vblank_epoch_ns) / VBLANK_PERIOD_NS : 0;
 

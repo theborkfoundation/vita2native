@@ -18,6 +18,7 @@
 
 #include "host.h"
 #include "module.h"
+#include "modules/time_trace.h"
 
 #define ATOMIC_SET(nid, name, T)                                                                   \
     EXPORT(SceLibKernel, nid, void, name, T *store, T value)                                       \
@@ -246,8 +247,11 @@ ATOMIC_XOR_FETCH(0x46940704, sceKernelAtomicXorAndGet32, int32_t)
 ATOMIC_XOR_FETCH(0xDDC6866E, sceKernelAtomicXorAndGet64, int64_t)
 ATOMIC_XOR_FETCH(0x634AF062, sceKernelAtomicXorAndGet8, int8_t)
 
+unsigned int g_time_trace_process;
+
 static uint64_t runtime_now_us(void)
 {
+    g_time_trace_process++;
     return host_monotonic_ns() / 1000ull;
 }
 

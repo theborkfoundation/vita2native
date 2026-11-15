@@ -13,6 +13,7 @@
 #include <time.h>
 
 #include "module.h"
+#include "modules/time_trace.h"
 
 /* Microseconds between 0001-01-01 and 1970-01-01. */
 #define VITA_EPOCH_OFFSET 62135596800000000LL
@@ -118,8 +119,11 @@ EXPORT(SceRtcUser, 0x811313B3, unsigned int, sceRtcGetTickResolution, void)
     return (unsigned int)VITA_TICKS_PER_SECOND;
 }
 
+unsigned int g_time_trace_rtc;
+
 EXPORT(SceRtcUser, 0x23F79274, int, sceRtcGetCurrentTick, SceRtcTick *tick)
 {
+    g_time_trace_rtc++;
     if (!tick)
         return SCE_RTC_ERROR_INVALID_POINTER;
 
