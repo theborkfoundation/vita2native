@@ -968,17 +968,13 @@ int main(int argc, char *argv[])
         }
     }
 
-#if defined(VITA2NATIVE_HEADLESS_BUILD)
-    /* The display backend presents through SDL, so the GLES context is always
-       offscreen. Direct GPU presentation is the exception: a KMS target needs
-       a window-capable EGL display for the scanout surface. */
-    if (!g_headless)
-        g_headless = !host_display_uses_kms();
-#else
+    /* Offscreen unless a presentation path needs a window-capable EGL display:
+       direct KMS shows the scanout surface, and X11/Wayland take the window
+       surface of a display server. Anything else would only move every GL call
+       onto a window system that is not there. */
     if (!g_headless && !host_display_uses_kms() && !getenv("DISPLAY") &&
         !getenv("WAYLAND_DISPLAY"))
         g_headless = true;
-#endif
 
     create_vita2native_paths();
 

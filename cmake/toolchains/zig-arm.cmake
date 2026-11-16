@@ -19,9 +19,14 @@ set(CMAKE_CXX_COMPILER "${VITA2NATIVE_ZIG_DIR}/zig-arm-cxx")
 set(CMAKE_AR "${VITA2NATIVE_ZIG_DIR}/zig-arm-ar")
 set(CMAKE_RANLIB "${VITA2NATIVE_ZIG_DIR}/zig-arm-ranlib")
 
-# Optional cross sysroot: Debian armhf libraries and headers, populated by
-# tools/debian-sysroot.py. Without it the build uses Zig's bundled libc, which
-# is enough for the headless backend but cannot resolve -lSDL2.
+# Optional cross sysroot with the target's Debian libraries and headers,
+# populated by tools/debian-sysroot.py. Nothing links against them today - SDL,
+# EGL and GLES are all dlopen'd - so this is for build inputs that cannot be
+# loaded at runtime, such as a static library the guest needs.
+#
+# CMAKE_SOURCE_DIR is not set yet when this file runs, so resolve the tree from
+# this file's own location.
+get_filename_component(_v2n_source_dir "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
 set(VITA2NATIVE_SYSROOT "" CACHE PATH "Cross sysroot with the target's system libraries")
 if(VITA2NATIVE_SYSROOT)
     set(CMAKE_SYSROOT "${VITA2NATIVE_SYSROOT}")

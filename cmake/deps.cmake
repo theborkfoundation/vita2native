@@ -7,50 +7,17 @@ include(GNUInstallDirs)
 
 # --- Platform backends -------------------------------------------------------
 #
-# The headless build swaps only the display and controller backends; audio
-# always goes through SDL, which SceAudio_sdl.c dlopens, so the ARM headless
-# build needs no SDL at link time.
+# One backend pair for every target: SceDisplay hands the GPU's render target to
+# the host video layer, which picks the scanout (KMS) or window (EGL) surface,
+# and SceCtrl takes its input from that same layer, which samples SDL pads and
+# keyboards on the video thread.
+#
+# SDL is dlopen'd (source/host/host_video_sdl.c), not linked, so the build needs
+# neither its headers nor its library; that is also what lets the emulator start
+# on a target without SDL installed.
 
-option(VITA2NATIVE_HEADLESS
-    "Build without SDL2 (null display/input; useful for local testing and QEMU)" OFF)
-
-if(VITA2NATIVE_HEADLESS)
-    set(VITA2NATIVE_DISPLAY_SOURCE source/modules/SceDisplay_null.c)
-    set(VITA2NATIVE_CTRL_SOURCE source/modules/SceCtrl_null.c)
-else()
-    # The target's SDL2 is whatever the devices run, taken from a Debian
-    # sysroot (tools/debian-sysroot.py). PKG_CONFIG_LIBDIR points at that
-    # sysroot's .pc files, but PKG_CONFIG_SYSROOT_DIR is deliberately left unset:
-    # zig already applies --sysroot to absolute -I/-L paths, so pre-prefixing
-    # them here would search inside the sysroot twice.
-    if(VITA2NATIVE_SYSROOT)
-        set(_v2n_triplet "arm-linux-gnueabihf")
-        set(ENV{PKG_CONFIG_LIBDIR}
-            "${VITA2NATIVE_SYSROOT}/usr/lib/${_v2n_triplet}/pkgconfig:${VITA2NATIVE_SYSROOT}/usr/lib/pkgconfig:${VITA2NATIVE_SYSROOT}/usr/share/pkgconfig")
-    endif()
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(SDL2 REQUIRED sdl2)
-    if(VITA2NATIVE_SYSROOT)
-        # zig applies --sysroot to -L but not to -I, so include directories have
-        # to be made absolute here while library directories stay as the .pc
-        # file wrote them.
-        set(_v2n_sdl_includes "")
-        foreach(_v2n_include IN LISTS SDL2_INCLUDE_DIRS)
-            # --sysroot already covers the target's /usr/include, and naming it
-            # explicitly puts the C library ahead of zig's libc++ wrapper
-            # headers, which then fail to find their own <ctype.h>.
-            if(NOT "${_v2n_include}" STREQUAL "/usr/include")
-                list(APPEND _v2n_sdl_includes "${VITA2NATIVE_SYSROOT}${_v2n_include}")
-            endif()
-        endforeach()
-        set(SDL2_INCLUDE_DIRS "${_v2n_sdl_includes}")
-    endif()
-    set(VITA2NATIVE_DISPLAY_SOURCE source/modules/SceDisplay_linux.c)
-    set(VITA2NATIVE_CTRL_SOURCE source/modules/SceCtrl_linux.c)
-endif()
-
-# The SDL audio backend dlopens SDL, so it works for both builds: the ARM
-# headless build has no SDL at link time but the target has it at runtime.
+set(VITA2NATIVE_DISPLAY_SOURCE source/modules/SceDisplay.c)
+set(VITA2NATIVE_CTRL_SOURCE source/modules/SceCtrl_sdl.c)
 set(VITA2NATIVE_AUDIO_SOURCE source/modules/SceAudio_sdl.c)
 
 # --- FAAD2 (GPLv2) -----------------------------------------------------------

@@ -16,7 +16,6 @@
             "toolchainFile": "${sourceDir}/cmake/toolchains/zig-arm.cmake",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-                "VITA2NATIVE_HEADLESS": "ON",
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "CMAKE_COLOR_DIAGNOSTICS": "ON"
             }
@@ -31,7 +30,6 @@
             "toolchainFile": "${sourceDir}/cmake/toolchains/zig-arm.cmake",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
-                "VITA2NATIVE_HEADLESS": "ON",
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "CMAKE_COLOR_DIAGNOSTICS": "ON"
             }
@@ -46,7 +44,6 @@
             "toolchainFile": "${sourceDir}/cmake/toolchains/zig-arm.cmake",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "MinSizeRel",
-                "VITA2NATIVE_HEADLESS": "ON",
                 "VITA2NATIVE_NO_BACKTRACE_SYMBOLS": "ON",
                 "CMAKE_C_FLAGS_MINSIZEREL": "-Os -DNDEBUG -flto",
                 "CMAKE_CXX_FLAGS_MINSIZEREL": "-Os -DNDEBUG -flto",
@@ -64,7 +61,6 @@
             "toolchainFile": "${sourceDir}/cmake/toolchains/zig-x64.cmake",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-                "VITA2NATIVE_HEADLESS": "ON",
                 "VITA2NATIVE_ALLOW_64BIT": "ON",
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "CMAKE_COLOR_DIAGNOSTICS": "ON"

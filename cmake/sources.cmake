@@ -101,16 +101,7 @@ target_include_directories(vita2native PRIVATE
     external/faad2/include
     external/Vita3K/external/stb
     external/Vita3K/vita3k/renderer/include
-    ${SDL2_INCLUDE_DIRS}
 )
-
-if(VITA2NATIVE_HEADLESS)
-    # Presentation is the headless display backend's job (SDL); the GLES
-    # context must stay offscreen even when DISPLAY is set, otherwise an X11
-    # DISPLAY moves EGL to the windowing platform and every GL call round-trips
-    # through the X server.
-    target_compile_definitions(vita2native PRIVATE VITA2NATIVE_HEADLESS_BUILD=1)
-endif()
 
 target_compile_options(vita2native PRIVATE
     -Wall
@@ -152,7 +143,7 @@ target_link_libraries(vita2native PRIVATE
     miniz
     mlib
     faad
-    ${SDL2_LIBRARIES}
+   
     pthread
     dl
     m

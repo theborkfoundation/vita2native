@@ -10,11 +10,10 @@ upside down, mirrored, scaled, clipped, one colour, or too slow.
 
 ## 1. Establish what the guest actually presented
 
-The deployment build is **HEADLESS=ON**. Presentation therefore goes through
-`source/modules/SceDisplay_null.c` -> `source/host/host_video_sdl.c`;
-`SceDisplay_linux.c` and `gxm_direct_present_enabled()`
-(`host_display_uses_kms()`) are not part of this build. Do not debug the
-present path in `SceDisplay_linux.c`.
+There is one display backend: `source/modules/SceDisplay.c` hands the guest's
+render target to `source/host/host_video_sdl.c`, which picks the presenter
+(`host_display_uses_kms()`): the KMS scanout plane, an EGL window surface, or
+the SDL renderer readback.
 
 ```sh
 tools/v2n log 40          # "SceDisplay: N frames in 1.0 s (..fps)" proves swap works

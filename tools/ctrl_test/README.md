@@ -109,8 +109,7 @@ hotkey modifier, not a Vita button.
   one bit in the `MASK` readout.
 - If pressing one face button highlights both `TRI` and `SQR`, the SDL and
   evdev sources still disagree and the SDL buttons were not gated off.
-- If a press sets no bit, check `VITA2NATIVE_INPUT_DEBUG=1` for which evdev
-  node was opened and whether SDL opened a controller.
+- If a press sets no bit, check `VITA2NATIVE_INPUT_DEBUG=1` for whether SDL
+  opened a controller (only SDL is used; there is no evdev backend).
 - If the wrong bit is set positionally (for example the left face button sets
-  `TRI`), the evdev positional mapping in `source/modules/SceCtrl_null.c`
-  needs adjusting.
+  `TRI`), the mapping in `source/host/host_video_sdl.c` needs adjusting.

@@ -79,7 +79,7 @@ vita2native_add_smoke(mspace_smoke
 vita2native_add_smoke(ctrl_script_smoke
     SOURCES
         tests/ctrl_script_smoke.c
-        source/modules/SceCtrl_null.c
+        source/modules/SceCtrl_sdl.c
         source/modules/SceCtrl_common.c
         source/modules/SceCtrl_script.c
         source/host/host_video_sdl.c
@@ -152,7 +152,7 @@ vita2native_add_smoke(audio_smoke
         source/netlog.c
     INCLUDES source/modules
     DEFINES _FILE_OFFSET_BITS=64
-    LIBS pthread m ${SDL2_LIBRARIES})
+    LIBS pthread m)
 
 vita2native_add_smoke(sync_smoke
     SOURCES
@@ -348,30 +348,25 @@ vita2native_add_smoke(egl_window_smoke
     INCLUDES source/host external/khronos/include
     LIBS ${CMAKE_DL_LIBS} m)
 
-if(NOT VITA2NATIVE_HEADLESS)
-    vita2native_add_smoke(display_egl_smoke
-        SOURCES
-            tests/display_egl_smoke.c
-            source/modules/SceDisplay_linux.c
-            source/modules/SceCommonDialog.c
-            source/modules/common_dialog_overlay.c
-            source/modules/SceSysmem.c
-            source/modules/SceAppUtil.c
-            ${VITA2NATIVE_HOST_GFX_SOURCES}
-            source/host/host_fs.c
-            source/host/host_thread.c
-            source/log.c
-            source/netlog.c
-        INCLUDES
-            source/host
-            external/khronos/include
-            external/Vita3K/external/LibAtrac9/C/src
-            external/font8x8
-            external/mlib
-            ${SDL2_INCLUDE_DIRS}
+vita2native_add_smoke(display_egl_smoke
+    SOURCES
+        tests/display_egl_smoke.c
+        source/modules/SceDisplay.c
+        source/modules/SceCommonDialog.c
+        source/modules/common_dialog_overlay.c
+        source/modules/fps_overlay.c
+        ${VITA2NATIVE_HOST_GFX_SOURCES}
+        source/host/host_video_sdl.c
+        source/host/host_thread.c
+        source/log.c
+        source/netlog.c
+    INCLUDES
+        source/host
+        external/khronos/include
+        external/Vita3K/external/LibAtrac9/C/src
+        external/font8x8
         DEFINES _FILE_OFFSET_BITS=64
-        LIBS mlib ${SDL2_LIBRARIES} ${CMAKE_DL_LIBS} m pthread)
-endif()
+    LIBS ${CMAKE_DL_LIBS} m pthread)
 
 # shader_smoke takes a .gxp path, so it registers one ctest entry per fixture
 # instead of through the helper's ARGUMENTS.

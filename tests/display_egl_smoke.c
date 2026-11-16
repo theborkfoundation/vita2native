@@ -23,6 +23,37 @@
 #define WIDTH  960
 #define HEIGHT 544
 
+/* SceDisplay asks the guest GPU for a presentable render target first and only
+   falls back to the guest framebuffer when there is none. This test has no
+   guest, so it exercises that fallback. */
+bool SceGxm_get_present_frame(void *base, unsigned int *texture, int *width, int *height)
+{
+    (void)base;
+    (void)texture;
+    (void)width;
+    (void)height;
+    return false;
+}
+
+/* The save-data dialog is part of SceCommonDialog, which this test links in for
+   the overlay; neither of these is reachable from a display-only test. */
+void *SceSysmem_alloc_guest_scratch(const char *name, uint32_t size)
+{
+    (void)name;
+    (void)size;
+    return NULL;
+}
+
+int SceAppUtil_read_slot_param(unsigned int slot_id, void *param)
+{
+    (void)slot_id;
+    (void)param;
+    return -1;
+}
+
+unsigned int g_time_trace_rtc;
+unsigned int g_time_trace_process;
+
 typedef struct {
     int width, height;
     int xoffset;

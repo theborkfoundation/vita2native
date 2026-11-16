@@ -95,6 +95,7 @@ typedef struct {
     int (*render_set_logical_size)(SDL_Renderer *, int, int);
     int (*get_window_size)(SDL_Window *, int *, int *);
     int (*get_renderer_info)(SDL_Renderer *, SDL_RendererInfo *);
+    int (*get_window_wm_info)(SDL_Window *, void *info);
     const char *(*get_current_video_driver)(void);
     int (*show_cursor)(int);
     void (*pump_events)(void);
@@ -176,6 +177,32 @@ typedef struct {
 #define SDL_SCANCODE_DOWN 81
 #define SDL_SCANCODE_UP 82
 
+/* SDL_SYSWM_TYPE */
+#define SDL_SYSWM_X11     2
+#define SDL_SYSWM_WAYLAND 6
+
+/*
+ * Mirror of SDL_SysWMinfo: SDL_version then the subsystem enum, then the
+ * platform union. Only the leading member of each union arm is read here, and
+ * the union is padded past the largest real one, so the layout is safe without
+ * the SDL headers (this file dlopens SDL).
+ */
+typedef struct {
+    uint8_t version[4];
+    int subsystem;
+    union {
+        struct {
+            void *display;
+            unsigned long window;
+        } x11;
+        struct {
+            void *display;
+            void *surface;
+        } wayland;
+        uint8_t padding[64];
+    } info;
+} SdlSysWmInfo;
+
 #define SDL_QUIT 0x100u
 #define SDL_WINDOWEVENT 0x200u
 #define SDL_WINDOWEVENT_SIZE_CHANGED 6
@@ -248,6 +275,11 @@ struct HostVideo {
     /* Direct EGL presentation to the KMS/DRM scanout plane. */
     bool direct_present;
     bool egl_attached;
+
+    /* The SDL window handed to EGL, so frames go straight to the window
+       surface instead of through a renderer readback. */
+    bool gl_window;
+    void *native_window;
 
     /* Debug overlay drawn by the direct-present GPU pass. */
     const void *overlay_pixels;
@@ -367,6 +399,48 @@ static bool video_init_video_subsystem(HostVideo *video)
     return false;
 }
 
+/*
+ * True when the window's native handle can be given to EGL. The attach itself
+ * happens on the presenting thread (see host_video_present_texture): EGL
+ * surfaces belong to the thread whose context is current, and the window is
+ * created on this one.
+ */
+static bool video_try_gl_window(HostVideo *video)
+{
+    SdlApi *api = video->api;
+    SdlSysWmInfo info;
+    const char *driver;
+
+    if (!vita2native_env_flag("VITA2NATIVE_EGL_WINDOW"))
+        return false;
+    if (!video->window || !api->get_window_wm_info)
+        return false;
+
+    memset(&info, 0, sizeof(info));
+    info.version[0] = 2;
+    if (!api->get_window_wm_info(video->window, &info))
+        return false;
+
+    if (info.subsystem == SDL_SYSWM_X11)
+        video->native_window = (void *)info.info.x11.window;
+    else if (info.subsystem == SDL_SYSWM_WAYLAND)
+        video->native_window = info.info.wayland.surface;
+    else
+        return false;
+
+    if (!video->native_window)
+        return false;
+
+    /* EGL can only take these window types; anything else keeps the renderer. */
+    driver = api->get_current_video_driver ? api->get_current_video_driver() : "";
+    if (!driver || strcmp(driver, "x11") != 0)
+        if (strcmp(driver, "wayland") != 0)
+            return false;
+
+    video->gl_window = true;
+    return true;
+}
+
 static bool video_init_sdl(HostVideo *video)
 {
     SdlApi *api = video->api;
@@ -408,6 +482,24 @@ static bool video_init_sdl(HostVideo *video)
     if (!video->window) {
         fprintf(stderr, "vita2native: SDL window creation failed: %s\n", api->get_error());
         return false;
+    }
+
+    /*
+     * Preferred: let EGL render into the window, so a presented frame is the
+     * guest's render target itself rather than guest pixels copied to the CPU
+     * and uploaded again. Opt-in until the X11/Wayland surfaces have been
+     * verified on a device.
+     */
+    if (video_try_gl_window(video)) {
+        api->show_cursor(0);
+        api->get_window_size(video->window, &panel_width, &panel_height);
+        video->width = panel_width > 0 ? panel_width : 960;
+        video->height = panel_height > 0 ? panel_height : 544;
+        fprintf(stderr, "vita2native: presenting through EGL on the window (%s video, %dx%d)\n",
+                api->get_current_video_driver ? api->get_current_video_driver() : "unknown",
+                video->width, video->height);
+        video->controller_scan_at_ns = video_now_ns();
+        return true;
     }
 
     video->renderer = api->create_renderer(
@@ -1098,6 +1190,7 @@ HostVideo *host_video_open(void)
     LOAD_SDL(get_window_size, "SDL_GetWindowSize");
     LOAD_SDL(get_renderer_info, "SDL_GetRendererInfo");
     LOAD_SDL(show_cursor, "SDL_ShowCursor");
+    *(void **)(&api->get_window_wm_info) = dlsym(api->library, "SDL_GetWindowWMInfo");
     *(void **)(&api->get_current_video_driver) = dlsym(api->library, "SDL_GetCurrentVideoDriver");
     *(void **)(&api->set_texture_scale_mode) =
         dlsym(api->library, "SDL_SetTextureScaleMode");
@@ -1290,7 +1383,8 @@ bool host_video_present_texture(HostVideo *video, unsigned int texture, int widt
 {
     HostGpuDevice device;
 
-    if (!video || !video->direct_present || !texture || width <= 0 || height <= 0)
+    if (!video || (!video->direct_present && !video->gl_window) || !texture || width <= 0 ||
+        height <= 0)
         return false;
 
     device = host_gpu_current();
@@ -1298,8 +1392,14 @@ bool host_video_present_texture(HostVideo *video, unsigned int texture, int widt
         return false;
 
     if (!video->egl_attached) {
-        if (host_gpu_attach_kms(device, -1, 0, 0) != 0) {
-            fprintf(stderr, "vita2native: direct EGL attach failed\n");
+        /* Runs on the guest thread, which is where the GL context is current. */
+        int attached = video->direct_present
+                           ? host_gpu_attach_kms(device, -1, 0, 0)
+                           : host_gpu_attach_window(device, video->native_window);
+
+        if (attached != 0) {
+            fprintf(stderr, "vita2native: EGL %s attach failed\n",
+                    video->direct_present ? "scanout" : "window");
             return false;
         }
         video->egl_attached = true;
