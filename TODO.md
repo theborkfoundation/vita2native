@@ -38,8 +38,11 @@ Angry Birds Trilogy plays menu music and effects on the R36S.
 
 **Status:** done. `include/gxm/decode_bands.h` splits a decode into
 destination-row bands (aligned to the decoder's unit: 32-row Morton tiles, 4x4
-blocks) across `VITA2NATIVE_DECODE_THREADS` workers (default 3, `1` is the A/B
-control), skipping levels below 512x512. Applied to the swizzled U4/U8 tile
+blocks) across `VITA2NATIVE_DECODE_THREADS` workers, skipping levels below
+512x512. The default follows the CPUs the process may run on (affinity mask,
+not the online count): all of them on one or two cores, one fewer on three or
+more so the guest keeps a core, capped at 4 where the decoders turn
+memory-bound. `1` is the A/B control. Applied to the swizzled U4/U8 tile
 decoders, the swizzled U4 RGBA4 row decoder and PVRTC-I 4bpp.
 
 Measured on the R36S with `texture_smoke --bench`, 1 thread -> 3:

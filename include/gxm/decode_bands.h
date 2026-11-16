@@ -2,8 +2,11 @@
 #define GXM_DECODE_BANDS_H
 
 #include <pthread.h>
+#include <sched.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <unistd.h>
 
 #include "settings.h"
 
@@ -43,6 +46,27 @@ static void *gxm_band_thread(void *argument)
     return NULL;
 }
 
+/*
+ * CPUs this process may actually run on: the affinity mask, not the online
+ * count, so a pinned or containerised guest is not told the whole machine is
+ * available.
+ */
+static inline long gxm_decode_cpu_count(void)
+{
+#if defined(__linux__)
+    cpu_set_t allowed;
+
+    if (sched_getaffinity(0, sizeof(allowed), &allowed) == 0) {
+        int count = CPU_COUNT(&allowed);
+
+        if (count > 0)
+            return count;
+    }
+#endif
+
+    return sysconf(_SC_NPROCESSORS_ONLN);
+}
+
 static inline unsigned gxm_decode_worker_count(uint32_t width, uint32_t height, uint32_t alignment)
 {
     static int configured = -1;
@@ -50,13 +74,27 @@ static inline unsigned gxm_decode_worker_count(uint32_t width, uint32_t height, 
     unsigned workers;
 
     if (configured < 0) {
-        long value = vita2native_env_int("VITA2NATIVE_DECODE_THREADS", 3);
+        long cores = gxm_decode_cpu_count();
+        long value = vita2native_env_int("VITA2NATIVE_DECODE_THREADS", 0);
 
-        if (value < 1)
-            value = 1;
+        /*
+         * Default: on three cores or more, one worker per core except the one
+         * the guest keeps running its own threads on; on one or two there is no
+         * spare core to protect, and the decode still stalls the guest's render
+         * thread, so use them all. Capped where the decoder turns
+         * memory-bound.
+         */
+        if (value <= 0)
+            value = cores >= 3 ? cores - 1 : (cores > 0 ? cores : 1);
         if (value > GXM_DECODE_MAX_WORKERS)
             value = GXM_DECODE_MAX_WORKERS;
+        if (value < 1)
+            value = 1;
+
         configured = (int)value;
+        if (vita2native_env_flag("VITA2NATIVE_TRACE_TEXTURES"))
+            fprintf(stderr, "gxm: texture decode uses %d worker(s) of %ld allowed CPU(s)\n",
+                    configured, cores);
     }
 
     if (pixels < GXM_DECODE_MIN_PIXELS || alignment == 0)
