@@ -63,7 +63,22 @@ static const char *host_path(const char *path, char *buffer, size_t size)
 /* errno, TLS                                                                */
 /* ------------------------------------------------------------------------- */
 
-static int g_errno_storage;
+/*
+ * One errno per guest thread. Guest threads map one-to-one onto host threads,
+ * so host thread-local storage gives each caller its own value; a single
+ * global let two threads overwrite each other's errno.
+ */
+static __thread int g_errno_storage;
+
+/*
+ * Copies the host failure into the guest's errno. The libc wrappers call host
+ * functions, which set the host's thread-local errno, and nothing used to
+ * publish it - a failed fopen left guest errno at zero.
+ */
+static void guest_errno_capture(void)
+{
+    g_errno_storage = errno;
+}
 
 EXPORT(SceLibc, 0x9e248b76, int *, _sceLibcErrnoLoc, void)
 {
@@ -635,6 +650,8 @@ EXPORT(SceLibc, 0xfffbe239, FILE *, vita_fopen, const char *path, const char *mo
             fp = fopen(psarc_path, mode);
     }
 
+    if (!fp)
+        guest_errno_capture();
     vita_track_host_file(fp);
 
     if (trace_fileio())
@@ -647,6 +664,8 @@ EXPORT(SceLibc, 0xb2f318fe, FILE *, vita_fdopen, int fd, const char *mode)
 {
     FILE *fp = fdopen(fd, mode);
 
+    if (!fp)
+        guest_errno_capture();
     vita_track_host_file(fp);
     return fp;
 }
@@ -659,7 +678,13 @@ EXPORT(SceLibc, 0xec97321c, int, vita_fclose, FILE *stream)
         return 0;
 
     vita_untrack_host_file(stream);
-    return fclose(stream);
+    {
+        int result = fclose(stream);
+
+        if (result != 0)
+            guest_errno_capture();
+        return result;
+    }
 }
 
 EXPORT(SceLibc, 0x5aad2996, int, vita_fflush, FILE *stream)
@@ -668,7 +693,13 @@ EXPORT(SceLibc, 0x5aad2996, int, vita_fflush, FILE *stream)
         return fflush(NULL);
     if (!vita_is_host_file(stream))
         return 0;
-    return fflush(stream);
+    {
+        int result = fflush(stream);
+
+        if (result != 0)
+            guest_errno_capture();
+        return result;
+    }
 }
 
 EXPORT(SceLibc, 0xb31c73a9, size_t, vita_fread, void *buffer, size_t size, size_t count,
@@ -678,7 +709,13 @@ EXPORT(SceLibc, 0xb31c73a9, size_t, vita_fread, void *buffer, size_t size, size_
         LOG("fread(%p, %u, %u, %p)", buffer, (unsigned)size, (unsigned)count, (void *)stream);
     if (!vita_is_host_file(stream))
         return 0;
-    return fread(buffer, size, count, stream);
+    {
+        size_t read = fread(buffer, size, count, stream);
+
+        if (read < count && ferror(stream))
+            guest_errno_capture();
+        return read;
+    }
 }
 
 EXPORT(SceLibc, 0x8bcdcc4e, size_t, vita_fwrite, const void *buffer, size_t size, size_t count,
@@ -690,14 +727,26 @@ EXPORT(SceLibc, 0x8bcdcc4e, size_t, vita_fwrite, const void *buffer, size_t size
         vita_guest_stream_write(buffer, size * count);
         return count;
     }
-    return fwrite(buffer, size, count, stream);
+    {
+        size_t written = fwrite(buffer, size, count, stream);
+
+        if (written < count && ferror(stream))
+            guest_errno_capture();
+        return written;
+    }
 }
 
 EXPORT(SceLibc, 0xc3a7cde1, int, vita_fseek, FILE *stream, long offset, int whence)
 {
     if (!vita_is_host_file(stream))
         return -1;
-    return fseek(stream, offset, whence);
+    {
+        int result = fseek(stream, offset, whence);
+
+        if (result != 0)
+            guest_errno_capture();
+        return result;
+    }
 }
 
 EXPORT(SceLibc, 0x41c2af95, long, vita_ftell, FILE *stream)

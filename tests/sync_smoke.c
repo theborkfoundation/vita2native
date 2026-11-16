@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "modules/SceKernelThreadMgr.h"
 #include "modules/SceSysmem.h"
@@ -68,6 +69,26 @@ static void *handoff_worker(void *arg)
 
     handoff->result = sceKernelWaitSema(handoff->sema, 1, NULL);
     atomic_store(&handoff->ran, 1);
+    return NULL;
+}
+
+static uint64_t monotonic_ms(void)
+{
+    struct timespec now;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000ull + (uint64_t)now.tv_nsec / 1000000ull;
+}
+
+/* Signals a semaphore once, midway through someone else's wait: enough to wake
+   the waiter, not enough to satisfy it. */
+static void *half_signal_worker(void *arg)
+{
+    struct timespec delay = {0, 100 * 1000 * 1000};
+    SceUID sema = *(SceUID *)arg;
+
+    nanosleep(&delay, NULL);
+    sceKernelSignalSema(sema, 1);
     return NULL;
 }
 
@@ -153,6 +174,49 @@ int main(void)
     if (sceKernelDeleteEventFlag(evf) != 0) {
         puts("sync_smoke: delete evf failed");
         return 1;
+    }
+
+    /* --- a bounded wait keeps its deadline ----------------------------- */
+    /*
+     * The wait needs two counts and gets one after 100 ms. Recomputing the
+     * deadline on every wake (the old behaviour) made a 200 ms wait return at
+     * ~300 ms; the deadline is now fixed when the wait begins.
+     */
+    {
+        SceUID deadline_sema = sceKernelCreateSema("test-sema-deadline", 0, 0, 2, NULL);
+        uint64_t started;
+        uint64_t elapsed;
+        SceUInt timeout = 200000;
+        pthread_t signaller;
+        int waited;
+
+        if (deadline_sema < 0) {
+            puts("sync_smoke: create deadline sema failed");
+            return 1;
+        }
+
+        if (pthread_create(&signaller, NULL, half_signal_worker, &deadline_sema) != 0) {
+            puts("sync_smoke: could not create the signaller thread");
+            return 1;
+        }
+
+        started = monotonic_ms();
+        waited = sceKernelWaitSema(deadline_sema, 2, &timeout);
+        elapsed = monotonic_ms() - started;
+        pthread_join(signaller, NULL);
+
+        if (waited != SCE_KERNEL_ERROR_WAIT_TIMEOUT) {
+            printf("sync_smoke: insufficient signal returned 0x%x, expected timeout\n",
+                   (unsigned)waited);
+            return 1;
+        }
+        if (elapsed < 150 || elapsed > 280) {
+            printf("sync_smoke: 200 ms wait returned after %llu ms\n",
+                   (unsigned long long)elapsed);
+            return 1;
+        }
+
+        sceKernelDeleteSema(deadline_sema);
     }
 
     /* --- lightweight mutex --------------------------------------------- */

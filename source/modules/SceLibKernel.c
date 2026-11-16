@@ -120,33 +120,52 @@ EXPORT(SceLibKernel, 0x7595D9AA, int, sceKernelExitProcess, int res)
     return 0;
 }
 
-static const char *vita_io_open_flags_to_fopen_flags(int flags)
+/*
+ * Translates Vita open flags into open(2) flags plus the stdio mode that
+ * matches the descriptor's access. Going through open(2) is what preserves
+ * CREAT, EXCL, TRUNC and APPEND semantics: fopen's mode letters create files
+ * on their own, and "r+" on a write-only request hands out read access the
+ * guest never asked for.
+ */
+static bool vita_io_open_flags(int flags, int *host_flags, const char **stdio_mode)
 {
-    int access = flags & (SCE_O_RDONLY | SCE_O_WRONLY);
-    int read_only = access == SCE_O_RDONLY;
+    switch (flags & (SCE_O_RDONLY | SCE_O_WRONLY)) {
+    case SCE_O_RDONLY:
+        *host_flags = O_RDONLY;
+        *stdio_mode = "r";
+        break;
+    case SCE_O_WRONLY:
+        *host_flags = O_WRONLY;
+        *stdio_mode = (flags & SCE_O_APPEND) ? "a" : "w";
+        break;
+    case SCE_O_RDWR:
+        *host_flags = O_RDWR;
+        *stdio_mode = (flags & SCE_O_APPEND) ? "a+" : "r+";
+        break;
+    default:
+        return false;
+    }
 
-    if (access != SCE_O_RDONLY && access != SCE_O_WRONLY && access != SCE_O_RDWR)
-        return NULL;
-
-    if (flags & SCE_O_APPEND)
-        return read_only ? "a+" : (access == SCE_O_RDWR ? "a+" : "a");
-
+    if (flags & SCE_O_CREAT)
+        *host_flags |= O_CREAT;
+    if (flags & SCE_O_EXCL)
+        *host_flags |= O_EXCL;
     if (flags & SCE_O_TRUNC)
-        return read_only ? "w+" : (access == SCE_O_RDWR ? "w+" : "w");
+        *host_flags |= O_TRUNC;
+    if (flags & SCE_O_APPEND)
+        *host_flags |= O_APPEND;
 
-    /*
-     * CREAT without TRUNC must keep an existing file intact. Try to open it
-     * normally first; sceIoOpen retries with a creating mode on ENOENT.
-     */
-    return read_only ? "r" : "r+";
+    return true;
 }
 
 EXPORT(SceLibKernel, 0x6C60AC61, SceUID, sceIoOpen, const char *file, int flags, SceMode mode)
 {
     VitaOpenedFile *vfile;
-    const char *open_flags;
+    const char *stdio_mode;
     const char *host_file;
     char resolved[PATH_MAX];
+    int host_flags;
+    int descriptor;
     FILE *fp;
 
     if (host_fs_resolve_path(file, resolved, sizeof(resolved)) < 0) {
@@ -159,34 +178,26 @@ EXPORT(SceLibKernel, 0x6C60AC61, SceUID, sceIoOpen, const char *file, int flags,
     if (*host_file == '\0')
         return SCE_ERROR_ERRNO_ENODEV;
 
-    open_flags = vita_io_open_flags_to_fopen_flags(flags);
-    if (!open_flags)
+    if (!vita_io_open_flags(flags, &host_flags, &stdio_mode))
         return SCE_ERROR_ERRNO_EINVAL;
 
-    fp = fopen(host_file, open_flags);
-    if (!fp && (flags & SCE_O_CREAT) && errno == ENOENT) {
-        /* RDONLY|CREAT still needs a readable stream, hence w+. */
-        int access = flags & (SCE_O_RDONLY | SCE_O_WRONLY);
-        fp = fopen(host_file, access == SCE_O_WRONLY ? "w" : "w+");
-    }
-    if (!fp) {
+    descriptor = open(host_file, host_flags, (mode_t)(mode & 0777));
+    if (descriptor < 0) {
         if (vita2native_env_flag("VITA2NATIVE_TRACE_FILEIO"))
-            LOG("sceIoOpen(\"%s\") failed: %s (host \"%s\")", file ? file : "(null)",
+            LOG("sceIoOpen(\"%s\") open failed: %s (host \"%s\")", file ? file : "(null)",
                 strerror(errno), host_file);
-        if (file && strstr(file, "savedata") && vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG")) {
-            fprintf(stderr, "vita2native: sceIoOpen %s failed: %s (host %s)\n", file,
-                    strerror(errno), host_file);
-            fflush(stderr);
-        }
         return sce_error_from_errno(errno);
     }
 
+    fp = fdopen(descriptor, stdio_mode);
+    if (!fp) {
+        close(descriptor);
+        return sce_error_from_errno(errno);
+    }
     if (file && strstr(file, "savedata") && vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG")) {
         fprintf(stderr, "vita2native: sceIoOpen %s -> %s\n", file, host_file);
         fflush(stderr);
     }
-
-    (void)mode;
 
     vfile = malloc(sizeof(*vfile));
     if (!vfile) {
@@ -688,19 +699,23 @@ EXPORT(SceLibKernel, 0x52315AD7, SceSSize, sceIoPread, SceUID fd, void *buf, Sce
        SceOff offset)
 {
     VitaOpenedFile *vfile = get_opened_file_for_fd(fd);
-    long saved;
-    size_t read;
+    ssize_t read;
 
     if (!vfile)
         return SCE_ERROR_ERRNO_EBADF;
 
-    saved = ftell(vfile->fp);
-    if (fseek(vfile->fp, (long)offset, SEEK_SET) != 0)
-        return SCE_ERROR_ERRNO_EBADF;
+    /*
+     * pread(2) rather than fseek+fread: the Vita offset is 64-bit (casting it
+     * to long wrapped above 2 GiB) and it leaves the descriptor's position
+     * alone, so a concurrently read stream is not disturbed. Buffered writes
+     * have to reach the file first.
+     */
+    if (fflush(vfile->fp) != 0)
+        return sce_error_from_errno(errno);
 
-    read = fread(buf, 1, nbyte, vfile->fp);
-    if (saved >= 0)
-        fseek(vfile->fp, saved, SEEK_SET);
+    read = pread(fileno(vfile->fp), buf, nbyte, (off_t)offset);
+    if (read < 0)
+        return sce_error_from_errno(errno);
 
     if (vita2native_env_flag("VITA2NATIVE_TRACE_FILEIO"))
         LOG("sceIoPread(0x%x, %u, %lld) -> %d", fd, (unsigned)nbyte, (long long)offset,
@@ -713,20 +728,17 @@ EXPORT(SceLibKernel, 0x8FFFF5A8, SceSSize, sceIoPwrite, SceUID fd, const void *b
        SceOff offset)
 {
     VitaOpenedFile *vfile = get_opened_file_for_fd(fd);
-    long saved;
-    size_t written;
+    ssize_t written;
 
     if (!vfile)
         return SCE_ERROR_ERRNO_EBADF;
 
-    saved = ftell(vfile->fp);
-    if (fseek(vfile->fp, (long)offset, SEEK_SET) != 0)
-        return SCE_ERROR_ERRNO_EBADF;
+    if (fflush(vfile->fp) != 0)
+        return sce_error_from_errno(errno);
 
-    written = fwrite(buf, 1, nbyte, vfile->fp);
-    fflush(vfile->fp);
-    if (saved >= 0)
-        fseek(vfile->fp, saved, SEEK_SET);
+    written = pwrite(fileno(vfile->fp), buf, nbyte, (off_t)offset);
+    if (written < 0)
+        return sce_error_from_errno(errno);
 
     return (SceSSize)written;
 }
