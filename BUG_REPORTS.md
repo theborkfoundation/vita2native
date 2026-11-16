@@ -72,5 +72,5 @@ The deadlock and the discarded timeouts were fixed with #5 (`5f99b16`), but
 `sceKernelCancelMsgPipe` still only woke its waiters, which then tested their
 predicate again: a receive went back to sleep and a send could report success.
 Both now compare a cancellation generation and return
-`SCE_KERNEL_ERROR_WAIT_CANCEL` (`<see git log>`), the same rule semaphores and
+`SCE_KERNEL_ERROR_WAIT_CANCEL` (`84b572e`), the same rule semaphores and
 event flags follow.
