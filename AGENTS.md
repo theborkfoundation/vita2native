@@ -127,6 +127,46 @@ are the judgement that goes with those commands, not a second copy of them.
   `sceKernelCallAbortHandler`, which is the quickest way to place an abort in
   guest code.
 
+## Staging a title from Vita3K
+
+Vita3K's data directory on this machine holds both halves of a title: the
+installed application and the decrypted executables that were pulled out of its
+SELF containers.
+
+```
+~/Library/Application Support/Vita3K/Vita3K/
+  fs/ux0/app/<TITLEID>/              installed title: encrypted eboot.bin,
+                                     sce_module/, sce_sys/ and the assets
+  cache/decrypted_selfs/<TITLEID>/   decrypted eboot.bin, sce_module/*.suprx,
+                                     sce_sys/about/*.suprx
+```
+
+A runnable directory for a device needs the assets with the decrypted binary
+overlaid, because the loader reads a decrypted ELF and the app directory's copy
+is still encrypted:
+
+```sh
+V3K="$HOME/Library/Application Support/Vita3K/Vita3K"
+ID=PCSE01125                       # Shakedown: Hawaii; see PLAN.md for the list
+mkdir -p /tmp/stage-$ID
+cp -R  "$V3K/fs/ux0/app/$ID" /tmp/stage-$ID/
+cp -f  "$V3K/cache/decrypted_selfs/$ID/eboot.bin" /tmp/stage-$ID/$ID/
+cp -Rf "$V3K/cache/decrypted_selfs/$ID/sce_module/." /tmp/stage-$ID/$ID/sce_module/
+cp -Rf "$V3K/cache/decrypted_selfs/$ID/sce_sys/."    /tmp/stage-$ID/$ID/sce_sys/
+tar cf - -C /tmp/stage-$ID "$ID" | ssh opiz3 'tar xf - -C ~/tests/apps'
+```
+
+Notes that save time:
+
+- `decrypted_selfs/<ID>` alone is not enough — it is only the executable and its
+  modules (6 MB for Shakedown), while the assets are the bulk (125 MB).
+- The device directory name is the title ID and doubles as the savedata
+  namespace (`host_fs_title_id()`), so do not rename it to the game's name.
+- `sce_sys/about/right.suprx` comes from the decrypted tree as well; copying the
+  whole decrypted `sce_sys` over the app's one covers it.
+- If `fs/ux0/app/<ID>` is missing, the title is not installed in this Vita3K
+  profile — check the GUI's game list rather than assuming a path.
+
 ## Rendering traps
 
 - **A black panel with a healthy fps counter means every draw is being
