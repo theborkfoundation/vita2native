@@ -835,6 +835,10 @@ HostGpuDevice host_gfx_gl_create(const HostGpuConfig *config)
     LOAD_EGL(g, eglGetError);
     LOAD_EGL(g, eglBindAPI);
     LOAD_EGL(g, eglChooseConfig);
+    /* Optional: only the window presenter uses these, to find a config the
+       window's visual accepts. */
+    *(void **)(&g->eglGetConfigs) = dlsym(g->egl_lib, "eglGetConfigs");
+    *(void **)(&g->eglGetConfigAttrib) = dlsym(g->egl_lib, "eglGetConfigAttrib");
     LOAD_EGL(g, eglCreateContext);
     LOAD_EGL(g, eglDestroyContext);
     LOAD_EGL(g, eglCreatePbufferSurface);
@@ -1149,7 +1153,14 @@ static bool gles_create_present_program(HostGles *g)
         "void main() {\n"
         "    vec2 uv = v_uv;\n"
         "    if (u_flip > 0.5) uv.y = 1.0 - uv.y;\n"
-        "    o_color = texture(u_tex, uv);\n"
+        /*
+         * Alpha is forced to 1: the guest's render target keeps the alpha it
+         * blended with, and a window that is composited per pixel (the VNC X
+         * server is) would then blend the presented frame against black -
+         * Shakedown's white logo card came out dark, with only the opaque FPS
+         * overlay unaffected. The scanout path ignores alpha either way.
+         */
+        "    o_color = vec4(texture(u_tex, uv).rgb, 1.0);\n"
         "}\n";
     GLuint vertex = gles_compile_present_shader(g, GL_VERTEX_SHADER, vertex_source);
     GLuint fragment = 0;
@@ -1358,6 +1369,166 @@ int host_gfx_gl_attach_kms(HostGpuDevice device, int drm_fd, int width, int heig
     return 0;
 }
 
+/*
+ * The window's X visual id, read through a dlopen'd libX11.
+ *
+ * EGL refuses a window surface whose visual differs from the config's
+ * EGL_NATIVE_VISUAL_ID, and SDL creates the window with whatever visual its own
+ * backend picked. XVisualIDFromVisual() is used rather than reading the Visual
+ * struct, so the only layout this depends on is XWindowAttributes: six ints,
+ * then the Visual pointer, which holds for 32- and 64-bit.
+ */
+static int gxm_x11_ignore_error(void *display, void *event)
+{
+    (void)display;
+    (void)event;
+    return 0;
+}
+
+static bool gxm_x11_visual_id(const void *native_window, EGLint *visual_id)
+{
+    typedef void *(*x_open_display)(const char *);
+    typedef int (*x_get_window_attributes)(void *, unsigned long, void *);
+    typedef unsigned long (*x_visual_id_from_visual)(void *, const void *);
+    typedef int (*x_close_display)(void *);
+    typedef void *(*x_set_error_handler)(void *);
+    typedef char *(*x_display_string)(void *);
+
+    static bool resolved;
+    static void *library;
+    static x_open_display open_display;
+    static x_get_window_attributes get_window_attributes;
+    static x_visual_id_from_visual visual_id_from_visual;
+    static x_close_display close_display;
+    static x_set_error_handler set_error_handler;
+    static x_display_string display_string;
+
+    unsigned char attributes[256];
+    void *display;
+    void *visual;
+
+    if (!resolved) {
+        resolved = true;
+        library = dlopen("libX11.so.6", RTLD_NOW | RTLD_LOCAL);
+        if (library) {
+            *(void **)(&open_display) = dlsym(library, "XOpenDisplay");
+            *(void **)(&get_window_attributes) = dlsym(library, "XGetWindowAttributes");
+            *(void **)(&visual_id_from_visual) = dlsym(library, "XVisualIDFromVisual");
+            *(void **)(&close_display) = dlsym(library, "XCloseDisplay");
+            *(void **)(&set_error_handler) = dlsym(library, "XSetErrorHandler");
+            *(void **)(&display_string) = dlsym(library, "XDisplayString");
+        }
+    }
+
+    if (!open_display || !get_window_attributes || !visual_id_from_visual || !close_display)
+        return false;
+
+    /*
+     * A stale or foreign window id must not kill the process: Xlib's default
+     * handler exits on BadWindow.
+     */
+    if (set_error_handler)
+        set_error_handler(gxm_x11_ignore_error);
+
+    display = open_display(NULL);
+    if (!display)
+        return false;
+
+    if (vita2native_env_flag("VITA2NATIVE_DIRECT_PRESENT_DEBUG"))
+        fprintf(stderr, "vita2native: X display '%s', window 0x%lx\n",
+                display_string ? display_string(display) : "?",
+                (unsigned long)(uintptr_t)native_window);
+
+    memset(attributes, 0, sizeof(attributes));
+    if (!get_window_attributes(display, (unsigned long)(uintptr_t)native_window, attributes)) {
+        close_display(display);
+        return false;
+    }
+
+    memcpy(&visual, attributes + 24, sizeof(visual));
+    if (!visual) {
+        close_display(display);
+        return false;
+    }
+
+    *visual_id = (EGLint)visual_id_from_visual(display, visual);
+    close_display(display);
+    return true;
+}
+
+/*
+ * Creates a window surface, binding it on success.
+ *
+ * The config chosen for the GL device supports window surfaces in general, but
+ * a window surface must also use the same native visual as the window, and SDL
+ * creates the window with whichever visual its own backend picked. Asking for a
+ * surface with the device config therefore fails with EGL_BAD_MATCH (0x300b) on
+ * X11. Rather than mirror Xlib just to read the window's visual, try the device
+ * config first and then every window-capable config until one is accepted: the
+ * surface only carries the final blit, so it needs RGBA8 and nothing else.
+ */
+static EGLSurface gles_attach_window_surface(HostGles *g, void *native_window)
+{
+    EGLConfig candidates[64];
+    EGLint count = 0;
+    EGLint window_visual = 0;
+    bool have_visual = gxm_x11_visual_id(native_window, &window_visual);
+    EGLSurface surface;
+    EGLint i;
+
+    while (g->eglGetError() != EGL_SUCCESS) {
+    }
+
+    if (have_visual &&
+        vita2native_env_flag("VITA2NATIVE_DIRECT_PRESENT_DEBUG"))
+        fprintf(stderr, "vita2native: window visual 0x%x\n", (unsigned)window_visual);
+
+    surface = g->eglCreateWindowSurface(g->display, g->egl_config, native_window, NULL);
+    if (surface != EGL_NO_SURFACE) {
+        if (gl_thread_bind(g, surface) == 0)
+            return surface;
+        g->eglDestroySurface(g->display, surface);
+    }
+
+    if (!g->eglGetConfigs || !g->eglGetConfigAttrib ||
+        !g->eglGetConfigs(g->display, candidates, 64, &count))
+        return EGL_NO_SURFACE;
+
+    for (i = 0; i < count; i++) {
+        EGLint surface_type = 0, renderable = 0, red_size = 0, native_visual = 0;
+
+        if (!g->eglGetConfigAttrib(g->display, candidates[i], EGL_SURFACE_TYPE, &surface_type) ||
+            !(surface_type & EGL_WINDOW_BIT))
+            continue;
+        if (!g->eglGetConfigAttrib(g->display, candidates[i], EGL_RENDERABLE_TYPE, &renderable) ||
+            !(renderable & EGL_OPENGL_ES2_BIT))
+            continue;
+        if (!g->eglGetConfigAttrib(g->display, candidates[i], EGL_RED_SIZE, &red_size) ||
+            red_size < 8)
+            continue;
+        /* When the window's visual is known, only its config can work. */
+        if (have_visual) {
+            if (!g->eglGetConfigAttrib(g->display, candidates[i], EGL_NATIVE_VISUAL_ID,
+                                       &native_visual) ||
+                native_visual != window_visual)
+                continue;
+        }
+
+        while (g->eglGetError() != EGL_SUCCESS) {
+        }
+        surface = g->eglCreateWindowSurface(g->display, candidates[i], native_window, NULL);
+        if (surface == EGL_NO_SURFACE)
+            continue;
+        if (gl_thread_bind(g, surface) == 0) {
+            fprintf(stderr, "vita2native: window presented with a matching EGL config\n");
+            return surface;
+        }
+        g->eglDestroySurface(g->display, surface);
+    }
+
+    return EGL_NO_SURFACE;
+}
+
 int host_gfx_gl_attach_window(HostGpuDevice device, void *native_window)
 {
     HostGles *g = device->impl;
@@ -1373,16 +1544,9 @@ int host_gfx_gl_attach_window(HostGpuDevice device, void *native_window)
     while (g->glGetError() != GL_NO_ERROR) {
     }
 
-    surface = g->eglCreateWindowSurface(g->display, g->egl_config,
-                                        (EGLNativeWindowType)native_window, NULL);
+    surface = gles_attach_window_surface(g, native_window);
     if (surface == EGL_NO_SURFACE) {
-        fprintf(stderr, "vita2native: eglCreateWindowSurface failed: 0x%x\n", g->eglGetError());
-        return -1;
-    }
-
-    if (gl_thread_bind(g, surface) != 0) {
-        fprintf(stderr, "vita2native: eglMakeCurrent(window) failed: 0x%x\n", g->eglGetError());
-        g->eglDestroySurface(g->display, surface);
+        fprintf(stderr, "vita2native: no EGL config for this window's visual\n");
         return -1;
     }
 
@@ -1394,8 +1558,13 @@ int host_gfx_gl_attach_window(HostGpuDevice device, void *native_window)
     g_window_thread = pthread_self();
     g_window_thread_valid = true;
 
+    /*
+     * No vsync on a window: the guest already paces itself on vblank waits, and
+     * blocking the presenting thread in eglSwapBuffers costs frames (263 ms a
+     * frame through Xvnc's software swap, against 5 ms for the SDL blit).
+     */
     if (g->eglSwapInterval)
-        g->eglSwapInterval(g->display, 1);
+        g->eglSwapInterval(g->display, 0);
 
     return 0;
 }

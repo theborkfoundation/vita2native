@@ -110,6 +110,10 @@ struct HostVideo {
        surface instead of through a renderer readback. */
     bool gl_window;
     void *native_window;
+    /* Re-read on the video thread: SDL can replace the X window after first
+       reporting it, and attaching to the old id fails with BadWindow. */
+    bool native_window_ok;
+    uint64_t window_probe_at_ns;
 
     /* Debug overlay drawn by the direct-present GPU pass. */
     const void *overlay_pixels;
@@ -223,6 +227,37 @@ static bool video_init_video_subsystem(HostVideo *video)
 }
 
 /*
+ * Re-reads the window's native handle. Runs on the video thread, where SDL's
+ * video calls belong.
+ */
+static void video_capture_window_id(HostVideo *video)
+{
+    SDL_SysWMinfo info;
+
+    video->native_window = NULL;
+    video->native_window_ok = false;
+    if (!video->window)
+        return;
+
+    SDL_VERSION(&info.version);
+    if (!SDL_GetWindowWMInfo(video->window, &info))
+        return;
+
+    if (info.subsystem == SDL_SYSWM_X11)
+        video->native_window = (void *)(uintptr_t)info.info.x11.window;
+    else if (info.subsystem == SDL_SYSWM_WAYLAND)
+        video->native_window = info.info.wl.surface;
+    else
+        return;
+
+    video->native_window_ok = video->native_window != NULL;
+    if (video->native_window_ok &&
+        vita2native_env_flag("VITA2NATIVE_DIRECT_PRESENT_DEBUG"))
+        fprintf(stderr, "vita2native: window handle 0x%lx\n",
+                (unsigned long)(uintptr_t)video->native_window);
+}
+
+/*
  * True when the window's native handle can be given to EGL. The attach itself
  * happens on the presenting thread (see host_video_present_texture): EGL
  * surfaces belong to the thread whose context is current, and the window is
@@ -230,35 +265,21 @@ static bool video_init_video_subsystem(HostVideo *video)
  */
 static bool video_try_gl_window(HostVideo *video)
 {
-    SDL_SysWMinfo info;
     const char *driver;
 
     if (!vita2native_env_flag("VITA2NATIVE_EGL_WINDOW"))
         return false;
-    if (!video->window || !SDL_GetWindowWMInfo)
-        return false;
-
-    SDL_VERSION(&info.version);
-    if (!SDL_GetWindowWMInfo(video->window, &info))
-        return false;
-
-    if (info.subsystem == SDL_SYSWM_X11)
-        video->native_window = (void *)info.info.x11.window;
-    else if (info.subsystem == SDL_SYSWM_WAYLAND)
-        video->native_window = info.info.wl.surface;
-    else
-        return false;
-
-    if (!video->native_window)
+    if (!video->window)
         return false;
 
     /* EGL can only take these window types; anything else keeps the renderer. */
     driver = SDL_GetCurrentVideoDriver ? SDL_GetCurrentVideoDriver() : "";
-    if (!driver || strcmp(driver, "x11") != 0)
-        if (strcmp(driver, "wayland") != 0)
-            return false;
+    if (!driver || (strcmp(driver, "x11") != 0 && strcmp(driver, "wayland") != 0))
+        return false;
 
     video->gl_window = true;
+    video_capture_window_id(video);
+    fprintf(stderr, "vita2native: handing the window to EGL (%s video)\n", driver);
     return true;
 }
 
@@ -902,6 +923,20 @@ static void *video_thread(void *arg)
            controller stays responsive while the guest is busy. */
         video_sample_input(video);
 
+        /*
+         * An attach that has not succeeded yet needs a current window id: SDL
+         * can replace the X window, and the guest's presenting thread cannot
+         * ask SDL. Once a second is enough; frames in between use the renderer.
+         */
+        if (video->gl_window && !video->native_window_ok) {
+            uint64_t now = video_now_ns();
+
+            if (now >= video->window_probe_at_ns) {
+                video_capture_window_id(video);
+                video->window_probe_at_ns = now + 1000000000ull;
+            }
+        }
+
         if (video->window_closed) {
             fprintf(stderr, "vita2native: window closed, exiting\n");
             fflush(stderr);
@@ -1104,6 +1139,8 @@ bool host_video_present_texture(HostVideo *video, unsigned int texture, int widt
     if (!video || (!video->direct_present && !video->gl_window) || !texture || width <= 0 ||
         height <= 0)
         return false;
+    if (video->gl_window && !video->direct_present && !video->native_window_ok)
+        return false;
 
     device = host_gpu_current();
     if (!device)
@@ -1119,12 +1156,12 @@ bool host_video_present_texture(HostVideo *video, unsigned int texture, int widt
             fprintf(stderr, "vita2native: EGL %s attach failed\n",
                     video->direct_present ? "scanout" : "window");
             /*
-             * A window whose visual does not match the EGL config fails the
-             * same way every frame, so stop asking and let the caller keep
-             * using the SDL renderer rather than logging once per frame.
+             * Most likely the window was replaced since its id was read, so
+             * ask the video thread for a current one; frames until then go
+             * through the renderer.
              */
             if (!video->direct_present)
-                video->gl_window = false;
+                video->native_window_ok = false;
             return false;
         }
         video->egl_attached = true;
