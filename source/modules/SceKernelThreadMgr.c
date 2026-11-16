@@ -75,6 +75,8 @@ typedef struct {
     uint32_t tail;
     uint32_t send_waiters;
     uint32_t receive_waiters;
+    /* Bumped by CancelMsgPipe, so a woken waiter can tell it was cancelled. */
+    unsigned int cancel_generation;
     int refs;
     Mutex lock;
     CondVar not_empty;
@@ -1194,6 +1196,7 @@ static int msgpipe_send(VitaMsgPipeInfo *info, const void *message, unsigned int
     if (wait) {
         bool timed = timeout_us != 0;
         uint64_t deadline = timed ? host_monotonic_ns() + (uint64_t)timeout_us * 1000ull : 0;
+        unsigned int generation = info->cancel_generation;
 
         info->send_waiters++;
         while (info->capacity - info->used < size) {
@@ -1201,6 +1204,11 @@ static int msgpipe_send(VitaMsgPipeInfo *info, const void *message, unsigned int
                 info->send_waiters--;
                 mutexUnlock(&info->lock);
                 return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+            }
+            if (info->cancel_generation != generation) {
+                info->send_waiters--;
+                mutexUnlock(&info->lock);
+                return SCE_KERNEL_ERROR_WAIT_CANCEL;
             }
         }
         info->send_waiters--;
@@ -1233,6 +1241,7 @@ static int msgpipe_receive(VitaMsgPipeInfo *info, void *message, unsigned int si
     if (wait) {
         bool timed = timeout_us != 0;
         uint64_t deadline = timed ? host_monotonic_ns() + (uint64_t)timeout_us * 1000ull : 0;
+        unsigned int generation = info->cancel_generation;
 
         info->receive_waiters++;
         while (!info->used) {
@@ -1240,6 +1249,11 @@ static int msgpipe_receive(VitaMsgPipeInfo *info, void *message, unsigned int si
                 info->receive_waiters--;
                 mutexUnlock(&info->lock);
                 return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+            }
+            if (info->cancel_generation != generation) {
+                info->receive_waiters--;
+                mutexUnlock(&info->lock);
+                return SCE_KERNEL_ERROR_WAIT_CANCEL;
             }
         }
         info->receive_waiters--;
@@ -1450,6 +1464,12 @@ EXPORT(SceThreadmgr, 0xCE769C83, int, _sceKernelCancelMsgPipe, SceUID uid, int *
         *send_waiters = (int)info->send_waiters;
     if (receive_waiters)
         *receive_waiters = (int)info->receive_waiters;
+    /*
+     * Waiters compare this to the value they saw when they started, so the wake
+     * below makes them return WAIT_CANCEL instead of testing their predicate
+     * again.
+     */
+    info->cancel_generation++;
     condvarWakeAll(&info->not_empty);
     condvarWakeAll(&info->not_full);
     mutexUnlock(&info->lock);

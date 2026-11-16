@@ -66,10 +66,11 @@ are in the history of this file.
   64 KiB; a deliberate collision is possible in principle, though not by
   accident.
 
-## Left open
+## Cancellation, revisited
 
-- **Message-pipe cancellation (#5).** The deadlock and the discarded timeouts
-  are fixed, but `sceKernelCancelMsgPipe` still only resets the counts: a waiter
-  it wakes re-enters the ordinary predicate instead of returning
-  `SCE_KERNEL_ERROR_WAIT_CANCEL`. The same generation approach used for
-  semaphores and event flags (`cee80fd`) would close it.
+The deadlock and the discarded timeouts were fixed with #5 (`5f99b16`), but
+`sceKernelCancelMsgPipe` still only woke its waiters, which then tested their
+predicate again: a receive went back to sleep and a send could report success.
+Both now compare a cancellation generation and return
+`SCE_KERNEL_ERROR_WAIT_CANCEL` (`<see git log>`), the same rule semaphores and
+event flags follow.

@@ -111,6 +111,7 @@ int _sceKernelSendMsgPipeVector(SceUID uid, const void *vec, unsigned int count,
                                 void *result, unsigned int *timeout);
 int _sceKernelReceiveMsgPipeVector(SceUID uid, const void *vec, unsigned int count, int unk1,
                                    void *result, unsigned int *timeout);
+int _sceKernelCancelMsgPipe(SceUID uid, int *send_waiters, int *receive_waiters);
 int _sceKernelTryReceiveMsgPipeVector(SceUID uid, const void *vec, SceSize count, int unk1,
                                       void *result);
 int sceKernelGetLwMutexInfo(SceKernelLwMutexWork *work, VitaLwMutexInfo *info);
@@ -165,6 +166,36 @@ int sceKernelGetThreadEventInfo(SceUID id, void *info);
 int sceKernelWaitException(SceUInt32 unk0, SceUInt32 delay, SceUInt32 *timeout);
 int sceKernelWaitMultipleEvents(SceUInt32 unk0, SceUInt32 delay, SceUInt32 *timeout);
 int sceKernelSendSignal(SceUID thid);
+
+typedef struct {
+    SceUID pipe;
+    char byte;
+    unsigned int size;
+    atomic_int done;
+    int result;
+} PipeProbe;
+
+static void *pipe_receive_worker(void *arg)
+{
+    PipeProbe *probe = arg;
+    unsigned int result = 0;
+
+    probe->result = sceKernelReceiveMsgPipe(probe->pipe, &probe->byte, probe->size, 0, &result,
+                                            NULL);
+    atomic_store(&probe->done, 1);
+    return NULL;
+}
+
+static void *pipe_send_worker(void *arg)
+{
+    PipeProbe *probe = arg;
+    unsigned int result = 0;
+
+    probe->result = sceKernelSendMsgPipe(probe->pipe, &probe->byte, probe->size, 0, &result,
+                                         NULL);
+    atomic_store(&probe->done, 1);
+    return NULL;
+}
 
 int main(void)
 {
@@ -399,6 +430,76 @@ int main(void)
         REQUIRE(_sceKernelTryReceiveMsgPipeVector(mpp, (const void *)&receive_vector, 1, 0,
                                                   &result) == SCE_KERNEL_ERROR_MSG_PIPE_EMPTY,
                 "a try-receive on an empty pipe succeeded");
+    }
+
+    /* --- cancelling a blocked pipe operation cancels it ----------------- */
+    /*
+     * CancelMsgPipe used to wake the waiters only to have them test their
+     * predicate again: the receive went back to sleep and the send (if the
+     * cancel had made room) reported success. Both must report WAIT_CANCEL.
+     */
+    {
+        SceUID cancel_pipe = sceKernelCreateMsgPipe("cancel-mpp", 0, 0, 16, NULL);
+        PipeProbe probe;
+        pthread_t worker;
+        int send_waiters = 0, receive_waiters = 0;
+        int attempts;
+
+        REQUIRE(cancel_pipe >= 0, "could not create the cancel pipe");
+
+        probe.pipe = cancel_pipe;
+        probe.byte = 0;
+        probe.size = 4;
+        atomic_init(&probe.done, 0);
+        probe.result = -1;
+
+        REQUIRE(pthread_create(&worker, NULL, pipe_receive_worker, &probe) == 0,
+                "could not start the receiving worker");
+
+        /* Cancel once the waiter is registered; the call reports how many saw it. */
+        for (attempts = 0; attempts < 100 && receive_waiters != 1; attempts++) {
+            struct timespec delay = {0, 5 * 1000 * 1000};
+
+            nanosleep(&delay, NULL);
+            REQUIRE(_sceKernelCancelMsgPipe(cancel_pipe, &send_waiters, &receive_waiters) == 0,
+                    "cancelling the pipe failed");
+        }
+        REQUIRE(receive_waiters == 1, "the receiving worker never blocked");
+
+        pthread_join(worker, NULL);
+        REQUIRE(probe.result == SCE_KERNEL_ERROR_WAIT_CANCEL,
+                "a cancelled receive did not report WAIT_CANCEL");
+
+        /* A send blocked on a full pipe behaves the same way. */
+        {
+            char fill[16] = {0};
+            unsigned int result = 0;
+
+            REQUIRE(sceKernelSendMsgPipe(cancel_pipe, fill, sizeof(fill), 0, &result, NULL) == 0,
+                    "could not fill the pipe");
+
+            probe.size = 4;
+            atomic_init(&probe.done, 0);
+            probe.result = -1;
+            send_waiters = receive_waiters = 0;
+            REQUIRE(pthread_create(&worker, NULL, pipe_send_worker, &probe) == 0,
+                    "could not start the sending worker");
+
+            for (attempts = 0; attempts < 100 && send_waiters != 1; attempts++) {
+                struct timespec delay = {0, 5 * 1000 * 1000};
+
+                nanosleep(&delay, NULL);
+                REQUIRE(_sceKernelCancelMsgPipe(cancel_pipe, &send_waiters, &receive_waiters) == 0,
+                        "cancelling the full pipe failed");
+            }
+            REQUIRE(send_waiters == 1, "the sending worker never blocked");
+
+            pthread_join(worker, NULL);
+            REQUIRE(probe.result == SCE_KERNEL_ERROR_WAIT_CANCEL,
+                    "a cancelled send did not report WAIT_CANCEL");
+        }
+
+        REQUIRE(sceKernelDeleteMsgPipe(cancel_pipe) == 0, "could not delete the cancel pipe");
     }
 
     /* --- a blocking receive honours its timeout ------------------------ */
