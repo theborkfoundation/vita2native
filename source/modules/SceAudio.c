@@ -78,6 +78,39 @@ static void sleep_until(uint64_t deadline_ns)
         host_sleep_ns(deadline_ns - now);
 }
 
+/*
+ * Sizes the scratch buffer and queue for the port's current len and frequency.
+ *
+ * resample_port cannot produce more frames than the scratch holds, and the
+ * caller advances past the whole input buffer, so a scratch sized for the
+ * original configuration silently dropped most of a larger one after
+ * sceAudioOutSetConfig raised len or lowered the sample rate.
+ */
+static int audio_port_resize(AudioPort *p)
+{
+    size_t device_frames = (size_t)((double)p->len * AUDIO_DEVICE_FREQ / (double)p->freq) + 2;
+    int16_t *scratch = malloc(device_frames * 2 * sizeof(int16_t));
+    HostAudioPort *queue;
+
+    if (!scratch)
+        return -1;
+
+    queue = host_audio_port_create((int)(device_frames * 4));
+    if (!queue) {
+        free(scratch);
+        return -1;
+    }
+
+    /* Reconfiguring restarts the stream: whatever was queued is dropped. */
+    host_audio_port_destroy(p->queue);
+    free(p->scratch);
+    p->scratch = scratch;
+    p->scratch_frames = device_frames;
+    p->queue = queue;
+    p->queue_frames = device_frames * 4;
+    return 0;
+}
+
 static AudioPort *get_port(int port)
 {
     if (port < 0 || port >= AUDIO_MAX_PORTS || !g_ports[port].used)
@@ -241,17 +274,9 @@ EXPORT(SceAudio, 0x5BC341E4, int, sceAudioOutOpenPort, SceAudioOutPortType type,
     p->volume[1] = SCE_AUDIO_OUT_MAX_VOL;
     p->queue_frames = device_frames * 4;
 
-    if (g_audio_ready) {
-        p->scratch_frames = device_frames + 2;
-        p->scratch = malloc(p->scratch_frames * 2 * sizeof(int16_t));
-        if (p->scratch)
-            p->queue = host_audio_port_create((int)p->queue_frames);
-        if (!p->scratch || !p->queue) {
-            host_audio_port_destroy(p->queue);
-            free(p->scratch);
-            memset(p, 0, sizeof(*p));
-            return SCE_AUDIO_OUT_ERROR_OUT_OF_MEMORY;
-        }
+    if (g_audio_ready && audio_port_resize(p) != 0) {
+        memset(p, 0, sizeof(*p));
+        return SCE_AUDIO_OUT_ERROR_OUT_OF_MEMORY;
     }
 
     p->used = true;
@@ -447,6 +472,9 @@ EXPORT(SceAudio, 0xB8BA0D07, int, sceAudioOutSetConfig, int port, SceSize len, i
         p->mode = mode;
         p->channels = mode == SCE_AUDIO_OUT_MODE_STEREO ? 2 : 1;
     }
+
+    if (g_audio_ready && audio_port_resize(p) != 0)
+        return SCE_AUDIO_OUT_ERROR_OUT_OF_MEMORY;
 
     return 0;
 }

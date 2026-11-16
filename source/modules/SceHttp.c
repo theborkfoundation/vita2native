@@ -778,6 +778,17 @@ static int perform_request(HttpRequest *request, const void *post_data, unsigned
                 memcpy(value, length_header, copy);
                 value[copy] = '\0';
                 declared = strtoull(value, NULL, 10);
+                /*
+                 * A body shorter than the declared length means the peer
+                 * closed early. Reporting success here let a caller save an
+                 * incomplete download as if it had finished.
+                 */
+                if ((unsigned long long)body_length < declared) {
+                    ret = SCE_HTTP_ERROR_NETWORK;
+                    free(headers);
+                    request->response_headers = NULL;
+                    goto done;
+                }
                 if (declared < body_length)
                     body_length = (size_t)declared;
                 request->response_content_length = declared;

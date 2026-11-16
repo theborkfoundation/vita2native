@@ -75,7 +75,39 @@ static bool entry_name_is_safe(const char *name)
     return true;
 }
 
-static int write_stamp(const char *dest_dir, const struct stat *st)
+/*
+ * Fingerprint of the archive's first and last 64 KiB.
+ *
+ * The stamp used to hold only the size and the modification time in whole
+ * seconds. Two different VPKs can agree on both, and the second then ran with
+ * the first one's extracted assets. Hashing the ends of the file separates them
+ * without reading gigabytes.
+ */
+static unsigned int archive_fingerprint(const char *path)
+{
+    unsigned char chunk[64 * 1024];
+    unsigned int hash = 2166136261u;
+    size_t got;
+    FILE *fp = fopen(path, "rb");
+
+    if (!fp)
+        return 0;
+
+    got = fread(chunk, 1, sizeof(chunk), fp);
+    for (size_t i = 0; i < got; i++)
+        hash = (hash ^ chunk[i]) * 16777619u;
+
+    if (fseek(fp, -(long)sizeof(chunk), SEEK_END) == 0) {
+        got = fread(chunk, 1, sizeof(chunk), fp);
+        for (size_t i = 0; i < got; i++)
+            hash = (hash ^ chunk[i]) * 16777619u;
+    }
+
+    fclose(fp);
+    return hash;
+}
+
+static int write_stamp(const char *dest_dir, const char *archive, const struct stat *st)
 {
     char path[PATH_MAX];
     FILE *fp;
@@ -87,13 +119,14 @@ static int write_stamp(const char *dest_dir, const struct stat *st)
     if (!fp)
         return -1;
 
-    fprintf(fp, "v2 %lld %lld\n", (long long)st->st_size, (long long)st->st_mtime);
+    fprintf(fp, "v3 %lld %lld %u\n", (long long)st->st_size, (long long)st->st_mtime,
+            archive_fingerprint(archive));
     fclose(fp);
 
     return 0;
 }
 
-static bool stamp_matches(const char *dest_dir, const struct stat *st)
+static bool stamp_matches(const char *dest_dir, const char *archive, const struct stat *st)
 {
     char path[PATH_MAX];
     char expected[64];
@@ -110,8 +143,8 @@ static bool stamp_matches(const char *dest_dir, const struct stat *st)
 
     if (fgets(line, sizeof(line), fp)) {
         line[strcspn(line, "\r\n")] = '\0';
-        snprintf(expected, sizeof(expected), "v2 %lld %lld",
-                 (long long)st->st_size, (long long)st->st_mtime);
+        snprintf(expected, sizeof(expected), "v3 %lld %lld %u", (long long)st->st_size,
+                 (long long)st->st_mtime, archive_fingerprint(archive));
         match = strcmp(line, expected) == 0;
     }
 
@@ -179,7 +212,7 @@ int vpk_extract(const char *vpk_path, const char *dest_dir)
     if (stat(vpk_path, &st) != 0)
         return -1;
 
-    if (stamp_matches(dest_dir, &st))
+    if (stamp_matches(dest_dir, vpk_path, &st))
         return 0;
 
     /* The destination is shared by every VPK run from this working directory.
@@ -231,7 +264,7 @@ int vpk_extract(const char *vpk_path, const char *dest_dir)
         }
     }
 
-    write_stamp(dest_dir, &st);
+    write_stamp(dest_dir, vpk_path, &st);
     ret = 0;
 
 done:

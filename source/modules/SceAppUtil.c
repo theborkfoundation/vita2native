@@ -91,10 +91,25 @@ static int slot_param_path(unsigned int slot_id, char *out, size_t out_size)
     return host_fs_resolve_path(vita_path, out, out_size);
 }
 
+/* The closest Vita error for a host write failure. */
+static int save_error_from_errno(int error)
+{
+    switch (error) {
+    case ENOSPC:
+        return SCE_APPUTIL_ERROR_SAVEDATA_NO_SPACE_FS;
+    case EACCES:
+    case EROFS:
+        return SCE_APPUTIL_ERROR_NO_PERMISSION;
+    default:
+        return SCE_APPUTIL_ERROR_NO_MEMORY;
+    }
+}
+
 static int write_slot_param(unsigned int slot_id, const SceAppUtilSaveDataSlotParam *param)
 {
     char path[PATH_MAX];
     FILE *file;
+    int error = 0;
 
     if (!param || slot_param_path(slot_id, path, sizeof(path)) != 0)
         return SCE_APPUTIL_ERROR_PARAMETER;
@@ -102,12 +117,14 @@ static int write_slot_param(unsigned int slot_id, const SceAppUtilSaveDataSlotPa
     create_parent_dirs(path);
     file = fopen(path, "wb");
     if (!file)
-        return SCE_APPUTIL_ERROR_NO_MEMORY;
+        return save_error_from_errno(errno);
 
-    fwrite(param, 1, sizeof(*param), file);
-    fclose(file);
+    if (fwrite(param, 1, sizeof(*param), file) != sizeof(*param))
+        error = errno ? errno : EIO;
+    if (fclose(file) != 0 && !error)
+        error = errno ? errno : EIO;
 
-    return 0;
+    return error ? save_error_from_errno(error) : 0;
 }
 
 int SceAppUtil_read_slot_param(unsigned int slot_id, SceAppUtilSaveDataSlotParam *param)
@@ -304,22 +321,45 @@ EXPORT(SceAppUtil, 0x607647BA, int, sceAppUtilSaveDataDataSave, SceAppUtilSaveDa
             continue;
         }
 
+        if (files[i].offset < 0) {
+            if (save_debug())
+                fprintf(stderr, "vita2native: SaveDataDataSave negative offset %lld\n",
+                        (long long)files[i].offset);
+            return SCE_APPUTIL_ERROR_PARAMETER;
+        }
+
         {
             /* Mode 1 truncates, mode 0 writes at the given offset. */
             const char *open_mode = mode == 1 ? "wb" : "r+b";
             FILE *file = fopen(path, open_mode);
+            int error = 0;
 
             if (!file && mode != 1)
                 file = fopen(path, "w+b");
             if (!file) {
                 if (save_debug())
                     fprintf(stderr, "vita2native: SaveDataDataSave fopen %s failed\n", path);
-                return SCE_APPUTIL_ERROR_NO_MEMORY;
+                return save_error_from_errno(errno);
             }
 
-            if (fseek(file, (long)files[i].offset, SEEK_SET) == 0)
-                fwrite(files[i].buf, 1, files[i].bufSize, file);
-            fclose(file);
+            /*
+             * A save is only complete when the bytes are in the file: report
+             * the seek, short write and close failures instead of telling the
+             * game the slot was written.
+             */
+            if (fseek(file, (long)files[i].offset, SEEK_SET) != 0)
+                error = errno ? errno : EIO;
+            else if (fwrite(files[i].buf, 1, files[i].bufSize, file) != files[i].bufSize)
+                error = errno ? errno : EIO;
+            if (fclose(file) != 0 && !error)
+                error = errno ? errno : EIO;
+
+            if (error) {
+                if (save_debug())
+                    fprintf(stderr, "vita2native: SaveDataDataSave %s failed: %s\n", path,
+                            strerror(error));
+                return save_error_from_errno(error);
+            }
             if (save_debug()) {
                 fprintf(stderr, "vita2native: SaveDataDataSave wrote %s (%u bytes)\n", path,
                         (unsigned)files[i].bufSize);
@@ -328,8 +368,12 @@ EXPORT(SceAppUtil, 0x607647BA, int, sceAppUtilSaveDataDataSave, SceAppUtilSaveDa
         }
     }
 
-    if (slot && slot->slotParam)
-        write_slot_param(slot->id, slot->slotParam);
+    if (slot && slot->slotParam) {
+        int error = write_slot_param(slot->id, slot->slotParam);
+
+        if (error)
+            return error;
+    }
 
     return 0;
 }
