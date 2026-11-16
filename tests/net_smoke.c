@@ -32,6 +32,9 @@ int sceNetShowIfconfig(void *buffer, int length);
 int sceNetShowRoute(void);
 int sceNetShowNetstat(void);
 int sceNetSocketAbort(int s, int flags);
+int sceNetSetsockopt(int s, int level, int name, const void *value, unsigned int length);
+int sceNetRecv(int s, void *buf, unsigned int len, int flags);
+int *sceNetErrnoLoc(void);
 int sceNetDumpCreate(const char *name, int length, int flags);
 int sceNetDumpRead(int id, void *buffer, int length, int *flags);
 int sceNetDumpDestroy(int id);
@@ -226,6 +229,29 @@ int main(void)
         REQUIRE(sceNetCtlAdhocGetInAddr(&adhoc_addr) == 0, "AdhocGetInAddr failed");
         REQUIRE(adhoc_addr.s_addr == 0, "adhoc returned an address");
         sceNetCtlTerm();
+    }
+
+    /* --- a failed call publishes the Vita errno ------------------------ */
+    /*
+     * The host's EAGAIN is 11 while SCE_NET_EAGAIN is 35, and guests branch on
+     * the Vita value: a nonblocking receive on an empty socket must report it.
+     */
+    {
+        int errno_socket = sceNetSocket("errno", SCE_NET_AF_INET, SCE_NET_SOCK_DGRAM, 0);
+        int nonblocking = 1;
+        char byte = 0;
+        int result;
+
+        REQUIRE(errno_socket >= 0, "could not create the errno socket");
+
+        /* MSG_DONTWAIT is enough here; SO_NBIO is not part of this surface. */
+        (void)nonblocking;
+        result = sceNetRecv(errno_socket, &byte, 1, SCE_NET_MSG_DONTWAIT);
+        REQUIRE(result < 0, "an empty nonblocking socket reported data");
+        REQUIRE(*sceNetErrnoLoc() == SCE_NET_EAGAIN,
+                "a nonblocking receive did not report the Vita EAGAIN");
+
+        sceNetSocketClose(errno_socket);
     }
 
     puts("net_smoke: ok");

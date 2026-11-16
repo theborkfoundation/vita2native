@@ -9695,6 +9695,51 @@ static ptrdiff_t gxm_transfer_row(int32_t stride, uint32_t row)
     return (ptrdiff_t)stride * (ptrdiff_t)row;
 }
 
+static uint32_t gxm_transfer_read_pixel(const uint8_t *pixel, uint32_t bpp)
+{
+    switch (bpp) {
+    case 1:
+        return pixel[0];
+    case 2: {
+        uint16_t value;
+
+        memcpy(&value, pixel, sizeof(value));
+        return value;
+    }
+    case 3:
+        return (uint32_t)pixel[0] | ((uint32_t)pixel[1] << 8) | ((uint32_t)pixel[2] << 16);
+    default: {
+        uint32_t value;
+
+        memcpy(&value, pixel, sizeof(value));
+        return value;
+    }
+    }
+}
+
+static void gxm_transfer_write_pixel(uint8_t *pixel, uint32_t bpp, uint32_t value)
+{
+    switch (bpp) {
+    case 1:
+        pixel[0] = (uint8_t)value;
+        break;
+    case 2: {
+        uint16_t half = (uint16_t)value;
+
+        memcpy(pixel, &half, sizeof(half));
+        break;
+    }
+    case 3:
+        pixel[0] = (uint8_t)value;
+        pixel[1] = (uint8_t)(value >> 8);
+        pixel[2] = (uint8_t)(value >> 16);
+        break;
+    default:
+        memcpy(pixel, &value, sizeof(value));
+        break;
+    }
+}
+
 EXPORT(SceGxm, 0x69DDFF5E, int, sceGxmTransferFill, uint32_t color,
        SceGxmTransferFormat destFormat, void *destAddress, uint32_t destX, uint32_t destY,
        uint32_t destWidth, uint32_t destHeight, int32_t destStride, SceGxmSyncObject *syncObject,
@@ -9752,16 +9797,25 @@ EXPORT(SceGxm, 0x62312BF8, int, sceGxmTransferCopy, uint32_t width, uint32_t hei
     uint32_t src_bpp = gxm_transfer_bpp(srcFormat);
     uint32_t dst_bpp = gxm_transfer_bpp(destFormat);
 
-    (void)colorKeyValue;
-    (void)colorKeyMask;
-    (void)colorKeyMode;
-    (void)srcType;
-    (void)destType;
     (void)syncObject;
     (void)syncFlags;
 
     if (!srcAddress || !destAddress || !width || !height)
         return SCE_GXM_ERROR_INVALID_POINTER;
+
+    /*
+     * Only linear-to-linear copies are implemented. Say so rather than running
+     * a row copy over tiled or swizzled addresses, which silently produced
+     * correct-looking success with wrong data.
+     */
+    if (srcType != SCE_GXM_TRANSFER_LINEAR || destType != SCE_GXM_TRANSFER_LINEAR)
+        return SCE_GXM_ERROR_UNSUPPORTED;
+    if (colorKeyMode != SCE_GXM_TRANSFER_COLORKEY_NONE &&
+        colorKeyMode != SCE_GXM_TRANSFER_COLORKEY_PASS &&
+        colorKeyMode != SCE_GXM_TRANSFER_COLORKEY_REJECT)
+        return SCE_GXM_ERROR_INVALID_VALUE;
+    if (src_bpp != dst_bpp)
+        return SCE_GXM_ERROR_INVALID_VALUE;
 
     gxm_ds_note_read(srcAddress);
     gxm_ds_note_write(destAddress);
@@ -9775,10 +9829,26 @@ EXPORT(SceGxm, 0x62312BF8, int, sceGxmTransferCopy, uint32_t width, uint32_t hei
         uint8_t *dst = (uint8_t *)destAddress +
                        gxm_transfer_row(destStride, destY + y) + (size_t)destX * dst_bpp;
 
-        if (src_bpp == dst_bpp)
+        if (colorKeyMode == SCE_GXM_TRANSFER_COLORKEY_NONE) {
             memcpy(dst, src, (size_t)width * src_bpp);
-        else
-            return SCE_GXM_ERROR_INVALID_VALUE;
+            continue;
+        }
+
+        /*
+         * PASS copies only pixels that match the key, REJECT copies only those
+         * that do not; the comparison is (value & mask) == key, as the hardware
+         * does it.
+         */
+        for (uint32_t x = 0; x < width; x++) {
+            uint32_t value = gxm_transfer_read_pixel(src + (size_t)x * src_bpp, src_bpp);
+            bool matches = (value & colorKeyMask) == colorKeyValue;
+
+            if (colorKeyMode == SCE_GXM_TRANSFER_COLORKEY_PASS && !matches)
+                continue;
+            if (colorKeyMode == SCE_GXM_TRANSFER_COLORKEY_REJECT && matches)
+                continue;
+            gxm_transfer_write_pixel(dst + (size_t)x * dst_bpp, dst_bpp, value);
+        }
     }
 
     gxm_transfer_signal(notification);

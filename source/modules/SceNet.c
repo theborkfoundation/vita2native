@@ -24,6 +24,92 @@
 
 #include "module.h"
 
+/*
+ * Vita numbers its network errors differently from Linux: EAGAIN is 35 against
+ * the host's 11, EINPROGRESS 36 against 115, and so on. Guests branch on these
+ * values, so a failed operation has to publish the Vita number rather than
+ * whatever errno the host happened to set. The value is per guest thread.
+ */
+static __thread int g_net_errno;
+
+static int net_errno_from_host(int error)
+{
+    switch (error) {
+    case EAGAIN:
+        return SCE_NET_EAGAIN;
+    case EINPROGRESS:
+        return SCE_NET_EINPROGRESS;
+    case EALREADY:
+        return SCE_NET_EALREADY;
+    case ENOTSOCK:
+        return SCE_NET_ENOTSOCK;
+    case EDESTADDRREQ:
+        return SCE_NET_EDESTADDRREQ;
+    case EMSGSIZE:
+        return SCE_NET_EMSGSIZE;
+    case EPROTOTYPE:
+        return SCE_NET_EPROTOTYPE;
+    case ENOPROTOOPT:
+        return SCE_NET_ENOPROTOOPT;
+    case EPROTONOSUPPORT:
+        return SCE_NET_EPROTONOSUPPORT;
+    case EOPNOTSUPP:
+        return SCE_NET_EOPNOTSUPP;
+    case EAFNOSUPPORT:
+        return SCE_NET_EAFNOSUPPORT;
+    case EADDRINUSE:
+        return SCE_NET_EADDRINUSE;
+    case EADDRNOTAVAIL:
+        return SCE_NET_EADDRNOTAVAIL;
+    case ENETDOWN:
+        return SCE_NET_ENETDOWN;
+    case ENETUNREACH:
+        return SCE_NET_ENETUNREACH;
+    case ECONNABORTED:
+        return SCE_NET_ECONNABORTED;
+    case ECONNRESET:
+        return SCE_NET_ECONNRESET;
+    case ENOBUFS:
+        return SCE_NET_ENOBUFS;
+    case EISCONN:
+        return SCE_NET_EISCONN;
+    case ENOTCONN:
+        return SCE_NET_ENOTCONN;
+    case ETIMEDOUT:
+        return SCE_NET_ETIMEDOUT;
+    case ECONNREFUSED:
+        return SCE_NET_ECONNREFUSED;
+    case EHOSTUNREACH:
+        return SCE_NET_EHOSTUNREACH;
+    case EPIPE:
+        return SCE_NET_EPIPE;
+    default:
+        return error;
+    }
+}
+
+/* A host call failed: publish its error. */
+static int net_fail_host(void)
+{
+    g_net_errno = net_errno_from_host(errno);
+    return -1;
+}
+
+/* A call was rejected before reaching the host. */
+static int net_fail_arg(void)
+{
+    g_net_errno = SCE_NET_EINVAL;
+    return -1;
+}
+
+/* Passes a host result through, publishing the error from a failure. */
+static int net_result(int result)
+{
+    if (result < 0)
+        g_net_errno = net_errno_from_host(errno);
+    return result;
+}
+
 static SceNetSockaddr *host_to_sce_addr(const struct sockaddr *src, SceNetSockaddr *dst,
                                         unsigned int *dstlen)
 {
@@ -47,7 +133,7 @@ static int sce_to_host_addr(const SceNetSockaddr *src, struct sockaddr_storage *
                             socklen_t *dstlen)
 {
     if (!src)
-        return -1;
+        return net_fail_arg();
 
     memset(dst, 0, sizeof(*dst));
 
@@ -61,7 +147,7 @@ static int sce_to_host_addr(const SceNetSockaddr *src, struct sockaddr_storage *
         return 0;
     }
 
-    return -1;
+    return net_fail_arg();
 }
 
 static int sce_to_host_flags(int flags)
@@ -116,7 +202,7 @@ static int sce_to_host_sockopt(int level, int name, int *host_level, int *host_n
         }
     }
 
-    return -1;
+    return net_fail_arg();
 }
 
 EXPORT(SceNet, 0xEB03E265, int, sceNetInit, SceNetInitParam *param)
@@ -139,12 +225,12 @@ EXPORT(SceNet, 0xF084FCE3, int, sceNetSocket, const char *name, int domain, int 
     (void)name;
 
     fd = socket(domain, type, protocol);
-    return fd < 0 ? -1 : fd;
+    return fd < 0 ? net_fail_host() : fd;
 }
 
 EXPORT(SceNet, 0x29822B4D, int, sceNetSocketClose, int s)
 {
-    return close(s) < 0 ? -1 : 0;
+    return close(s) < 0 ? net_fail_host() : 0;
 }
 
 EXPORT(SceNet, 0x11E5B6F6, int, sceNetConnect, int s, const SceNetSockaddr *name,
@@ -155,9 +241,9 @@ EXPORT(SceNet, 0x11E5B6F6, int, sceNetConnect, int s, const SceNetSockaddr *name
 
     (void)namelen;
     if (sce_to_host_addr(name, &addr, &addrlen) < 0)
-        return -1;
+        return net_fail_arg();
 
-    return connect(s, (const struct sockaddr *)&addr, addrlen) < 0 ? -1 : 0;
+    return connect(s, (const struct sockaddr *)&addr, addrlen) < 0 ? net_fail_host() : 0;
 }
 
 EXPORT(SceNet, 0x1296A94B, int, sceNetBind, int s, const SceNetSockaddr *addr,
@@ -168,14 +254,14 @@ EXPORT(SceNet, 0x1296A94B, int, sceNetBind, int s, const SceNetSockaddr *addr,
 
     (void)addrlen;
     if (sce_to_host_addr(addr, &host_addr, &host_len) < 0)
-        return -1;
+        return net_fail_arg();
 
-    return bind(s, (const struct sockaddr *)&host_addr, host_len) < 0 ? -1 : 0;
+    return bind(s, (const struct sockaddr *)&host_addr, host_len) < 0 ? net_fail_host() : 0;
 }
 
 EXPORT(SceNet, 0x7A8DA094, int, sceNetListen, int s, int backlog)
 {
-    return listen(s, backlog) < 0 ? -1 : 0;
+    return listen(s, backlog) < 0 ? net_fail_host() : 0;
 }
 
 EXPORT(SceNet, 0x1ADF9BB1, int, sceNetAccept, int s, SceNetSockaddr *addr,
@@ -183,10 +269,10 @@ EXPORT(SceNet, 0x1ADF9BB1, int, sceNetAccept, int s, SceNetSockaddr *addr,
 {
     struct sockaddr_storage host_addr;
     socklen_t host_len = sizeof(host_addr);
-    int fd = accept(s, (struct sockaddr *)&host_addr, &host_len);
+    int fd = net_result(accept(s, (struct sockaddr *)&host_addr, &host_len));
 
     if (fd < 0)
-        return -1;
+        return net_fail_host();
 
     if (addr && addrlen) {
         unsigned int len;
@@ -200,12 +286,12 @@ EXPORT(SceNet, 0x1ADF9BB1, int, sceNetAccept, int s, SceNetSockaddr *addr,
 
 EXPORT(SceNet, 0x023643B7, int, sceNetRecv, int s, void *buf, unsigned int len, int flags)
 {
-    return recv(s, buf, len, sce_to_host_flags(flags));
+    return net_result(recv(s, buf, len, sce_to_host_flags(flags)));
 }
 
 EXPORT(SceNet, 0xE3DD8CD9, int, sceNetSend, int s, const void *msg, unsigned int len, int flags)
 {
-    return send(s, msg, len, sce_to_host_flags(flags));
+    return net_result(send(s, msg, len, sce_to_host_flags(flags)));
 }
 
 EXPORT(SceNet, 0xB226138B, int, sceNetRecvfrom, int s, void *buf, unsigned int len, int flags,
@@ -213,8 +299,8 @@ EXPORT(SceNet, 0xB226138B, int, sceNetRecvfrom, int s, void *buf, unsigned int l
 {
     struct sockaddr_storage host_addr;
     socklen_t host_len = sizeof(host_addr);
-    int result = recvfrom(s, buf, len, sce_to_host_flags(flags),
-                          (struct sockaddr *)&host_addr, &host_len);
+    int result = net_result(recvfrom(s, buf, len, sce_to_host_flags(flags),
+                                     (struct sockaddr *)&host_addr, &host_len));
 
     if (result < 0)
         return result;
@@ -237,15 +323,15 @@ EXPORT(SceNet, 0x52DB31D5, int, sceNetSendto, int s, const void *msg, unsigned i
 
     (void)tolen;
     if (sce_to_host_addr(to, &host_addr, &host_len) < 0)
-        return -1;
+        return net_fail_arg();
 
-    return sendto(s, msg, len, sce_to_host_flags(flags), (const struct sockaddr *)&host_addr,
-                  host_len);
+    return net_result(sendto(s, msg, len, sce_to_host_flags(flags),
+                             (const struct sockaddr *)&host_addr, host_len));
 }
 
 EXPORT(SceNet, 0x69E50BB5, int, sceNetShutdown, int s, int how)
 {
-    return shutdown(s, how) < 0 ? -1 : 0;
+    return shutdown(s, how) < 0 ? net_fail_host() : 0;
 }
 
 EXPORT(SceNet, 0x065505CA, int, sceNetSetsockopt, int s, int level, int optname,
@@ -255,9 +341,9 @@ EXPORT(SceNet, 0x065505CA, int, sceNetSetsockopt, int s, int level, int optname,
     int host_name;
 
     if (sce_to_host_sockopt(level, optname, &host_level, &host_name) < 0)
-        return -1;
+        return net_fail_arg();
 
-    return setsockopt(s, host_level, host_name, optval, optlen) < 0 ? -1 : 0;
+    return setsockopt(s, host_level, host_name, optval, optlen) < 0 ? net_fail_host() : 0;
 }
 
 EXPORT(SceNet, 0xBA652062, int, sceNetGetsockopt, int s, int level, int optname, void *optval,
@@ -268,11 +354,11 @@ EXPORT(SceNet, 0xBA652062, int, sceNetGetsockopt, int s, int level, int optname,
     socklen_t host_len;
 
     if (sce_to_host_sockopt(level, optname, &host_level, &host_name) < 0)
-        return -1;
+        return net_fail_arg();
 
     host_len = optlen ? (socklen_t)*optlen : 0;
     if (getsockopt(s, host_level, host_name, optval, &host_len) < 0)
-        return -1;
+        return net_fail_host();
 
     if (optlen)
         *optlen = host_len;
@@ -286,7 +372,7 @@ EXPORT(SceNet, 0x1C66A6DB, int, sceNetGetsockname, int s, SceNetSockaddr *name,
     socklen_t host_len = sizeof(host_addr);
 
     if (getsockname(s, (struct sockaddr *)&host_addr, &host_len) < 0)
-        return -1;
+        return net_fail_host();
 
     if (name && namelen)
         host_to_sce_addr((const struct sockaddr *)&host_addr, name, namelen);
@@ -300,7 +386,7 @@ EXPORT(SceNet, 0x2348D353, int, sceNetGetpeername, int s, SceNetSockaddr *name,
     socklen_t host_len = sizeof(host_addr);
 
     if (getpeername(s, (struct sockaddr *)&host_addr, &host_len) < 0)
-        return -1;
+        return net_fail_host();
 
     if (name && namelen)
         host_to_sce_addr((const struct sockaddr *)&host_addr, name, namelen);
@@ -309,7 +395,7 @@ EXPORT(SceNet, 0x2348D353, int, sceNetGetpeername, int s, SceNetSockaddr *name,
 
 EXPORT(SceNet, 0xE37F34AA, int *, sceNetErrnoLoc, void)
 {
-    return &errno;
+    return &g_net_errno;
 }
 
 EXPORT(SceNet, 0x4C30B03C, unsigned int, sceNetHtonl, unsigned int value)
@@ -346,7 +432,7 @@ EXPORT(SceNet, 0xFB3336A6, unsigned long long, sceNetNtohll, unsigned long long 
 EXPORT(SceNet, 0xD5EEB048, int, sceNetInetPton, int af, const char *src, void *dst)
 {
     if (af != SCE_NET_AF_INET)
-        return -1;
+        return net_fail_arg();
 
     return inet_pton(AF_INET, src, dst) == 1 ? 0 : -1;
 }
@@ -365,7 +451,7 @@ EXPORT(SceNet, 0x06C05518, int, sceNetGetMacAddress, SceNetEtherAddr *addr, int 
     (void)flags;
 
     if (!addr)
-        return -1;
+        return net_fail_arg();
 
     memset(addr, 0, sizeof(*addr));
     return 0;
@@ -377,12 +463,12 @@ EXPORT(SceNet, 0x84334EB2, int, sceNetEtherNtostr, const SceNetEtherAddr *addr, 
     int written;
 
     if (!addr || !string)
-        return -1;
+        return net_fail_arg();
 
     written = snprintf(string, len, "%02x:%02x:%02x:%02x:%02x:%02x", addr->data[0],
                        addr->data[1], addr->data[2], addr->data[3], addr->data[4],
                        addr->data[5]);
-    return written < 0 ? -1 : written;
+    return written < 0 ? net_fail_host() : written;
 }
 
 EXPORT(SceNet, 0xEEC6D75F, int, sceNetEtherStrton, const char *string, SceNetEtherAddr *addr)
@@ -390,11 +476,11 @@ EXPORT(SceNet, 0xEEC6D75F, int, sceNetEtherStrton, const char *string, SceNetEth
     unsigned int bytes[6];
 
     if (!string || !addr)
-        return -1;
+        return net_fail_arg();
 
     if (sscanf(string, "%x:%x:%x:%x:%x:%x", &bytes[0], &bytes[1], &bytes[2], &bytes[3],
                &bytes[4], &bytes[5]) != 6)
-        return -1;
+        return net_fail_arg();
 
     for (int i = 0; i < 6; i++)
         addr->data[i] = (unsigned char)bytes[i];
@@ -439,7 +525,7 @@ EXPORT(SceNet, 0x6DA29319, int, sceNetResolverCreate, const char *name,
     }
     pthread_mutex_unlock(&g_resolver_lock);
 
-    return -1;
+    return net_fail_arg();
 }
 
 EXPORT(SceNet, 0x3559F098, int, sceNetResolverDestroy, int rid)
@@ -447,7 +533,7 @@ EXPORT(SceNet, 0x3559F098, int, sceNetResolverDestroy, int rid)
     ResolverState *resolver = resolver_get(rid);
 
     if (!resolver)
-        return -1;
+        return net_fail_arg();
 
     pthread_mutex_lock(&g_resolver_lock);
     resolver->used = false;
@@ -467,7 +553,7 @@ EXPORT(SceNet, 0x1EB11857, int, sceNetResolverStartNtoa, int rid, const char *ho
     (void)flags;
 
     if (!resolver || !hostname || !addr)
-        return -1;
+        return net_fail_arg();
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
@@ -475,7 +561,7 @@ EXPORT(SceNet, 0x1EB11857, int, sceNetResolverStartNtoa, int rid, const char *ho
 
     if (getaddrinfo(hostname, NULL, &hints, &result) != 0 || !result) {
         resolver->last_error = -1;
-        return -1;
+        return net_fail_host();
     }
 
     addr->s_addr = ((struct sockaddr_in *)result->ai_addr)->sin_addr.s_addr;
@@ -495,7 +581,7 @@ EXPORT(SceNet, 0x0424AE26, int, sceNetResolverStartAton, int rid, const SceNetIn
     (void)flags;
 
     if (!resolver || !addr || !hostname || len <= 0)
-        return -1;
+        return net_fail_arg();
 
     memset(&in, 0, sizeof(in));
     in.sin_family = AF_INET;
@@ -504,7 +590,7 @@ EXPORT(SceNet, 0x0424AE26, int, sceNetResolverStartAton, int rid, const SceNetIn
     if (getnameinfo((const struct sockaddr *)&in, sizeof(in), hostname, (socklen_t)len, NULL, 0,
                     0) != 0) {
         resolver->last_error = -1;
-        return -1;
+        return net_fail_arg();
     }
 
     return 0;
@@ -515,7 +601,7 @@ EXPORT(SceNet, 0x874EF500, int, sceNetResolverGetError, int rid, int *result)
     ResolverState *resolver = resolver_get(rid);
 
     if (!resolver || !result)
-        return -1;
+        return net_fail_arg();
 
     *result = resolver->last_error;
     return 0;
@@ -578,12 +664,12 @@ EXPORT(SceNet, 0xF9D102AE, int, sceNetEpollCreate, const char *name, int flags)
     (void)flags;
 
     fd = epoll_create1(0);
-    return fd < 0 ? -1 : fd;
+    return fd < 0 ? net_fail_host() : fd;
 }
 
 EXPORT(SceNet, 0x7915CAF3, int, sceNetEpollDestroy, int eid)
 {
-    return close(eid) < 0 ? -1 : 0;
+    return close(eid) < 0 ? net_fail_host() : 0;
 }
 
 EXPORT(SceNet, 0x93FCC4E8, int, sceNetEpollAbort, int eid, int flags)
@@ -605,7 +691,7 @@ EXPORT(SceNet, 0x4C8764AC, int, sceNetEpollControl, int eid, int op, int id,
         host_event.data.u64 = event->data.u64;
     }
 
-    return epoll_ctl(eid, op, id, &host_event) < 0 ? -1 : 0;
+    return epoll_ctl(eid, op, id, &host_event) < 0 ? net_fail_host() : 0;
 }
 
 EXPORT(SceNet, 0x45CE337D, int, sceNetEpollWait, int eid, SceNetEpollEvent *events,
@@ -616,14 +702,14 @@ EXPORT(SceNet, 0x45CE337D, int, sceNetEpollWait, int eid, SceNetEpollEvent *even
     int count;
 
     if (!events || max_events <= 0)
-        return -1;
+        return net_fail_host();
     if (max_events > (int)(sizeof(host_events) / sizeof(host_events[0])))
         max_events = (int)(sizeof(host_events) / sizeof(host_events[0]));
 
-    host_timeout = timeout < 0 ? -1 : (timeout + 999) / 1000;
+    host_timeout = timeout < 0 ? net_fail_host() : (timeout + 999) / 1000;
     count = epoll_wait(eid, host_events, max_events, host_timeout);
     if (count < 0)
-        return -1;
+        return net_fail_host();
 
     for (int i = 0; i < count; i++) {
         memset(&events[i], 0, sizeof(events[i]));
@@ -690,7 +776,7 @@ EXPORT(SceNet, 0xB1AF6840, int, sceNetGetSockInfo, int s, SceNetSockInfo *info, 
     (void)flags;
 
     if (!info || n <= 0)
-        return -1;
+        return net_fail_arg();
 
     if (s >= 0) {
         fill_sock_info(s, &info[0]);
@@ -717,7 +803,7 @@ EXPORT(SceNet, 0x138CF1D6, int, sceNetGetSockIdInfo, SceNetFdSet *fds, int socki
     (void)flags;
 
     if (!fds)
-        return -1;
+        return net_fail_arg();
 
     memset(fds, 0, sizeof(*fds));
     for (int fd = 0; fd < 1024; fd++) {
@@ -737,7 +823,7 @@ EXPORT(SceNet, 0xA86F8FE5, int, sceNetGetStatisticsInfo, SceNetStatisticsInfo *i
     (void)flags;
 
     if (!info)
-        return -1;
+        return net_fail_arg();
 
     memset(info, 0, sizeof(*info));
     info->kernel_mem_free_size = 0x100000;
@@ -757,7 +843,7 @@ static int sce_msghdr_to_host(const SceNetMsghdr *msg, struct msghdr *host,
                               socklen_t *addr_len)
 {
     if (!msg || msg->msg_iovlen < 0 || msg->msg_iovlen > SCE_NET_MAX_IOV)
-        return -1;
+        return net_fail_arg();
 
     memset(host, 0, sizeof(*host));
     memset(iov, 0, sizeof(*iov) * SCE_NET_MAX_IOV);
@@ -773,7 +859,7 @@ static int sce_msghdr_to_host(const SceNetMsghdr *msg, struct msghdr *host,
 
     if (msg->msg_name && msg->msg_namelen >= sizeof(SceNetSockaddr)) {
         if (sce_to_host_addr((const SceNetSockaddr *)msg->msg_name, addr, addr_len) < 0)
-            return -1;
+            return net_fail_arg();
         host->msg_name = addr;
         host->msg_namelen = *addr_len;
     }
@@ -789,9 +875,9 @@ EXPORT(SceNet, 0x99C579AE, int, sceNetSendmsg, int s, const SceNetMsghdr *msg, i
     socklen_t addr_len = 0;
 
     if (sce_msghdr_to_host(msg, &host, iov, &addr, &addr_len) < 0)
-        return -1;
+        return net_fail_arg();
 
-    return (int)sendmsg(s, &host, sce_to_host_flags(flags));
+    return net_result((int)sendmsg(s, &host, sce_to_host_flags(flags)));
 }
 
 EXPORT(SceNet, 0xDE94C6FE, int, sceNetRecvmsg, int s, SceNetMsghdr *msg, int flags)
@@ -803,9 +889,9 @@ EXPORT(SceNet, 0xDE94C6FE, int, sceNetRecvmsg, int s, SceNetMsghdr *msg, int fla
     int ret;
 
     if (sce_msghdr_to_host(msg, &host, iov, &addr, &addr_len) < 0)
-        return -1;
+        return net_fail_arg();
 
-    ret = (int)recvmsg(s, &host, sce_to_host_flags(flags));
+    ret = net_result((int)recvmsg(s, &host, sce_to_host_flags(flags)));
     if (ret >= 0) {
         if (host.msg_namelen > 0) {
             SceNetSockaddr sce_addr;
@@ -832,7 +918,7 @@ EXPORT(SceNet, 0x561DFD03, int, sceNetEmulationSet, SceNetEmulationParam *param,
     (void)flags;
 
     if (!param)
-        return -1;
+        return net_fail_arg();
 
     g_net_emulation = *param;
     g_net_emulation.result = 0;
@@ -844,7 +930,7 @@ EXPORT(SceNet, 0xAE3F4AC6, int, sceNetEmulationGet, SceNetEmulationParam *param,
     (void)flags;
 
     if (!param)
-        return -1;
+        return net_fail_arg();
 
     *param = g_net_emulation;
     param->result = 0;
