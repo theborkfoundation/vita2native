@@ -265,10 +265,9 @@ static void video_capture_window_id(HostVideo *video)
  */
 static bool video_try_gl_window(HostVideo *video)
 {
+    HostGpuDevice device = host_gpu_current();
     const char *driver;
 
-    if (!vita2native_env_flag("VITA2NATIVE_EGL_WINDOW"))
-        return false;
     if (!video->window)
         return false;
 
@@ -276,6 +275,22 @@ static bool video_try_gl_window(HostVideo *video)
     driver = SDL_GetCurrentVideoDriver ? SDL_GetCurrentVideoDriver() : "";
     if (!driver || (strcmp(driver, "x11") != 0 && strcmp(driver, "wayland") != 0))
         return false;
+
+    /*
+     * Presenting the render target is only worth the extra machinery when the
+     * window's EGL is real hardware. On a software rasteriser the "direct"
+     * present is llvmpipe drawing a full-screen quad and copying it to the
+     * server, which measured 96 ms a frame against 3-5 ms for SDL's X11 blit.
+     */
+    if (!device || !host_gpu_can_present_window(device)) {
+        /* A surfaceless display (EGL_PLATFORM=surfaceless) never can. */
+        fprintf(stderr, "vita2native: EGL has no window support here; presenting through SDL\n");
+        return false;
+    }
+    if (host_gpu_is_software(device)) {
+        fprintf(stderr, "vita2native: EGL is a software renderer; presenting through SDL\n");
+        return false;
+    }
 
     video->gl_window = true;
     video_capture_window_id(video);
@@ -1171,6 +1186,18 @@ bool host_video_present_texture(HostVideo *video, unsigned int texture, int widt
                          video->overlay_height);
     host_gpu_present_texture(device, texture, width, height);
     return true;
+}
+
+__attribute__((weak)) bool host_gpu_can_present_window(HostGpuDevice device)
+{
+    (void)device;
+    return false;
+}
+
+__attribute__((weak)) bool host_gpu_is_software(HostGpuDevice device)
+{
+    (void)device;
+    return false;
 }
 
 bool host_video_presents_texture(void)

@@ -81,13 +81,12 @@ so the 960x544 frame is displayed 1:1 and stays sharp.
   virtual display. The guest-side readback, not VNC, is the bottleneck: at
   native scale heavy 3D titles run at a few fps; `V2N_RENDER_SCALE=0.6667` is
   faster but blurs small fonts, so `1` is the readable setting.
-- `V2N_EGL_WINDOW=1` presents the guest's render target straight into the VNC
-  window through EGL, skipping the CPU copy that the default path makes; frames
-  the guest presents from memory (decoded video, guest-side composites) use the
-  SDL renderer either way. Verified against the readback path frame for frame.
-  It is **not faster on this board**: the VNC X server has no GPU, so the
-  present is llvmpipe (96 ms a frame against 3-5 ms for SDL's X11 blit), and the
-  win only appears where EGL sits on real hardware. Off by default.
+- Presentation picks itself: where the window's EGL is real hardware the
+  emulator presents the guest's render target through it, skipping the CPU copy;
+  on a software renderer (this board's VNC server, llvmpipe) it keeps SDL's X11
+  blit, which measured several times faster. Frames the guest presents from
+  memory - decoded video, guest-side composites - use the SDL renderer either
+  way. The log says which path was taken.
 - Set `V2N_FPS_OVERLAY=1` to draw the FPS graph in the top-right corner;
   `V2N_FPS=1` only writes FPS lines to the log.
 - VNC has no audio. The game writes to the PulseAudio `v2n` null sink.

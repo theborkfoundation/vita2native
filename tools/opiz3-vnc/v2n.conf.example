@@ -15,11 +15,6 @@ V2N_LOG=/home/bachnx/v2n-run/vnc-game.log
 V2N_RENDER_SCALE=1
 # Debugging knob, off by default: forces a glFinish before the readback.
 # V2N_FINISH_PER_FRAME=1
-# 1 presents the render target straight to the window through EGL instead of
-# copying it to the CPU first (needs the X11 EGL platform, which this sets up).
-# CPU-presented frames - decoded video, guest-memory composites - still go
-# through the SDL renderer either way.
-V2N_EGL_WINDOW=0
 
 # Debug knobs (1 = enabled)
 V2N_FPS=1

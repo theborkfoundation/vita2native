@@ -35,21 +35,16 @@ fi
 : "${V2N_INPUT_DEBUG:=0}"
 : "${V2N_TRACE_TEXTURES:=0}"
 : "${V2N_CRASH_CORE:=0}"
-: "${V2N_EGL_WINDOW:=0}"
 : "${V2N_XDG_RUNTIME_DIR:=/run/user/1001}"
 : "${V2N_PULSE_SERVER:=unix:$V2N_XDG_RUNTIME_DIR/pulse/native}"
 : "${V2N_LD_LIBRARY_PATH:=/usr/lib/arm-linux-gnueabihf}"
 
-# Presentation. By default the guest renders surfaceless and SDL copies the
-# finished frame into the window, which costs a CPU round-trip per frame.
-# V2N_EGL_WINDOW=1 hands the window to EGL instead, so the guest's render target
-# is presented directly; that needs the X11 platform, not the surfaceless one.
-if [ "$V2N_EGL_WINDOW" = 1 ]; then
-    export VITA2NATIVE_EGL_WINDOW=1
-    unset EGL_PLATFORM
-else
-    export EGL_PLATFORM=surfaceless
-fi
+# Presentation. The guest renders surfaceless and SDL copies the finished frame
+# into the window. Handing the window to EGL instead would present the render
+# target directly, but this board's X server has no GPU: the emulator detects
+# the software renderer and keeps the SDL blit, which is several times faster
+# than llvmpipe drawing a full-screen quad.
+export EGL_PLATFORM=surfaceless
 export SDL_VIDEODRIVER=x11
 export SDL_RENDER_DRIVER=software
 export VITA2NATIVE_SDL_WINDOWED=1

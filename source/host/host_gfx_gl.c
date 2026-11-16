@@ -1529,6 +1529,13 @@ static EGLSurface gles_attach_window_surface(HostGles *g, void *native_window)
     return EGL_NO_SURFACE;
 }
 
+bool host_gfx_gl_can_present_window(HostGpuDevice device)
+{
+    HostGles *g = device ? device->impl : NULL;
+
+    return g && g->window_capable;
+}
+
 int host_gfx_gl_attach_window(HostGpuDevice device, void *native_window)
 {
     HostGles *g = device->impl;

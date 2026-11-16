@@ -36,6 +36,21 @@ HostGpuBackend host_gpu_backend(HostGpuDevice device);
 /* Human-readable backend/renderer/version, e.g. "GLES 3.2 (Mesa...)". */
 const char *host_gpu_description(HostGpuDevice device);
 
+/*
+ * True when the GL/EGL implementation is a software rasteriser (llvmpipe,
+ * softpipe, swrast, SwiftShader). Presenting through EGL is a CPU round-trip of
+ * a different shape there, and the SDL blit is faster, so the window path asks
+ * this before agreeing to take the render target.
+ */
+bool host_gpu_is_software(HostGpuDevice device);
+
+/*
+ * True when the EGL display was initialised with window support, i.e. an
+ * EGLConfig with EGL_WINDOW_BIT was found. A surfaceless display always says
+ * no: it has no window system to draw into.
+ */
+bool host_gpu_can_present_window(HostGpuDevice device);
+
 /* Bind the offscreen color target and make it current for drawing. */
 void host_gpu_begin_frame(HostGpuDevice device);
 /* Finish the frame. Presentation is added together with the GXM backend. */

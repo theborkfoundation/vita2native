@@ -72,6 +72,24 @@ const char *host_gpu_description(HostGpuDevice device)
     return device ? device->description : "unavailable";
 }
 
+bool host_gpu_can_present_window(HostGpuDevice device)
+{
+    if (!device || device->backend != HOST_GPU_BACKEND_GLES)
+        return false;
+    return host_gfx_gl_can_present_window(device);
+}
+
+bool host_gpu_is_software(HostGpuDevice device)
+{
+    static const char *const names[] = {"llvmpipe", "softpipe", "swrast", "swiftshader"};
+    const char *description = host_gpu_description(device);
+
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        if (strstr(description, names[i]))
+            return true;
+    return false;
+}
+
 void host_gpu_begin_frame(HostGpuDevice device)
 {
     if (!device)
