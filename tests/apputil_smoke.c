@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 
 #include "fs.h"
+#include "test.h"
 
 int sceAppUtilInit(SceAppUtilInitParam *init_param, SceAppUtilBootParam *boot_param);
 int sceAppUtilShutdown(void);
@@ -30,7 +31,7 @@ int sceAppUtilSaveDataGetQuota(SceSize *quota_size_kb, SceSize *used_size_kb,
 int sceAppUtilSystemParamGetInt(unsigned int param_id, int *value);
 int sceAppUtilSystemParamGetString(unsigned int param_id, SceChar8 *buffer, SceSize buffer_size);
 
-#define TEST_ROOT "/tmp/v2n-apputil"
+#define TEST_ROOT_PATTERN "/tmp/v2n-apputil-XXXXXX"
 
 int main(void)
 {
@@ -43,13 +44,22 @@ int main(void)
     SceAppUtilBootParam boot_param;
     SceSize quota = 0, used = 0, required = 123;
     char check_path[256];
+    char test_root[64];
     char text[16];
     FILE *fp;
     int value = 0;
     int ret;
 
-    mkdir(TEST_ROOT, 0755);
-    if (host_fs_init(TEST_ROOT, NULL) != 0) {
+    {
+        char root[] = TEST_ROOT_PATTERN;
+
+        if (!mkdtemp(root)) {
+            puts("apputil_smoke: mkdtemp failed");
+            return 1;
+        }
+        memcpy(test_root, root, sizeof(test_root));
+    }
+    if (host_fs_init(test_root, NULL) != 0) {
         puts("apputil_smoke: could not initialise the VFS");
         return 1;
     }
@@ -157,6 +167,9 @@ int main(void)
         puts("apputil_smoke: shutdown failed");
         return 1;
     }
+
+    /* Leave nothing behind for the next run to trip over. */
+    test_remove_tree(test_root);
 
     puts("apputil_smoke: ok");
     return 0;

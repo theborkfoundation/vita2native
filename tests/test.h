@@ -19,11 +19,49 @@
  * function reports more than one failure (e.g. `failures += check_export(...)`).
  */
 
+#include <dirent.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 static int failures;
+
+/*
+ * Removes a directory tree. Tests that write to a temporary root call this on
+ * the way out, so a rerun starts from nothing: a leftover save slot or database
+ * makes the next run fail in a way that looks like a product bug.
+ */
+__attribute__((unused)) static void test_remove_tree(const char *path)
+{
+    DIR *directory = opendir(path);
+    struct dirent *entry;
+
+    if (!directory) {
+        unlink(path);
+        return;
+    }
+
+    while ((entry = readdir(directory)) != NULL) {
+        char child[PATH_MAX];
+        struct stat status;
+
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+        if (lstat(child, &status) == 0 && S_ISDIR(status.st_mode))
+            test_remove_tree(child);
+        else
+            unlink(child);
+    }
+
+    closedir(directory);
+    rmdir(path);
+}
 
 /* Returns 1 when the check failed, so REQUIRE can propagate it. */
 static int test_check(const char *file, int line, const char *expression,

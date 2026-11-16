@@ -354,8 +354,8 @@ int main(void)
     }
 
     REQUIRE(SceSqlite_finish() == 0, "could not shut SQLite down");
-    rmdir(app_dir);
-    rmdir(root);
+    test_remove_tree(app_dir);
+    test_remove_tree(root);
 
     puts("sqlite_smoke: ok");
     return 0;

@@ -13,6 +13,7 @@
 
 #include "fs.h"
 #include "modules/SceFios2.h"
+#include "test.h"
 
 int sceFiosInitialize(const SceFiosParams *params);
 int sceFiosTerminate(void);
@@ -170,7 +171,7 @@ int main(void)
 
     sceFiosTerminate();
     SceFios2_finish();
-    rmdir(root);
+    test_remove_tree(root);
     puts("fios2_smoke: ok");
     ret = 0;
     return ret;

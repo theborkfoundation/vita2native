@@ -12,6 +12,7 @@
 #include <psp2/appmgr.h>
 
 #include "fs.h"
+#include "test.h"
 
 int sceAppMgrGetDevInfo(const char *dev, uint64_t *max_size, uint64_t *free_size);
 int sceAppMgrReceiveSystemEvent(SceAppMgrSystemEvent *system_event);
@@ -60,7 +61,7 @@ int main(void)
         return 1;
     }
 
-    rmdir(root);
+    test_remove_tree(root);
     puts("appmgr_smoke: ok");
     return 0;
 }
