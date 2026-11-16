@@ -14,6 +14,8 @@
 #include <time.h>
 
 #include <psp2/kernel/error.h>
+
+#include "fs.h"
 #include <psp2/kernel/processmgr.h>
 #include <psp2common/kernel/processmgr.h>
 
@@ -23,7 +25,8 @@
 #include "modules/SceProcessmgr.h"
 #include "settings.h"
 
-#define VITA_TITLE_ID         "V2N000001"
+/* The identity savedata0: is scoped to, set from the app directory. */
+#define VITA_TITLE_ID         host_fs_title_id()
 #define VITA_PROCESS_NAME     "vita2native"
 #define VITA_MAX_CALLBACKS    8
 

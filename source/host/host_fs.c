@@ -11,6 +11,7 @@
 
 static char g_root[PATH_MAX];
 static char g_app_dir[PATH_MAX];
+static char g_title_id[64] = "V2N000001";
 
 /*
  * Vita filesystems are case-insensitive while the host's usually are not.
@@ -145,6 +146,38 @@ static int path_has_parent_component(const char *path)
     return 0;
 }
 
+/* A directory name usable as one path component, or the default identity. */
+static void set_title_id_from_name(const char *name)
+{
+    size_t out = 0;
+
+    if (!name || !name[0]) {
+        snprintf(g_title_id, sizeof(g_title_id), "V2N000001");
+        return;
+    }
+
+    for (size_t i = 0; name[i] && out + 1 < sizeof(g_title_id); i++) {
+        char c = name[i];
+
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+            c == '-' || c == '_')
+            g_title_id[out++] = c;
+        else
+            g_title_id[out++] = '_';
+    }
+    g_title_id[out] = '\0';
+}
+
+void host_fs_set_title_id(const char *title_id)
+{
+    set_title_id_from_name(title_id);
+}
+
+const char *host_fs_title_id(void)
+{
+    return g_title_id;
+}
+
 int host_fs_init(const char *root, const char *app_dir)
 {
     char path[PATH_MAX];
@@ -162,6 +195,14 @@ int host_fs_init(const char *root, const char *app_dir)
     if (copy_string(g_app_dir, sizeof(g_app_dir), app_len ? app_dir : ".", app_len ? app_len : 1) < 0)
         return -1;
 
+    /* savedata0: belongs to this title; the app directory names it. */
+    {
+        const char *name = app_len ? app_dir : ".";
+        const char *slash = strrchr(name, '/');
+
+        set_title_id_from_name(slash && slash[1] ? slash + 1 : name);
+    }
+
     make_dir(g_root);
 
     if (snprintf(path, sizeof(path), "%s/ux0", g_root) >= (int)sizeof(path))
@@ -169,6 +210,10 @@ int host_fs_init(const char *root, const char *app_dir)
     make_dir(path);
 
     if (snprintf(path, sizeof(path), "%s/savedata", g_root) >= (int)sizeof(path))
+        return -1;
+    make_dir(path);
+
+    if (snprintf(path, sizeof(path), "%s/savedata/%s", g_root, g_title_id) >= (int)sizeof(path))
         return -1;
     make_dir(path);
 
@@ -251,7 +296,8 @@ int host_fs_resolve_path(const char *vita_path, char *out, size_t out_size)
         } else if (device_len == 4 && strncmp(vita_path, "app0", 4) == 0) {
             base = g_app_dir;
         } else if (device_len == 9 && strncmp(vita_path, "savedata0", 9) == 0) {
-            needed = snprintf(out, out_size, "%s/savedata", g_root);
+            /* Per title, as on the Vita: see host_fs_set_title_id(). */
+            needed = snprintf(out, out_size, "%s/savedata/%s", g_root, g_title_id);
             if (needed < 0 || (size_t)needed >= out_size)
                 return -1;
             base = out;

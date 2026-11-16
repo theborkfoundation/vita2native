@@ -72,6 +72,31 @@ int main(void)
     assert(strcmp(path, "build/fs_root/app/assets/x") == 0);
     assert(host_fs_resolve_path("ux0:/../escape", path, sizeof(path)) != 0);
 
+    /*
+     * savedata0: belongs to the running title, as on the Vita: two titles that
+     * both write "data.bin" or use slot 0 must not share the file.
+     */
+    {
+        char first[PATH_MAX];
+        char second[PATH_MAX];
+
+        assert(strcmp(host_fs_title_id(), "app") == 0);
+
+        host_fs_set_title_id("PCSE01177");
+        assert(host_fs_resolve_path("savedata0:/data.bin", first, sizeof(first)) == 0);
+        assert(strcmp(first, "build/fs_root/savedata/PCSE01177/data.bin") == 0);
+
+        host_fs_set_title_id("PCSE00322");
+        assert(host_fs_resolve_path("savedata0:/data.bin", second, sizeof(second)) == 0);
+        assert(strcmp(second, "build/fs_root/savedata/PCSE00322/data.bin") == 0);
+
+        /* A name that is not a title id still lands in its own component. */
+        host_fs_set_title_id("../escape");
+        assert(host_fs_resolve_path("savedata0:/data.bin", first, sizeof(first)) == 0);
+        assert(strstr(first, "/savedata/") != NULL);
+        assert(strstr(first, "..") == NULL);
+    }
+
     host_sleep_ns(1000000);
 
     puts("host_smoke: ok");

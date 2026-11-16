@@ -2,10 +2,11 @@
  * SceAppUtil: save data, system parameters and the small helpers titles use
  * during boot.
  *
- * Save slots live under savedata0: (the VFS maps it to <root>/savedata), one
- * "SlotParam_<id>.bin" file per slot plus the files the title writes. That is
- * the same layout the real firmware exposes through the save data mount, so
- * titles that mount savedata0: directly keep working.
+ * Save slots live under savedata0:, which the VFS maps to
+ * <root>/savedata/<title-id>/ - one directory per application, as on the Vita,
+ * so two titles cannot see each other's files or slot numbers. Inside it there
+ * is one "SlotParam_<id>.bin" per slot plus whatever the title writes, and
+ * titles that mount savedata0: directly land in the same directory.
  */
 
 #include <errno.h>

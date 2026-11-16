@@ -290,6 +290,7 @@ vita2native_add_smoke(processmgr_smoke
         tests/processmgr_smoke.c
         source/module.c
         source/modules/SceProcessmgr.c
+        source/host/host_fs.c
         source/host/host_thread.c
     LIBS pthread m)
 
