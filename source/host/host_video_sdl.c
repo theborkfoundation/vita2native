@@ -309,24 +309,19 @@ static bool video_init_sdl(HostVideo *video)
      * guest's render target itself rather than guest pixels copied to the CPU
      * and uploaded again. Opt-in until the X11/Wayland surfaces have been
      * verified on a device.
+     *
+     * The renderer is created either way: titles that decode video or composite
+     * in guest memory present CPU frames, and those still need the readback
+     * path. Without it those frames would be dropped and the window would stay
+     * black while the guest kept running.
      */
-    if (video_try_gl_window(video)) {
-        SDL_ShowCursor(0);
-        SDL_GetWindowSize(video->window, &panel_width, &panel_height);
-        video->width = panel_width > 0 ? panel_width : 960;
-        video->height = panel_height > 0 ? panel_height : 544;
-        fprintf(stderr, "vita2native: presenting through EGL on the window (%s video, %dx%d)\n",
-                SDL_GetCurrentVideoDriver ? SDL_GetCurrentVideoDriver() : "unknown",
-                video->width, video->height);
-        video->controller_scan_at_ns = video_now_ns();
-        return true;
-    }
+    video_try_gl_window(video);
 
     video->renderer = SDL_CreateRenderer(
         video->window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!video->renderer)
         video->renderer = SDL_CreateRenderer(video->window, -1, 0);
-    if (!video->renderer) {
+    if (!video->renderer && !video->gl_window) {
         fprintf(stderr, "vita2native: SDL renderer creation failed: %s\n", SDL_GetError());
         return false;
     }
@@ -345,9 +340,16 @@ static bool video_init_sdl(HostVideo *video)
                     info.name ? info.name : "?", info.flags);
     }
 
-    fprintf(stderr, "vita2native: presenting through SDL (%s video, %dx%d window)\n",
-            SDL_GetCurrentVideoDriver ? SDL_GetCurrentVideoDriver() : "unknown",
-            video->width, video->height);
+    if (video->gl_window)
+        fprintf(stderr,
+                "vita2native: presenting through EGL on the window (%s video, %dx%d), "
+                "with an SDL renderer for CPU frames\n",
+                SDL_GetCurrentVideoDriver ? SDL_GetCurrentVideoDriver() : "unknown",
+                video->width, video->height);
+    else
+        fprintf(stderr, "vita2native: presenting through SDL (%s video, %dx%d window)\n",
+                SDL_GetCurrentVideoDriver ? SDL_GetCurrentVideoDriver() : "unknown",
+                video->width, video->height);
 
     video->controller_scan_at_ns = video_now_ns();
     return true;
