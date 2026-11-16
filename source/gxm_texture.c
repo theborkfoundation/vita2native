@@ -20,6 +20,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -1164,6 +1165,29 @@ static void decode_swizzled_tiles_fast4(uint8_t *dest, const uint8_t *input,
     }
 }
 
+/*
+ * Writes one texel whose channels are a permutation of its `count` source
+ * bytes. Shared by the tile walk and the Morton walk: without it those paths
+ * pay a format dispatch per pixel, which is what made a 640x360 RGBA8 video
+ * frame cost 66 ms (~280 ns/pixel) against a few ns for this.
+ */
+static inline void store_fast8_texel(uint8_t *out, const uint8_t *input, uint32_t index,
+                                     const uint8_t map[4], uint32_t count)
+{
+    const uint8_t *p = input + (size_t)index * count;
+    uint8_t values[6];
+
+    for (uint32_t i = 0; i < count; i++)
+        values[i] = p[count - 1 - i];
+    values[4] = 255;
+    values[5] = 0;
+
+    out[0] = values[map[0]];
+    out[1] = values[map[1]];
+    out[2] = values[map[2]];
+    out[3] = values[map[3]];
+}
+
 static void decode_swizzled_tiles_fast8(uint8_t *dest, const uint8_t *input,
                                         const GxmTextureLevel *info, uint32_t minimum, uint32_t k,
                                         const uint8_t map[4], uint32_t count, uint32_t first_row,
@@ -1193,21 +1217,9 @@ static void decode_swizzled_tiles_fast8(uint8_t *dest, const uint8_t *input,
             for (uint32_t y = 0; y < height; y++) {
                 uint8_t *row = dest + ((ty + y) * info->width + tx) * 4;
 
-                for (uint32_t x = 0; x < width; x++) {
-                    uint32_t index = tile + encode_morton2_low(x, y);
-                    const uint8_t *p = input + (size_t)index * count;
-                    uint8_t values[6];
-
-                    for (uint32_t i = 0; i < count; i++)
-                        values[i] = p[count - 1 - i];
-                    values[4] = 255;
-                    values[5] = 0;
-
-                    row[x * 4 + 0] = values[map[0]];
-                    row[x * 4 + 1] = values[map[1]];
-                    row[x * 4 + 2] = values[map[2]];
-                    row[x * 4 + 3] = values[map[3]];
-                }
+                for (uint32_t x = 0; x < width; x++)
+                    store_fast8_texel(row + x * 4, input, tile + encode_morton2_low(x, y), map,
+                                      count);
             }
         }
     }
@@ -1238,6 +1250,99 @@ static void gxm_swizzled_band8(void *context, uint32_t first_row, uint32_t last_
 
     decode_swizzled_tiles_fast8(job->dest, job->input, job->info, job->minimum, job->k, job->map,
                                 job->count, first_row, last_row);
+}
+
+/*
+ * Morton-order decode for swizzled layouts the tile walk cannot take (its tile
+ * arithmetic needs power-of-two dimensions), limited to texels the fast byte
+ * permutation covers. Runs over texel index ranges so the caller can band it;
+ * every index owns its destination pixel.
+ */
+static void decode_swizzled_morton_fast8(uint8_t *dest, const uint8_t *input,
+                                         const GxmTextureLevel *info, uint32_t minimum, uint32_t k,
+                                         const uint8_t map[4], uint32_t count, uint32_t first,
+                                         uint32_t last)
+{
+    uint32_t mask = minimum - 1;
+
+    for (uint32_t i = first; i < last; i++) {
+        uint32_t x = decode_morton2_x(i) & mask;
+        uint32_t y = decode_morton2_y(i) & mask;
+        uint32_t upper = (i >> (2 * k)) << k;
+
+        if (info->layout_width >= info->layout_height)
+            x |= upper;
+        else
+            y |= upper;
+
+        if (x >= info->width || y >= info->height)
+            continue;
+
+        store_fast8_texel(&dest[(size_t)(y * info->width + x) * 4], input, i, map, count);
+    }
+}
+
+typedef struct {
+    uint8_t *dest;
+    const uint8_t *input;
+    const GxmTextureLevel *info;
+    uint32_t minimum;
+    uint32_t k;
+    const uint8_t *map;
+    uint32_t count;
+} GxmMortonJob;
+
+static void gxm_morton_band(void *context, uint32_t first, uint32_t last)
+{
+    const GxmMortonJob *job = context;
+
+    decode_swizzled_morton_fast8(job->dest, job->input, job->info, job->minimum, job->k, job->map,
+                                 job->count, first, last);
+}
+
+/*
+ * Palettised levels, decoded through a 256-entry LUT.
+ *
+ * decode_paletted_texel() rebuilds the format description and unpacks the
+ * palette entry for every pixel, which cost ~280 ns/pixel: the video frames in
+ * Iconoclasts are P8 (0x95000000) and took 66-85 ms each. The palette does not
+ * change within a level, so the conversion is done once here.
+ */
+static void decode_paletted_fast(uint8_t *dest, const uint8_t *input, uint32_t width,
+                                 uint32_t height, uint32_t layout_width, uint32_t base,
+                                 uint32_t swizzle, const uint32_t *palette)
+{
+    FormatInfo info;
+    uint32_t lut[256];
+    bool nibbles = base == SCE_GXM_TEXTURE_BASE_FORMAT_P4;
+    uint32_t row_bytes = nibbles ? (layout_width + 1) / 2 : layout_width;
+
+    if (format_info(SCE_GXM_TEXTURE_BASE_FORMAT_U8U8U8U8, swizzle, &info) != 0)
+        return;
+
+    for (uint32_t i = 0; i < 256; i++) {
+        uint8_t rgba[4] = {0, 0, 0, 0};
+
+        unpack_lettered(rgba, palette[i], &info, swizzle4_letters[swizzle & 7]);
+        lut[i] = (uint32_t)rgba[0] | ((uint32_t)rgba[1] << 8) | ((uint32_t)rgba[2] << 16) |
+                 ((uint32_t)rgba[3] << 24);
+    }
+
+    for (uint32_t y = 0; y < height; y++) {
+        uint32_t *row = (uint32_t *)(dest + (size_t)y * width * 4);
+        const uint8_t *source = input + (size_t)y * row_bytes;
+
+        if (!nibbles) {
+            for (uint32_t x = 0; x < width; x++)
+                row[x] = lut[source[x]];
+        } else {
+            for (uint32_t x = 0; x < width; x++) {
+                uint8_t byte = source[x >> 1];
+
+                row[x] = lut[(x & 1) ? (byte >> 4) : (byte & 0xf)];
+            }
+        }
+    }
 }
 
 static void decode_linear_fast4(uint8_t *dest, const uint8_t *input, uint32_t width,
@@ -1275,6 +1380,33 @@ static void decode_linear_fast8(uint8_t *dest, const uint8_t *input, uint32_t wi
         for (uint32_t y = 0; y < height; y++)
             memcpy(dest + (size_t)y * width * 4, input + (size_t)y * layout_width * 4,
                    (size_t)width * 4);
+        return;
+    }
+
+    /*
+     * A four-byte texel is a byte permutation: one load, a byte swap and four
+     * shifts instead of a per-byte loop. The loop cost 41 ns/pixel for the
+     * ARGB and 1RGB swizzles, which the video frames in Iconoclasts use.
+     */
+    if (count == 4) {
+        for (uint32_t y = 0; y < height; y++) {
+            uint32_t *row = (uint32_t *)(dest + (size_t)y * width * 4);
+            const uint32_t *source = (const uint32_t *)(input + (size_t)y * layout_width * 4);
+
+            for (uint32_t x = 0; x < width; x++) {
+                uint32_t swapped = __builtin_bswap32(source[x]);
+                uint32_t out = 0;
+
+                for (uint32_t c = 0; c < 4; c++) {
+                    uint32_t index = map[c];
+                    uint32_t value = index < 4 ? (swapped >> (index * 8)) & 0xFFu
+                                               : (index == 4 ? 255u : 0u);
+
+                    out |= value << (c * 8);
+                }
+                row[x] = out;
+            }
+        }
         return;
     }
 
@@ -2113,6 +2245,63 @@ static int decode_level_rgba8(uint8_t *dest, const uint8_t *input,
 
     texel_format_init(&texel, format);
 
+    if (palette &&
+        (type == SCE_GXM_TEXTURE_SWIZZLED || type == SCE_GXM_TEXTURE_CUBE ||
+         is_arbitrary(type))) {
+        FormatInfo pal_info;
+        uint32_t lut[256];
+
+        if (format_info(SCE_GXM_TEXTURE_BASE_FORMAT_U8U8U8U8, swizzle, &pal_info) != 0)
+            return -1;
+        for (uint32_t i = 0; i < 256; i++) {
+            uint8_t rgba[4] = {0, 0, 0, 0};
+
+            unpack_lettered(rgba, palette[i], &pal_info, swizzle4_letters[swizzle & 7]);
+            lut[i] = (uint32_t)rgba[0] | ((uint32_t)rgba[1] << 8) | ((uint32_t)rgba[2] << 16) |
+                     ((uint32_t)rgba[3] << 24);
+        }
+
+        {
+            uint32_t minimum = info->layout_width < info->layout_height ? info->layout_width
+                                                                        : info->layout_height;
+            uint32_t k = highest_bit(minimum);
+            uint32_t count = info->layout_width * info->layout_height;
+            uint32_t mask = minimum - 1;
+
+            if (!minimum)
+                return -1;
+
+            for (uint32_t i = 0; i < count; i++) {
+                uint32_t x = decode_morton2_x(i) & mask;
+                uint32_t y = decode_morton2_y(i) & mask;
+                uint32_t upper = (i >> (2 * k)) << k;
+
+                if (info->layout_width >= info->layout_height)
+                    x |= upper;
+                else
+                    y |= upper;
+                if (x >= info->width || y >= info->height)
+                    continue;
+
+                /* P4 stores two indices per byte, low nibble first, as
+                   decode_paletted_texel does. */
+                {
+                    uint32_t entry;
+
+                    if (base == SCE_GXM_TEXTURE_BASE_FORMAT_P4) {
+                        uint8_t byte = input[i >> 1];
+
+                        entry = lut[(i & 1) ? (byte >> 4) : (byte & 0xf)];
+                    } else {
+                        entry = lut[input[i]];
+                    }
+                    memcpy(&dest[(size_t)(y * info->width + x) * 4], &entry, 4);
+                }
+            }
+            return 0;
+        }
+    }
+
     if (type == SCE_GXM_TEXTURE_SWIZZLED || type == SCE_GXM_TEXTURE_CUBE ||
         is_arbitrary(type)) {
         uint32_t minimum = info->layout_width < info->layout_height ? info->layout_width
@@ -2150,6 +2339,7 @@ static int decode_level_rgba8(uint8_t *dest, const uint8_t *input,
                                     gxm_swizzled_band8, &job);
                 return 0;
             }
+
 
             for (uint32_t ty = 0; ty < info->layout_height; ty += 32) {
                 uint32_t height = info->height > ty ? info->height - ty : 0;
@@ -2192,6 +2382,16 @@ static int decode_level_rgba8(uint8_t *dest, const uint8_t *input,
                 }
             }
 
+            return 0;
+        }
+
+        /* Layouts the tile walk rejects (non-power-of-two) still have a fast
+           per-texel body; the generic loop below pays a format dispatch per
+           pixel, which cost 66 ms on a 640x360 RGBA8 video frame. */
+        if (!palette && texel.fast8) {
+            GxmMortonJob job = {dest, input, info, minimum, k, texel.map, texel.info.count};
+
+            gxm_decode_in_bands(1, count, 1, gxm_morton_band, &job);
             return 0;
         }
 
@@ -2244,6 +2444,11 @@ static int decode_level_rgba8(uint8_t *dest, const uint8_t *input,
     }
 
     /* Linear and linear-strided layouts. */
+    if (palette) {
+        decode_paletted_fast(dest, input, info->width, info->height, info->layout_width, base,
+                             swizzle, palette);
+        return 0;
+    }
     if (!palette && texel.fast4) {
         decode_linear_fast4(dest, input, info->width, info->height, info->layout_width, texel.map);
         return 0;
@@ -2253,6 +2458,7 @@ static int decode_level_rgba8(uint8_t *dest, const uint8_t *input,
                             texel.map, texel.info.count);
         return 0;
     }
+
     if (!palette && texel.fast16) {
         decode_linear_fast16(dest, input, info->width, info->height, info->layout_width,
                              texel.swizzle);

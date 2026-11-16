@@ -726,6 +726,12 @@ int main(int argc, char **argv)
         bench_pvrtc(512, 1, "pvrtc2 512");
         bench_decode(SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, SCE_GXM_TEXTURE_SWIZZLED,
                      "u8 swizzled");
+        bench_decode(SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, SCE_GXM_TEXTURE_LINEAR,
+                     "u8 linear abgr");
+        bench_decode(SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ARGB, SCE_GXM_TEXTURE_LINEAR,
+                     "u8 linear argb");
+        bench_decode(SCE_GXM_TEXTURE_FORMAT_X8U8U8U8_1RGB, SCE_GXM_TEXTURE_LINEAR,
+                     "u8 linear 1rgb");
         return 0;
     }
 

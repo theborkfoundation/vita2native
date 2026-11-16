@@ -60,10 +60,22 @@ Linear and PVRTC-II paths are unchanged (2.6-2.8x on the banded ones).
 `texture_smoke` compares every banded decode against the reference decoder, so
 the split is verified per-pixel, not just by timing.
 
-**Found while measuring:** Iconoclasts' intro spends 65-83 ms per 640x360 video
-texture, which is ~280 ns/pixel against 2.6-22 ns/pixel for the fast decoders -
-those frames do not take any of the paths above. Worth a separate look; it is
-the largest decode cost seen in that title.
+**Found while measuring:** Iconoclasts' intro spent 65-83 ms per 640x360/800x360
+frame. Those are not RGBA8: the format is `P8`/`P4` (`0x95000000`/`0x94000000`)
+and they went through `decode_paletted_texel`, which rebuilds the format
+description and unpacks the palette entry for every pixel. They now decode
+through a 256-entry LUT built once per level (`decode_paletted_fast`, and the
+same table in the Morton path), with P4's two indices per byte:
+
+| level | before | after |
+| --- | --- | --- |
+| 800x360 P4 linear | 85.6 ms | 4.0 ms |
+| 256x256 P4 swizzled | 25.0 ms | ~6 ms |
+
+Worst decode in that title's intro is now ~6 ms. Also made four-byte texels a
+shift-based permutation instead of a per-byte loop for the linear ARGB/1RGB
+swizzles (41 -> 11.6 ns/pixel by bench), and added a fast per-texel body for
+Morton layouts the tile walk rejects (non-power-of-two dimensions).
 
 ### Async decode-ahead
 
