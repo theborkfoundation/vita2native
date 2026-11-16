@@ -147,7 +147,7 @@ is still encrypted:
 
 ```sh
 V3K="$HOME/Library/Application Support/Vita3K/Vita3K"
-ID=PCSE01125                       # Shakedown: Hawaii; see PLAN.md for the list
+ID=PCSE01125                       # Shakedown: Hawaii; see TODO.md for the list
 mkdir -p /tmp/stage-$ID
 cp -R  "$V3K/fs/ux0/app/$ID" /tmp/stage-$ID/
 cp -f  "$V3K/cache/decrypted_selfs/$ID/eboot.bin" /tmp/stage-$ID/$ID/

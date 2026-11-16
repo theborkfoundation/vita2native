@@ -62,7 +62,6 @@ build_release/
 *.jpg
 
 # Local working plan (not part of the repository)
-PLAN.md
 
 # CMake
 !CMakeLists.txt

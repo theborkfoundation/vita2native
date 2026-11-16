@@ -90,7 +90,7 @@ Read the log in this order; each item is a different kind of problem.
 
 - Keep the previous config: `tools/v2n title` copies `~/.vnc/v2n.conf` to
   `v2n.conf.bak` before switching.
-- Note the outcome in `PLAN.md` (it is gitignored and is the running log): title
+- Note the outcome in `TODO.md` (the plan, backlog and running log): title
   ID, what broke, which env var or commit fixed it.
 - Commit emulator fixes separately from staging changes; device trees and
   titles are not in the repository.
