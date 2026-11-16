@@ -37,13 +37,12 @@ function(vita2native_add_smoke name)
     )
     target_compile_definitions(${name} PRIVATE _GNU_SOURCE=1 ${SMOKE_DEFINES})
 
+    target_include_directories(${name} PRIVATE ${SDL2_INCLUDE_DIRS})
     if(SDL2_LIBRARY_DIRS)
         target_link_directories(${name} PRIVATE ${SDL2_LIBRARY_DIRS})
     endif()
 
-    if(SMOKE_LIBS)
-        target_link_libraries(${name} PRIVATE ${SMOKE_LIBS})
-    endif()
+    target_link_libraries(${name} PRIVATE ${SMOKE_LIBS} ${SDL2_LIBRARIES})
 
     if(NOT SMOKE_NO_TEST)
         add_test(NAME ${name} COMMAND ${name} ${SMOKE_ARGUMENTS})

@@ -101,6 +101,7 @@ target_include_directories(vita2native PRIVATE
     external/faad2/include
     external/Vita3K/external/stb
     external/Vita3K/vita3k/renderer/include
+    ${SDL2_INCLUDE_DIRS}
 )
 
 target_compile_options(vita2native PRIVATE
@@ -143,7 +144,7 @@ target_link_libraries(vita2native PRIVATE
     miniz
     mlib
     faad
-   
+    ${SDL2_LIBRARIES}
     pthread
     dl
     m

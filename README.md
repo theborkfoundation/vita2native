@@ -43,6 +43,18 @@ tracked:
  tools/zig-toolchain.sh x64   # only needed for x64-syntax
 ```
 
+The cross presets link the target's SDL2, so each Debian architecture needs a
+sysroot before the first configure. `tools/debian-sysroot.py` downloads the
+packages from the Debian archive and unpacks them; `tools/sysroots/*.lock`
+records the exact versions it resolved, and a re-run resolves against that lock
+instead of whatever the archive holds that day:
+
+```sh
+tools/debian-sysroot.py --all        # armhf + amd64, ~180 packages each
+tools/debian-sysroot.py --verify     # check the trees match the locks
+tools/debian-sysroot.py --update-lock --all   # deliberately move to current versions
+```
+
 Then configure and build the preset you want:
 
 ```sh
@@ -50,11 +62,12 @@ cmake --preset arm-rel
 cmake --build --preset arm-rel
 ```
 
-On a 32-bit ARM host the build also works without a cross toolchain:
+On a 32-bit ARM host the build also works without a cross toolchain, using the
+SDL2 that distribution provides:
 
 ```sh
-cmake -S . -B build/native-arm -G Ninja -DCMAKE_BUILD_TYPE=Release \
-      -DVITA2NATIVE_HEADLESS=ON
+sudo apt install libsdl2-dev
+cmake -S . -B build/native-arm -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build/native-arm
 ```
 

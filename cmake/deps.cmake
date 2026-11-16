@@ -12,9 +12,36 @@ include(GNUInstallDirs)
 # and SceCtrl takes its input from that same layer, which samples SDL pads and
 # keyboards on the video thread.
 #
-# SDL is dlopen'd (source/host/host_video_sdl.c), not linked, so the build needs
-# neither its headers nor its library; that is also what lets the emulator start
-# on a target without SDL installed.
+# SDL is linked, in the version the target's own packages ship, so the build
+# needs a sysroot per Debian architecture (tools/debian-sysroot.py). The
+# packages are the ones the devices run, so the headers, the ABI and the SONAME
+# the binary records cannot disagree with the runtime.
+
+if(VITA2NATIVE_SYSROOT)
+    # PKG_CONFIG_LIBDIR points at the sysroot's .pc files, but
+    # PKG_CONFIG_SYSROOT_DIR is deliberately left unset: zig applies --sysroot to
+    # absolute -L paths itself, so pre-prefixing them here would search inside
+    # the sysroot twice.
+    set(ENV{PKG_CONFIG_LIBDIR}
+        "${VITA2NATIVE_SYSROOT}/usr/lib/${VITA2NATIVE_MULTIARCH}/pkgconfig:${VITA2NATIVE_SYSROOT}/usr/lib/pkgconfig:${VITA2NATIVE_SYSROOT}/usr/share/pkgconfig")
+endif()
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SDL2 REQUIRED sdl2)
+
+if(VITA2NATIVE_SYSROOT)
+    # zig applies --sysroot to -L but not to -I, so include directories have to
+    # be made absolute here while library directories stay as the .pc file wrote
+    # them. /usr/include is skipped: the toolchain already adds it as -isystem,
+    # and naming it again puts glibc ahead of zig's libc++ wrapper headers.
+    set(_v2n_sdl_includes "")
+    foreach(_v2n_include IN LISTS SDL2_INCLUDE_DIRS)
+        if(NOT "${_v2n_include}" STREQUAL "/usr/include")
+            list(APPEND _v2n_sdl_includes "${VITA2NATIVE_SYSROOT}${_v2n_include}")
+        endif()
+    endforeach()
+    set(SDL2_INCLUDE_DIRS "${_v2n_sdl_includes}")
+endif()
 
 set(VITA2NATIVE_DISPLAY_SOURCE source/modules/SceDisplay.c)
 set(VITA2NATIVE_CTRL_SOURCE source/modules/SceCtrl_sdl.c)

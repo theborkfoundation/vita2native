@@ -1,15 +1,13 @@
 /*
  * Video output through SDL.
  *
- * SDL is the fallback presenter and owns platform details on desktops: X11,
- * Wayland or the dummy driver. On KMS/DRM targets (handhelds) presentation
- * attaches EGL straight to the scanout plane and SDL only supplies input.
- * Keeping one implementation means there is no custom DRM/fbdev code to chase
- * across vendor kernels.
+ * SDL owns platform details on desktops: X11, Wayland or the dummy driver. On
+ * KMS/DRM targets (handhelds) presentation attaches EGL straight to the
+ * scanout plane and SDL only supplies input. Keeping one implementation means
+ * there is no custom DRM/fbdev code to chase across vendor kernels.
  *
- * SDL is loaded with dlopen, so the statically linked ARM binary keeps no SDL
- * build dependency: boards with SDL use it, and when no driver can be
- * initialised the emulator simply stays headless (BMP capture still works).
+ * When no video driver can be initialised the emulator stays without output
+ * (BMP capture still works).
  *
  * The guest's GLES context and SDL's GL renderer cannot share a thread: SDL
  * makes its own EGL context current, and on Mesa that leaks GL errors into the
@@ -20,15 +18,17 @@
  *
  * The guest framebuffer is A8B8G8R8, which is SDL_PIXELFORMAT_ABGR8888 on a
  * little-endian host, so frames are uploaded without a conversion. SDL also
- * does the scaling and letterboxing. Renderer handles are opaque and the few
- * constants below are part of SDL 2.x's stable ABI.
+ * does the scaling and letterboxing.
  */
 #include "display.h"
 #include "gfx.h"
 #include "host.h"
 #include "settings.h"
 
-#include <dlfcn.h>
+#define SDL_MAIN_HANDLED
+#include <SDL.h>
+#include <SDL_syswm.h>
+
 #include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -39,175 +39,6 @@
 
 #include <psp2/ctrl.h>
 
-typedef struct SDL_Window SDL_Window;
-typedef struct SDL_Renderer SDL_Renderer;
-typedef struct SDL_Texture SDL_Texture;
-typedef struct _SDL_GameController SDL_GameController;
-typedef struct _SDL_Joystick SDL_Joystick;
-
-typedef struct SDL_Rect {
-    int x, y, w, h;
-} SDL_Rect;
-
-typedef struct SDL_RendererInfo {
-    const char *name;
-    uint32_t flags;
-    uint32_t num_texture_formats;
-    uint32_t texture_formats[16];
-    int max_texture_width;
-    int max_texture_height;
-} SDL_RendererInfo;
-
-/* SDL_ScaleMode, from SDL_render.h. SDL is dlopen'd, so the value is local. */
-#define SDL_ScaleModeNearest 0
-
-typedef struct {
-    uint32_t type;
-    uint8_t padding[60];
-} SdlEvent;
-
-typedef struct {
-    uint32_t type;
-    uint32_t timestamp;
-    uint32_t window_id;
-    uint8_t event;
-    uint8_t padding[3];
-    int32_t data1;
-    int32_t data2;
-} SdlWindowEvent;
-
-typedef struct {
-    void *library;
-    int (*init_subsystem)(unsigned int flags);
-    void (*quit_subsystem)(unsigned int flags);
-    const char *(*get_error)(void);
-    SDL_Window *(*create_window)(const char *, int, int, int, int, unsigned int);
-    void (*destroy_window)(SDL_Window *);
-    SDL_Renderer *(*create_renderer)(SDL_Window *, int, unsigned int);
-    void (*destroy_renderer)(SDL_Renderer *);
-    SDL_Texture *(*create_texture)(SDL_Renderer *, unsigned int, int, int, int);
-    void (*destroy_texture)(SDL_Texture *);
-    int (*set_texture_scale_mode)(SDL_Texture *, int);
-    int (*update_texture)(SDL_Texture *, const SDL_Rect *, const void *, int);
-    int (*render_clear)(SDL_Renderer *);
-    int (*render_copy)(SDL_Renderer *, SDL_Texture *, const SDL_Rect *, const SDL_Rect *);
-    void (*render_present)(SDL_Renderer *);
-    int (*render_set_logical_size)(SDL_Renderer *, int, int);
-    int (*get_window_size)(SDL_Window *, int *, int *);
-    int (*get_renderer_info)(SDL_Renderer *, SDL_RendererInfo *);
-    int (*get_window_wm_info)(SDL_Window *, void *info);
-    const char *(*get_current_video_driver)(void);
-    int (*show_cursor)(int);
-    void (*pump_events)(void);
-    const unsigned char *(*get_keyboard_state)(int *numkeys);
-    int (*num_joysticks)(void);
-    int (*is_game_controller)(int joystick_index);
-    SDL_GameController *(*game_controller_open)(int joystick_index);
-    void (*game_controller_close)(SDL_GameController *controller);
-    int (*game_controller_get_button)(SDL_GameController *, int button);
-    int (*game_controller_get_axis)(SDL_GameController *, int axis);
-    const char *(*game_controller_name)(SDL_GameController *);
-    int (*game_controller_get_attached)(SDL_GameController *);
-    SDL_Joystick *(*joystick_open)(int joystick_index);
-    void (*joystick_close)(SDL_Joystick *);
-    int (*joystick_get_button)(SDL_Joystick *, int button);
-    int (*joystick_get_axis)(SDL_Joystick *, int axis);
-    int (*joystick_get_attached)(SDL_Joystick *);
-    int (*joystick_num_buttons)(SDL_Joystick *);
-    int (*joystick_num_axes)(SDL_Joystick *);
-    const char *(*joystick_name)(SDL_Joystick *);
-    char *(*game_controller_mapping)(SDL_GameController *);
-    void (*free)(void *);
-    unsigned int (*get_mouse_state)(int *, int *);
-    int (*game_controller_rumble)(SDL_GameController *, unsigned short low,
-                                  unsigned short high, unsigned int duration_ms);
-    int (*poll_event)(void *event);
-} SdlApi;
-
-#define SDL_INIT_VIDEO 0x00000020u
-#define SDL_WINDOW_SHOWN 0x00000004u
-#define SDL_WINDOW_FULLSCREEN_DESKTOP 0x00001001u
-#define SDL_RENDERER_ACCELERATED 0x00000002u
-#define SDL_RENDERER_PRESENTVSYNC 0x00000004u
-#define SDL_PIXELFORMAT_ABGR8888 0x16762004u
-#define SDL_TEXTUREACCESS_STREAMING 1
-#define SDL_WINDOWPOS_UNDEFINED 0x1FFF0000u
-
-#define SDL_INIT_GAMECONTROLLER 0x00002000u
-
-/* SDL_GameControllerButton */
-#define SDL_CONTROLLER_BUTTON_A 0
-#define SDL_CONTROLLER_BUTTON_B 1
-#define SDL_CONTROLLER_BUTTON_X 2
-#define SDL_CONTROLLER_BUTTON_Y 3
-#define SDL_CONTROLLER_BUTTON_BACK 4
-#define SDL_CONTROLLER_BUTTON_START 6
-#define SDL_CONTROLLER_BUTTON_LEFTSTICK 7
-#define SDL_CONTROLLER_BUTTON_RIGHTSTICK 8
-#define SDL_CONTROLLER_BUTTON_LEFTSHOULDER 9
-#define SDL_CONTROLLER_BUTTON_RIGHTSHOULDER 10
-#define SDL_CONTROLLER_BUTTON_DPAD_UP 11
-#define SDL_CONTROLLER_BUTTON_DPAD_DOWN 12
-#define SDL_CONTROLLER_BUTTON_DPAD_LEFT 13
-#define SDL_CONTROLLER_BUTTON_DPAD_RIGHT 14
-
-/* SDL_GameControllerAxis */
-#define SDL_CONTROLLER_AXIS_LEFTX 0
-#define SDL_CONTROLLER_AXIS_LEFTY 1
-#define SDL_CONTROLLER_AXIS_RIGHTX 2
-#define SDL_CONTROLLER_AXIS_RIGHTY 3
-#define SDL_CONTROLLER_AXIS_TRIGGERLEFT 4
-#define SDL_CONTROLLER_AXIS_TRIGGERRIGHT 5
-
-/* SDL_Scancode (subset) */
-#define SDL_SCANCODE_A 4
-#define SDL_SCANCODE_E 8
-#define SDL_SCANCODE_Q 20
-#define SDL_SCANCODE_S 22
-#define SDL_SCANCODE_X 27
-#define SDL_SCANCODE_Z 29
-#define SDL_SCANCODE_1 30
-#define SDL_SCANCODE_2 31
-#define SDL_SCANCODE_RETURN 40
-#define SDL_SCANCODE_BACKSPACE 42
-#define SDL_SCANCODE_TAB 43
-#define SDL_SCANCODE_SPACE 44
-#define SDL_SCANCODE_RIGHT 79
-#define SDL_SCANCODE_LEFT 80
-#define SDL_SCANCODE_DOWN 81
-#define SDL_SCANCODE_UP 82
-
-/* SDL_SYSWM_TYPE */
-#define SDL_SYSWM_X11     2
-#define SDL_SYSWM_WAYLAND 6
-
-/*
- * Mirror of SDL_SysWMinfo: SDL_version then the subsystem enum, then the
- * platform union. Only the leading member of each union arm is read here, and
- * the union is padded past the largest real one, so the layout is safe without
- * the SDL headers (this file dlopens SDL).
- */
-typedef struct {
-    uint8_t version[4];
-    int subsystem;
-    union {
-        struct {
-            void *display;
-            unsigned long window;
-        } x11;
-        struct {
-            void *display;
-            void *surface;
-        } wayland;
-        uint8_t padding[64];
-    } info;
-} SdlSysWmInfo;
-
-#define SDL_QUIT 0x100u
-#define SDL_WINDOWEVENT 0x200u
-#define SDL_WINDOWEVENT_SIZE_CHANGED 6
-#define SDL_WINDOWEVENT_CLOSE 14
-
 /* Vita front touch panel. */
 #define TOUCH_PANEL_WIDTH 1920
 #define TOUCH_PANEL_HEIGHT 1088
@@ -217,7 +48,6 @@ typedef struct {
 #define MAX_SDL_PADS 4
 
 struct HostVideo {
-    SdlApi *api;
 
     pthread_t thread;
     pthread_mutex_t lock;
@@ -300,15 +130,14 @@ static uint64_t video_now_ns(void)
 static void video_present(HostVideo *video, const void *rgba, int width, int height,
                           int pitch_pixels)
 {
-    SdlApi *api = video->api;
 
     if (!video->renderer)
         return;
 
     if (!video->texture || video->texture_width != width || video->texture_height != height) {
         if (video->texture)
-            api->destroy_texture(video->texture);
-        video->texture = api->create_texture(video->renderer, SDL_PIXELFORMAT_ABGR8888,
+            SDL_DestroyTexture(video->texture);
+        video->texture = SDL_CreateTexture(video->renderer, SDL_PIXELFORMAT_ABGR8888,
                                              SDL_TEXTUREACCESS_STREAMING, width, height);
         if (!video->texture) {
             video->texture_width = 0;
@@ -324,26 +153,26 @@ static void video_present(HostVideo *video, const void *rgba, int width, int hei
          * the horizontal ratio fractional too. Nearest keeps pixel art sharp
          * for the titles that care and costs nothing for the ones that do not.
          */
-        if (api->set_texture_scale_mode)
-            api->set_texture_scale_mode(video->texture, SDL_ScaleModeNearest);
+        if (SDL_SetTextureScaleMode)
+            SDL_SetTextureScaleMode(video->texture, SDL_ScaleModeNearest);
         if (!video->stretch)
-            api->render_set_logical_size(video->renderer, width, height);
+            SDL_RenderSetLogicalSize(video->renderer, width, height);
     }
 
     /* Guest pixels are A8B8G8R8, i.e. SDL_PIXELFORMAT_ABGR8888. */
-    api->update_texture(video->texture, NULL, rgba, pitch_pixels * 4);
-    api->render_clear(video->renderer);
-    api->render_copy(video->renderer, video->texture, NULL, NULL);
-    api->render_present(video->renderer);
+    SDL_UpdateTexture(video->texture, NULL, rgba, pitch_pixels * 4);
+    SDL_RenderClear(video->renderer);
+    SDL_RenderCopy(video->renderer, video->texture, NULL, NULL);
+    SDL_RenderPresent(video->renderer);
 }
 
 static void video_close_devices(HostVideo *video)
 {
     for (int i = 0; i < video->pad_count; i++) {
-        if (video->pads[i].joystick && video->api->joystick_close)
-            video->api->joystick_close(video->pads[i].joystick);
-        if (video->pads[i].controller && video->api->game_controller_close)
-            video->api->game_controller_close(video->pads[i].controller);
+        if (video->pads[i].joystick && SDL_JoystickClose)
+            SDL_JoystickClose(video->pads[i].joystick);
+        if (video->pads[i].controller && SDL_GameControllerClose)
+            SDL_GameControllerClose(video->pads[i].controller);
         memset(&video->pads[i], 0, sizeof(video->pads[i]));
     }
     video->pad_count = 0;
@@ -351,18 +180,13 @@ static void video_close_devices(HostVideo *video)
 
 static void video_destroy_sdl(HostVideo *video)
 {
-    SdlApi *api = video->api;
-
-    if (!api)
-        return;
-
     video_close_devices(video);
     if (video->texture)
-        api->destroy_texture(video->texture);
+        SDL_DestroyTexture(video->texture);
     if (video->renderer)
-        api->destroy_renderer(video->renderer);
+        SDL_DestroyRenderer(video->renderer);
     if (video->window)
-        api->destroy_window(video->window);
+        SDL_DestroyWindow(video->window);
     video->texture = NULL;
     video->renderer = NULL;
     video->window = NULL;
@@ -380,20 +204,19 @@ static void video_destroy_sdl(HostVideo *video)
 static bool video_init_video_subsystem(HostVideo *video)
 {
     static const char *const kms_drivers[] = {"offscreen", "kmsdrm", "dummy"};
-    SdlApi *api = video->api;
 
     if (!host_display_uses_kms() || getenv("SDL_VIDEODRIVER"))
-        return api->init_subsystem(SDL_INIT_VIDEO) == 0;
+        return SDL_InitSubSystem(SDL_INIT_VIDEO) == 0;
 
     for (unsigned int i = 0; i < sizeof(kms_drivers) / sizeof(kms_drivers[0]); i++) {
         setenv("SDL_VIDEODRIVER", kms_drivers[i], 1);
-        if (api->init_subsystem(SDL_INIT_VIDEO) == 0)
+        if (SDL_InitSubSystem(SDL_INIT_VIDEO) == 0)
             return true;
 
         fprintf(stderr, "vita2native: SDL video driver '%s' unavailable: %s\n", kms_drivers[i],
-                api->get_error());
-        if (api->quit_subsystem)
-            api->quit_subsystem(SDL_INIT_VIDEO);
+                SDL_GetError());
+        if (SDL_QuitSubSystem)
+            SDL_QuitSubSystem(SDL_INIT_VIDEO);
     }
 
     return false;
@@ -407,24 +230,22 @@ static bool video_init_video_subsystem(HostVideo *video)
  */
 static bool video_try_gl_window(HostVideo *video)
 {
-    SdlApi *api = video->api;
-    SdlSysWmInfo info;
+    SDL_SysWMinfo info;
     const char *driver;
 
     if (!vita2native_env_flag("VITA2NATIVE_EGL_WINDOW"))
         return false;
-    if (!video->window || !api->get_window_wm_info)
+    if (!video->window || !SDL_GetWindowWMInfo)
         return false;
 
-    memset(&info, 0, sizeof(info));
-    info.version[0] = 2;
-    if (!api->get_window_wm_info(video->window, &info))
+    SDL_VERSION(&info.version);
+    if (!SDL_GetWindowWMInfo(video->window, &info))
         return false;
 
     if (info.subsystem == SDL_SYSWM_X11)
         video->native_window = (void *)info.info.x11.window;
     else if (info.subsystem == SDL_SYSWM_WAYLAND)
-        video->native_window = info.info.wayland.surface;
+        video->native_window = info.info.wl.surface;
     else
         return false;
 
@@ -432,7 +253,7 @@ static bool video_try_gl_window(HostVideo *video)
         return false;
 
     /* EGL can only take these window types; anything else keeps the renderer. */
-    driver = api->get_current_video_driver ? api->get_current_video_driver() : "";
+    driver = SDL_GetCurrentVideoDriver ? SDL_GetCurrentVideoDriver() : "";
     if (!driver || strcmp(driver, "x11") != 0)
         if (strcmp(driver, "wayland") != 0)
             return false;
@@ -443,21 +264,20 @@ static bool video_try_gl_window(HostVideo *video)
 
 static bool video_init_sdl(HostVideo *video)
 {
-    SdlApi *api = video->api;
     unsigned int window_flags = SDL_WINDOW_SHOWN;
     int panel_width = 0, panel_height = 0;
 
     if (!video_init_video_subsystem(video)) {
-        fprintf(stderr, "vita2native: SDL video init failed: %s\n", api->get_error());
+        fprintf(stderr, "vita2native: SDL video init failed: %s\n", SDL_GetError());
         return false;
     }
 
     /* Controllers are optional: keyboard input and video work without them. */
-    if (api->game_controller_open &&
-        api->init_subsystem(SDL_INIT_GAMECONTROLLER) == 0) {
+    if (SDL_GameControllerOpen &&
+        SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) == 0) {
         video->controller_ready = true;
     } else {
-        fprintf(stderr, "vita2native: SDL controller init failed: %s\n", api->get_error());
+        fprintf(stderr, "vita2native: SDL controller init failed: %s\n", SDL_GetError());
     }
 
     if (host_display_uses_kms()) {
@@ -468,7 +288,7 @@ static bool video_init_sdl(HostVideo *video)
         video->width = 960;
         video->height = 544;
         fprintf(stderr, "vita2native: direct KMS presentation enabled (SDL %s input only)\n",
-                api->get_current_video_driver ? api->get_current_video_driver() : "unknown");
+                SDL_GetCurrentVideoDriver ? SDL_GetCurrentVideoDriver() : "unknown");
         video->controller_scan_at_ns = video_now_ns();
         return true;
     }
@@ -476,11 +296,11 @@ static bool video_init_sdl(HostVideo *video)
     if (!video->windowed)
         window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
 
-    video->window = api->create_window("vita2native", SDL_WINDOWPOS_UNDEFINED,
+    video->window = SDL_CreateWindow("vita2native", SDL_WINDOWPOS_UNDEFINED,
                                        SDL_WINDOWPOS_UNDEFINED, video->window_width,
                                        video->window_height, window_flags);
     if (!video->window) {
-        fprintf(stderr, "vita2native: SDL window creation failed: %s\n", api->get_error());
+        fprintf(stderr, "vita2native: SDL window creation failed: %s\n", SDL_GetError());
         return false;
     }
 
@@ -491,42 +311,42 @@ static bool video_init_sdl(HostVideo *video)
      * verified on a device.
      */
     if (video_try_gl_window(video)) {
-        api->show_cursor(0);
-        api->get_window_size(video->window, &panel_width, &panel_height);
+        SDL_ShowCursor(0);
+        SDL_GetWindowSize(video->window, &panel_width, &panel_height);
         video->width = panel_width > 0 ? panel_width : 960;
         video->height = panel_height > 0 ? panel_height : 544;
         fprintf(stderr, "vita2native: presenting through EGL on the window (%s video, %dx%d)\n",
-                api->get_current_video_driver ? api->get_current_video_driver() : "unknown",
+                SDL_GetCurrentVideoDriver ? SDL_GetCurrentVideoDriver() : "unknown",
                 video->width, video->height);
         video->controller_scan_at_ns = video_now_ns();
         return true;
     }
 
-    video->renderer = api->create_renderer(
+    video->renderer = SDL_CreateRenderer(
         video->window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!video->renderer)
-        video->renderer = api->create_renderer(video->window, -1, 0);
+        video->renderer = SDL_CreateRenderer(video->window, -1, 0);
     if (!video->renderer) {
-        fprintf(stderr, "vita2native: SDL renderer creation failed: %s\n", api->get_error());
+        fprintf(stderr, "vita2native: SDL renderer creation failed: %s\n", SDL_GetError());
         return false;
     }
 
-    api->show_cursor(0);
-    api->get_window_size(video->window, &panel_width, &panel_height);
+    SDL_ShowCursor(0);
+    SDL_GetWindowSize(video->window, &panel_width, &panel_height);
     video->width = panel_width > 0 ? panel_width : 960;
     video->height = panel_height > 0 ? panel_height : 544;
 
-    if (video->renderer && api->get_renderer_info) {
+    if (video->renderer && SDL_GetRendererInfo) {
         SDL_RendererInfo info;
 
         memset(&info, 0, sizeof(info));
-        if (api->get_renderer_info(video->renderer, &info) == 0)
+        if (SDL_GetRendererInfo(video->renderer, &info) == 0)
             fprintf(stderr, "vita2native: SDL renderer '%s' flags 0x%x\n",
                     info.name ? info.name : "?", info.flags);
     }
 
     fprintf(stderr, "vita2native: presenting through SDL (%s video, %dx%d window)\n",
-            api->get_current_video_driver ? api->get_current_video_driver() : "unknown",
+            SDL_GetCurrentVideoDriver ? SDL_GetCurrentVideoDriver() : "unknown",
             video->width, video->height);
 
     video->controller_scan_at_ns = video_now_ns();
@@ -547,12 +367,11 @@ static bool video_pad_open(const HostVideo *video, int device_index)
 
 static void video_close_pad(HostVideo *video, int slot)
 {
-    SdlApi *api = video->api;
 
-    if (video->pads[slot].joystick && api->joystick_close)
-        api->joystick_close(video->pads[slot].joystick);
-    if (video->pads[slot].controller && api->game_controller_close)
-        api->game_controller_close(video->pads[slot].controller);
+    if (video->pads[slot].joystick && SDL_JoystickClose)
+        SDL_JoystickClose(video->pads[slot].joystick);
+    if (video->pads[slot].controller && SDL_GameControllerClose)
+        SDL_GameControllerClose(video->pads[slot].controller);
 
     for (int i = slot; i + 1 < video->pad_count; i++)
         video->pads[i] = video->pads[i + 1];
@@ -567,27 +386,26 @@ static void video_close_pad(HostVideo *video, int slot)
  */
 static void video_scan_pads(HostVideo *video)
 {
-    SdlApi *api = video->api;
     int count;
 
-    if (!video->controller_ready || !api->num_joysticks)
+    if (!video->controller_ready || !SDL_NumJoysticks)
         return;
 
     for (int i = video->pad_count - 1; i >= 0; i--) {
-        if (video->pads[i].controller && api->game_controller_get_attached &&
-            !api->game_controller_get_attached(video->pads[i].controller)) {
+        if (video->pads[i].controller && SDL_GameControllerGetAttached &&
+            !SDL_GameControllerGetAttached(video->pads[i].controller)) {
             fprintf(stderr, "vita2native: SDL controller %d disconnected\n",
                     video->pads[i].device_index);
             video_close_pad(video, i);
-        } else if (video->pads[i].joystick && api->joystick_get_attached &&
-                   !api->joystick_get_attached(video->pads[i].joystick)) {
+        } else if (video->pads[i].joystick && SDL_JoystickGetAttached &&
+                   !SDL_JoystickGetAttached(video->pads[i].joystick)) {
             fprintf(stderr, "vita2native: SDL joystick %d disconnected\n",
                     video->pads[i].device_index);
             video_close_pad(video, i);
         }
     }
 
-    count = api->num_joysticks();
+    count = SDL_NumJoysticks();
     for (int i = 0; i < count && video->pad_count < MAX_SDL_PADS; i++) {
         SDL_GameController *controller = NULL;
         SDL_Joystick *joystick = NULL;
@@ -596,30 +414,30 @@ static void video_scan_pads(HostVideo *video)
         if (video_pad_open(video, i))
             continue;
 
-        if (api->game_controller_open && (!api->is_game_controller || api->is_game_controller(i)))
-            controller = api->game_controller_open(i);
+        if (SDL_GameControllerOpen && (!SDL_IsGameController || SDL_IsGameController(i)))
+            controller = SDL_GameControllerOpen(i);
         if (controller) {
-            name = api->game_controller_name ? api->game_controller_name(controller) : NULL;
+            name = SDL_GameControllerName ? SDL_GameControllerName(controller) : NULL;
             fprintf(stderr, "vita2native: SDL opened controller %d%s%s\n", i, name ? ": " : "",
                     name ? name : "");
             if (vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG") &&
-                api->game_controller_mapping) {
-                char *mapping = api->game_controller_mapping(controller);
+                SDL_GameControllerMapping) {
+                char *mapping = SDL_GameControllerMapping(controller);
 
                 if (mapping) {
                     fprintf(stderr, "vita2native: SDL mapping %s\n", mapping);
-                    if (api->free)
-                        api->free(mapping);
+                    if (SDL_free)
+                        SDL_free(mapping);
                 }
             }
-        } else if (api->joystick_open) {
-            joystick = api->joystick_open(i);
+        } else if (SDL_JoystickOpen) {
+            joystick = SDL_JoystickOpen(i);
             if (joystick) {
-                name = api->joystick_name ? api->joystick_name(joystick) : NULL;
+                name = SDL_JoystickName ? SDL_JoystickName(joystick) : NULL;
                 fprintf(stderr, "vita2native: SDL raw joystick %d%s%s (%d buttons, %d axes)\n", i,
                         name ? ": " : "", name ? name : "",
-                        api->joystick_num_buttons ? api->joystick_num_buttons(joystick) : 0,
-                        api->joystick_num_axes ? api->joystick_num_axes(joystick) : 0);
+                        SDL_JoystickNumButtons ? SDL_JoystickNumButtons(joystick) : 0,
+                        SDL_JoystickNumAxes ? SDL_JoystickNumAxes(joystick) : 0);
             }
         }
 
@@ -754,11 +572,10 @@ static uint8_t sdl_axis_to_vita(int value)
    initialised the subsystem. */
 static void video_poll_events(HostVideo *video)
 {
-    SdlApi *api = video->api;
-    SdlEvent event;
+    SDL_Event event;
 
-    if (api->poll_event) {
-        while (api->poll_event(&event)) {
+    if (SDL_PollEvent) {
+        while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT) {
                 if (vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG")) {
                     fprintf(stderr, "vita2native: SDL quit event\n");
@@ -766,7 +583,7 @@ static void video_poll_events(HostVideo *video)
                 }
                 video->window_closed = true;
             } else if (event.type == SDL_WINDOWEVENT) {
-                const SdlWindowEvent *window_event = (const SdlWindowEvent *)&event;
+                const SDL_WindowEvent *window_event = (const SDL_WindowEvent *)&event;
 
                 if (vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG")) {
                     fprintf(stderr, "vita2native: SDL window event %u (%dx%d)\n",
@@ -784,24 +601,21 @@ static void video_poll_events(HostVideo *video)
                 }
             }
         }
-    } else if (api->pump_events) {
-        api->pump_events();
+    } else if (SDL_PumpEvents) {
+        SDL_PumpEvents();
     }
 }
 
 static void video_sample_touch(HostVideo *video)
 {
-    SdlApi *api = video->api;
     int mouse_x = 0, mouse_y = 0;
     unsigned int buttons;
     bool down;
     bool mapped = false;
     int panel_x = 0, panel_y = 0;
 
-    if (!api || !api->get_mouse_state)
-        return;
 
-    buttons = api->get_mouse_state(&mouse_x, &mouse_y);
+    buttons = SDL_GetMouseState(&mouse_x, &mouse_y);
     down = (buttons & SDL_BUTTON_LMASK) != 0;
 
     if (vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG")) {
@@ -870,22 +684,18 @@ static void video_sample_touch(HostVideo *video)
 
 static void video_sample_input(HostVideo *video)
 {
-    SdlApi *api = video->api;
     unsigned int buttons = 0;
     uint8_t lx = 128, ly = 128, rx = 128, ry = 128;
     bool active = false;
     bool rumble = false;
     uint16_t rumble_low = 0, rumble_high = 0;
 
-    if (!api)
-        return;
-
     video_poll_events(video);
     video_sample_touch(video);
 
-    if (api->get_keyboard_state) {
+    if (SDL_GetKeyboardState) {
         int numkeys = 0;
-        const unsigned char *keys = api->get_keyboard_state(&numkeys);
+        const unsigned char *keys = SDL_GetKeyboardState(&numkeys);
 
         if (keys && numkeys > 0) {
             buttons |= keyboard_button_mask(keys, numkeys);
@@ -930,38 +740,38 @@ static void video_sample_input(HostVideo *video)
             unsigned int pad_buttons = 0;
             int score;
 
-            if (video->pads[p].controller && api->game_controller_get_button) {
+            if (video->pads[p].controller && SDL_GameControllerGetButton) {
                 for (int button = 0; button <= SDL_CONTROLLER_BUTTON_DPAD_RIGHT; button++)
-                    if (api->game_controller_get_button(video->pads[p].controller, button))
+                    if (SDL_GameControllerGetButton(video->pads[p].controller, button))
                         pad_buttons |= controller_button_mask(video, button);
-                if (api->game_controller_get_axis) {
-                    if (api->game_controller_get_axis(video->pads[p].controller,
+                if (SDL_GameControllerGetAxis) {
+                    if (SDL_GameControllerGetAxis(video->pads[p].controller,
                                                       SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 8000)
                         pad_buttons |= SCE_CTRL_L2;
-                    if (api->game_controller_get_axis(video->pads[p].controller,
+                    if (SDL_GameControllerGetAxis(video->pads[p].controller,
                                                       SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 8000)
                         pad_buttons |= SCE_CTRL_R2;
 
-                    plx = sdl_axis_to_vita(api->game_controller_get_axis(
+                    plx = sdl_axis_to_vita(SDL_GameControllerGetAxis(
                         video->pads[p].controller, SDL_CONTROLLER_AXIS_LEFTX));
-                    ply = sdl_axis_to_vita(api->game_controller_get_axis(
+                    ply = sdl_axis_to_vita(SDL_GameControllerGetAxis(
                         video->pads[p].controller, SDL_CONTROLLER_AXIS_LEFTY));
-                    prx = sdl_axis_to_vita(api->game_controller_get_axis(
+                    prx = sdl_axis_to_vita(SDL_GameControllerGetAxis(
                         video->pads[p].controller, SDL_CONTROLLER_AXIS_RIGHTX));
-                    pry = sdl_axis_to_vita(api->game_controller_get_axis(
+                    pry = sdl_axis_to_vita(SDL_GameControllerGetAxis(
                         video->pads[p].controller, SDL_CONTROLLER_AXIS_RIGHTY));
                 }
-            } else if (video->pads[p].joystick && api->joystick_get_button &&
-                       api->joystick_get_axis) {
+            } else if (video->pads[p].joystick && SDL_JoystickGetButton &&
+                       SDL_JoystickGetAxis) {
                 for (int button = 0; button <= 13; button++)
-                    if (api->joystick_get_button(video->pads[p].joystick, button))
+                    if (SDL_JoystickGetButton(video->pads[p].joystick, button))
                         pad_buttons |= raw_button_mask(video, button);
                 /* Linux gamepad axes are X, Y, RX, RY in this order. Triggers
                    are buttons on generic pads, so they need no axis handling. */
-                plx = sdl_axis_to_vita(api->joystick_get_axis(video->pads[p].joystick, 0));
-                ply = sdl_axis_to_vita(api->joystick_get_axis(video->pads[p].joystick, 1));
-                prx = sdl_axis_to_vita(api->joystick_get_axis(video->pads[p].joystick, 2));
-                pry = sdl_axis_to_vita(api->joystick_get_axis(video->pads[p].joystick, 3));
+                plx = sdl_axis_to_vita(SDL_JoystickGetAxis(video->pads[p].joystick, 0));
+                ply = sdl_axis_to_vita(SDL_JoystickGetAxis(video->pads[p].joystick, 1));
+                prx = sdl_axis_to_vita(SDL_JoystickGetAxis(video->pads[p].joystick, 2));
+                pry = sdl_axis_to_vita(SDL_JoystickGetAxis(video->pads[p].joystick, 3));
             } else {
                 continue;
             }
@@ -1011,10 +821,10 @@ static void video_sample_input(HostVideo *video)
     }
     pthread_mutex_unlock(&video->lock);
 
-    if (rumble && api->game_controller_rumble) {
+    if (rumble && SDL_GameControllerRumble) {
         for (int p = 0; p < video->pad_count; p++)
             if (video->pads[p].controller)
-                api->game_controller_rumble(video->pads[p].controller, rumble_low, rumble_high,
+                SDL_GameControllerRumble(video->pads[p].controller, rumble_low, rumble_high,
                                             0xFFFFFFFFu);
     }
 }
@@ -1075,11 +885,9 @@ static void *video_thread(void *arg)
 
     if (!ok) {
         video_destroy_sdl(video);
-        if (video->api && video->api->quit_subsystem) {
-            if (video->controller_ready)
-                video->api->quit_subsystem(SDL_INIT_GAMECONTROLLER);
-            video->api->quit_subsystem(SDL_INIT_VIDEO);
-        }
+        if (video->controller_ready)
+            SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
+        SDL_QuitSubSystem(SDL_INIT_VIDEO);
         return NULL;
     }
 
@@ -1136,112 +944,28 @@ static void *video_thread(void *arg)
     }
 
     video_destroy_sdl(video);
-    if (video->api && video->api->quit_subsystem) {
-        if (video->controller_ready)
-            video->api->quit_subsystem(SDL_INIT_GAMECONTROLLER);
-        video->api->quit_subsystem(SDL_INIT_VIDEO);
-    }
+    if (video->controller_ready)
+        SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
+    SDL_QuitSubSystem(SDL_INIT_VIDEO);
     return NULL;
 }
 
 HostVideo *host_video_open(void)
 {
-    static const char *const library_names[] = {
-        "libSDL2-2.0.so.0", "libSDL2-2.0.so", "libSDL2.so", NULL,
-    };
     HostVideo *video;
-    SdlApi *api;
 
-    api = calloc(1, sizeof(*api));
-    if (!api)
-        return NULL;
-
-    for (int i = 0; library_names[i] && !api->library; i++)
-        api->library = dlopen(library_names[i], RTLD_NOW | RTLD_LOCAL);
-    if (!api->library) {
-        fprintf(stderr, "vita2native: SDL is not available; video output disabled\n");
-        free(api);
-        return NULL;
-    }
-
-#define LOAD_SDL(field, name)                                                                      \
-    do {                                                                                           \
-        *(void **)(&api->field) = dlsym(api->library, name);                                       \
-        if (!api->field) {                                                                         \
-            fprintf(stderr, "vita2native: SDL is missing %s\n", name);                             \
-            goto fail;                                                                             \
-        }                                                                                          \
-    } while (0)
-
-    LOAD_SDL(init_subsystem, "SDL_InitSubSystem");
-    LOAD_SDL(quit_subsystem, "SDL_QuitSubSystem");
-    LOAD_SDL(get_error, "SDL_GetError");
-    LOAD_SDL(create_window, "SDL_CreateWindow");
-    LOAD_SDL(destroy_window, "SDL_DestroyWindow");
-    LOAD_SDL(create_renderer, "SDL_CreateRenderer");
-    LOAD_SDL(destroy_renderer, "SDL_DestroyRenderer");
-    LOAD_SDL(create_texture, "SDL_CreateTexture");
-    LOAD_SDL(destroy_texture, "SDL_DestroyTexture");
-    LOAD_SDL(update_texture, "SDL_UpdateTexture");
-    LOAD_SDL(render_clear, "SDL_RenderClear");
-    LOAD_SDL(render_copy, "SDL_RenderCopy");
-    LOAD_SDL(render_present, "SDL_RenderPresent");
-    LOAD_SDL(render_set_logical_size, "SDL_RenderSetLogicalSize");
-    LOAD_SDL(get_window_size, "SDL_GetWindowSize");
-    LOAD_SDL(get_renderer_info, "SDL_GetRendererInfo");
-    LOAD_SDL(show_cursor, "SDL_ShowCursor");
-    *(void **)(&api->get_window_wm_info) = dlsym(api->library, "SDL_GetWindowWMInfo");
-    *(void **)(&api->get_current_video_driver) = dlsym(api->library, "SDL_GetCurrentVideoDriver");
-    *(void **)(&api->set_texture_scale_mode) =
-        dlsym(api->library, "SDL_SetTextureScaleMode");
     /*
-     * SDL_RenderSetLogicalSize does the letterbox scaling itself, and it reads
-     * this hint rather than the texture's scale mode, so both are set. The
-     * hint must be in place before any texture or renderer exists.
+     * Letterbox scaling is SDL_RenderSetLogicalSize's job, and it reads this
+     * hint rather than the texture's scale mode. Nearest keeps pixel art sharp;
+     * the hint has to be set before any texture or renderer exists.
      */
-    {
-        int (*set_hint)(const char *, const char *) =
-            (int (*)(const char *, const char *))dlsym(api->library, "SDL_SetHint");
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
 
-        if (set_hint)
-            set_hint("SDL_RENDER_SCALE_QUALITY", "0"); /* nearest */
-    }
-
-    /* Input is optional: every symbol below may be absent on a minimal SDL
-       build, and missing video symbols are the only hard failures. */
-    *(void **)(&api->pump_events) = dlsym(api->library, "SDL_PumpEvents");
-    *(void **)(&api->get_keyboard_state) = dlsym(api->library, "SDL_GetKeyboardState");
-    *(void **)(&api->num_joysticks) = dlsym(api->library, "SDL_NumJoysticks");
-    *(void **)(&api->is_game_controller) = dlsym(api->library, "SDL_IsGameController");
-    *(void **)(&api->game_controller_open) = dlsym(api->library, "SDL_GameControllerOpen");
-    *(void **)(&api->game_controller_close) = dlsym(api->library, "SDL_GameControllerClose");
-    *(void **)(&api->game_controller_get_button) =
-        dlsym(api->library, "SDL_GameControllerGetButton");
-    *(void **)(&api->game_controller_get_axis) = dlsym(api->library, "SDL_GameControllerGetAxis");
-    *(void **)(&api->game_controller_name) = dlsym(api->library, "SDL_GameControllerName");
-    *(void **)(&api->game_controller_get_attached) =
-        dlsym(api->library, "SDL_GameControllerGetAttached");
-    *(void **)(&api->joystick_open) = dlsym(api->library, "SDL_JoystickOpen");
-    *(void **)(&api->joystick_close) = dlsym(api->library, "SDL_JoystickClose");
-    *(void **)(&api->joystick_get_button) = dlsym(api->library, "SDL_JoystickGetButton");
-    *(void **)(&api->joystick_get_axis) = dlsym(api->library, "SDL_JoystickGetAxis");
-    *(void **)(&api->joystick_get_attached) = dlsym(api->library, "SDL_JoystickGetAttached");
-    *(void **)(&api->joystick_num_buttons) = dlsym(api->library, "SDL_JoystickNumButtons");
-    *(void **)(&api->joystick_num_axes) = dlsym(api->library, "SDL_JoystickNumAxes");
-    *(void **)(&api->joystick_name) = dlsym(api->library, "SDL_JoystickName");
-    *(void **)(&api->game_controller_mapping) = dlsym(api->library, "SDL_GameControllerMapping");
-    *(void **)(&api->free) = dlsym(api->library, "SDL_free");
-    *(void **)(&api->get_mouse_state) = dlsym(api->library, "SDL_GetMouseState");
-    *(void **)(&api->game_controller_rumble) = dlsym(api->library, "SDL_GameControllerRumble");
-    *(void **)(&api->poll_event) = dlsym(api->library, "SDL_PollEvent");
-
-#undef LOAD_SDL
 
     video = calloc(1, sizeof(*video));
     if (!video)
         goto fail;
 
-    video->api = api;
     video->stretch = vita2native_env_flag("VITA2NATIVE_STRETCH");
     video->windowed = vita2native_env_flag("VITA2NATIVE_SDL_WINDOWED");
     video->swap_ab = vita2native_env_flag("VITA2NATIVE_CTRL_SWAP_AB");
@@ -1297,9 +1021,6 @@ HostVideo *host_video_open(void)
     return video;
 
 fail:
-    if (api->library)
-        dlclose(api->library);
-    free(api);
     return NULL;
 }
 
@@ -1323,11 +1044,6 @@ void host_video_close(HostVideo *video)
     pthread_mutex_destroy(&video->lock);
     pthread_cond_destroy(&video->cond);
     free(video->frame);
-    if (video->api) {
-        if (video->api->library)
-            dlclose(video->api->library);
-        free(video->api);
-    }
     free(video);
 }
 
