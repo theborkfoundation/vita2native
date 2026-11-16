@@ -106,6 +106,7 @@ static const Setting g_settings[] = {
     FLAG("VITA2NATIVE_TRACE_F32M", "log F32M texture uploads and reads"),
     FLAG("VITA2NATIVE_TRACE_PARAMS", "log program parameter lookups"),
     FLAG("VITA2NATIVE_TRACE_TEXTURES", "log texture uploads"),
+    INT("VITA2NATIVE_DECODE_THREADS", "worker threads for texture decode (1 = A/B control)"),
     FLAG("VITA2NATIVE_TRACE_VIEWPORT", "log the first 16 viewport transforms"),
     STR("VITA2NATIVE_UNIFORM_DUMP", "dump the uniforms of the program with this hash"),
     FLAG("VITA2NATIVE_UNIFORM_NAMES", "annotate uniform traces with the GXP parameter names"),

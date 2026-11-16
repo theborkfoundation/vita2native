@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "gxm/decode_bands.h"
 #include "gxm/texture_compressed.h"
 
 static const uint8_t pvrtc_mod_normal[4] = { 0, 3, 5, 8 };
@@ -239,6 +240,33 @@ static void pvrtc4_block(const uint32_t *words, uint32_t num_x, uint32_t num_y,
     }
 }
 
+typedef struct {
+    const uint32_t *words;
+    uint32_t num_x;
+    uint32_t num_y;
+    const uint32_t *twiddle;
+    uint8_t *dest;
+    uint32_t width;
+} Pvrtc4Job;
+
+/*
+ * Decodes one band of destination rows. word_y = -1 writes rows 0..3, so the
+ * first word of a band is row/4 - 1; the runner aligns bands to 4 rows, which
+ * keeps every block whole.
+ */
+static void pvrtc4_band(void *context, uint32_t first_row, uint32_t last_row)
+{
+    const Pvrtc4Job *job = context;
+    int first_word = (int)(first_row / 4) - 1;
+    int last_word = (int)(last_row / 4) - 1;
+
+    for (int word_y = first_word; word_y < last_word; word_y++) {
+        for (int word_x = -1; word_x < (int)job->num_x - 1; word_x++)
+            pvrtc4_block(job->words, job->num_x, job->num_y, job->twiddle, word_x, word_y,
+                         job->dest, job->width);
+    }
+}
+
 int gxm_texture_decode_pvrtc4_fast(const void *data, uint32_t width, uint32_t height, uint8_t *dest)
 {
     const uint32_t *words = data;
@@ -262,9 +290,10 @@ int gxm_texture_decode_pvrtc4_fast(const void *data, uint32_t width, uint32_t he
             twiddle[y * num_x + x] = pvrtc_twiddle(num_x, num_y, x, y);
     }
 
-    for (int word_y = -1; word_y < (int)num_y - 1; word_y++) {
-        for (int word_x = -1; word_x < (int)num_x - 1; word_x++)
-            pvrtc4_block(words, num_x, num_y, twiddle, word_x, word_y, dest, width);
+    {
+        Pvrtc4Job job = { words, num_x, num_y, twiddle, dest, width };
+
+        gxm_decode_in_bands(width, height, 4, pvrtc4_band, &job);
     }
 
     free(twiddle);

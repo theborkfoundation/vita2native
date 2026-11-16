@@ -36,11 +36,31 @@ Angry Birds Trilogy plays menu music and effects on the R36S.
 
 ### Parallel texture decode
 
-Decode runs synchronously on the GXM thread while the GPU is idle. Split
-swizzled U4 and PVRTC4 levels into destination-row bands across a small worker
-pool (2-3 threads). Expected 1.8-2.5x on the 2048x2048 U4 (~53 ms cooled) and
-PVRTC 1024x1024 (~78 ms) decodes. The GL upload stays serial. Keep an
-environment switch for A/B and do not parallelise levels below ~512x512.
+**Status:** done. `include/gxm/decode_bands.h` splits a decode into
+destination-row bands (aligned to the decoder's unit: 32-row Morton tiles, 4x4
+blocks) across `VITA2NATIVE_DECODE_THREADS` workers (default 3, `1` is the A/B
+control), skipping levels below 512x512. Applied to the swizzled U4/U8 tile
+decoders, the swizzled U4 RGBA4 row decoder and PVRTC-I 4bpp.
+
+Measured on the R36S with `texture_smoke --bench`, 1 thread -> 3:
+
+| decoder | 1 thread | 3 threads |
+| --- | --- | --- |
+| u4 swizzled | 95.6 ms | 35.8 ms |
+| u4 swizzled rgba4 ABGR | 128.9 ms | 57.9 ms |
+| u4 swizzled rgba4 RGBA | 59.9 ms | 30.7 ms |
+| u8 swizzled | 246.3 ms | 86.9 ms |
+| pvrtc4 512 | 21.7 ms | 8.3 ms |
+| pvrtc4 1024 | 87.1 ms | 33.3 ms |
+
+Linear and PVRTC-II paths are unchanged (2.6-2.8x on the banded ones).
+`texture_smoke` compares every banded decode against the reference decoder, so
+the split is verified per-pixel, not just by timing.
+
+**Found while measuring:** Iconoclasts' intro spends 65-83 ms per 640x360 video
+texture, which is ~280 ns/pixel against 2.6-22 ns/pixel for the fast decoders -
+those frames do not take any of the paths above. Worth a separate look; it is
+the largest decode cost seen in that title.
 
 ### Async decode-ahead
 

@@ -13,6 +13,7 @@
  * format. Paletted formats look the index up in an A8B8G8R8 palette.
  */
 #include "gxm/texture.h"
+#include "gxm/decode_bands.h"
 #include "gxm/texture_compressed.h"
 #include "settings.h"
 
@@ -1121,12 +1122,13 @@ static __attribute__((always_inline)) inline uint16_t u4_rgba4_convert(uint16_t 
 
 static void decode_swizzled_tiles_fast4(uint8_t *dest, const uint8_t *input,
                                         const GxmTextureLevel *info, uint32_t minimum, uint32_t k,
-                                        const uint8_t map[4])
+                                        const uint8_t map[4], uint32_t first_row,
+                                        uint32_t last_row)
 {
     const uint32_t *lut = u4_rgba_lut(map);
     uint32_t mask = minimum - 1;
 
-    for (uint32_t ty = 0; ty < info->layout_height; ty += 32) {
+    for (uint32_t ty = first_row; ty < last_row; ty += 32) {
         uint32_t height = info->height > ty ? info->height - ty : 0;
 
         if (height > 32)
@@ -1164,11 +1166,12 @@ static void decode_swizzled_tiles_fast4(uint8_t *dest, const uint8_t *input,
 
 static void decode_swizzled_tiles_fast8(uint8_t *dest, const uint8_t *input,
                                         const GxmTextureLevel *info, uint32_t minimum, uint32_t k,
-                                        const uint8_t map[4], uint32_t count)
+                                        const uint8_t map[4], uint32_t count, uint32_t first_row,
+                                        uint32_t last_row)
 {
     uint32_t mask = minimum - 1;
 
-    for (uint32_t ty = 0; ty < info->layout_height; ty += 32) {
+    for (uint32_t ty = first_row; ty < last_row; ty += 32) {
         uint32_t height = info->height > ty ? info->height - ty : 0;
 
         if (height > 32)
@@ -1208,6 +1211,33 @@ static void decode_swizzled_tiles_fast8(uint8_t *dest, const uint8_t *input,
             }
         }
     }
+}
+
+typedef struct {
+    uint8_t *dest;
+    const uint8_t *input;
+    const GxmTextureLevel *info;
+    uint32_t minimum;
+    uint32_t k;
+    const uint8_t *map;
+    uint32_t count;
+    bool wide;
+} GxmSwizzledJob;
+
+static void gxm_swizzled_band4(void *context, uint32_t first_row, uint32_t last_row)
+{
+    const GxmSwizzledJob *job = context;
+
+    decode_swizzled_tiles_fast4(job->dest, job->input, job->info, job->minimum, job->k, job->map,
+                                first_row, last_row);
+}
+
+static void gxm_swizzled_band8(void *context, uint32_t first_row, uint32_t last_row)
+{
+    const GxmSwizzledJob *job = context;
+
+    decode_swizzled_tiles_fast8(job->dest, job->input, job->info, job->minimum, job->k, job->map,
+                                job->count, first_row, last_row);
 }
 
 static void decode_linear_fast4(uint8_t *dest, const uint8_t *input, uint32_t width,
@@ -1352,11 +1382,12 @@ static void decode_linear_fast16(uint8_t *dest, const uint8_t *input, uint32_t w
 static void decode_swizzled_rows_fast4_rgba4(uint16_t *dest, const uint8_t *input,
                                              const GxmTextureLevel *info, uint32_t minimum,
                                              uint32_t k, U4Rgba4Mode mode,
-                                             const U4Rgba4Tables *tables)
+                                             const U4Rgba4Tables *tables, uint32_t first_row,
+                                             uint32_t last_row)
 {
     uint32_t mask = minimum - 1;
 
-    for (uint32_t ty = 0; ty < info->layout_height; ty += 32) {
+    for (uint32_t ty = first_row; ty < last_row; ty += 32) {
         uint32_t height = info->height > ty ? info->height - ty : 0;
 
         if (height > 32)
@@ -1422,6 +1453,24 @@ static void decode_swizzled_rows_fast4_rgba4(uint16_t *dest, const uint8_t *inpu
             }
         }
     }
+}
+
+typedef struct {
+    uint16_t *dest;
+    const uint8_t *input;
+    const GxmTextureLevel *info;
+    uint32_t minimum;
+    uint32_t k;
+    U4Rgba4Mode mode;
+    const U4Rgba4Tables *tables;
+} GxmRgba4Job;
+
+static void gxm_rgba4_band(void *context, uint32_t first_row, uint32_t last_row)
+{
+    const GxmRgba4Job *job = context;
+
+    decode_swizzled_rows_fast4_rgba4(job->dest, job->input, job->info, job->minimum, job->k,
+                                     job->mode, job->tables, first_row, last_row);
 }
 
 static void decode_linear_fast4_rgba4(uint16_t *dest, const uint8_t *input, uint32_t width,
@@ -2087,12 +2136,18 @@ static int decode_level_rgba8(uint8_t *dest, const uint8_t *input,
             uint32_t mask = minimum - 1;
 
             if (!palette && texel.fast4) {
-                decode_swizzled_tiles_fast4(dest, input, info, minimum, k, texel.map);
+                GxmSwizzledJob job = {dest, input, info, minimum, k, texel.map, 0, false};
+
+                gxm_decode_in_bands(info->layout_width, info->layout_height, 32,
+                                    gxm_swizzled_band4, &job);
                 return 0;
             }
             if (!palette && texel.fast8) {
-                decode_swizzled_tiles_fast8(dest, input, info, minimum, k, texel.map,
-                                            texel.info.count);
+                GxmSwizzledJob job = {dest,          input, info, minimum, k,
+                                      texel.map,     texel.info.count, true};
+
+                gxm_decode_in_bands(info->layout_width, info->layout_height, 32,
+                                    gxm_swizzled_band8, &job);
                 return 0;
             }
 
@@ -2252,7 +2307,10 @@ static int decode_level_rgba4(uint16_t *dest, const uint8_t *input, SceGxmTextur
         if ((type == SCE_GXM_TEXTURE_SWIZZLED || type == SCE_GXM_TEXTURE_CUBE) &&
             info->layout_width >= 32 && info->layout_height >= 32 &&
             is_power_of_two(info->layout_width) && is_power_of_two(info->layout_height)) {
-            decode_swizzled_rows_fast4_rgba4(dest, input, info, minimum, k, mode, tables);
+            GxmRgba4Job job = { dest, input, info, minimum, k, mode, tables };
+
+            gxm_decode_in_bands(info->layout_width, info->layout_height, 32, gxm_rgba4_band,
+                                &job);
             return 0;
         }
 
