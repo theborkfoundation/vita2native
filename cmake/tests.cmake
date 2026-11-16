@@ -353,7 +353,12 @@ if(NOT VITA2NATIVE_HEADLESS)
         SOURCES
             tests/display_egl_smoke.c
             source/modules/SceDisplay_linux.c
+            source/modules/SceCommonDialog.c
+            source/modules/common_dialog_overlay.c
+            source/modules/SceSysmem.c
+            source/modules/SceAppUtil.c
             ${VITA2NATIVE_HOST_GFX_SOURCES}
+            source/host/host_fs.c
             source/host/host_thread.c
             source/log.c
             source/netlog.c
@@ -361,9 +366,11 @@ if(NOT VITA2NATIVE_HEADLESS)
             source/host
             external/khronos/include
             external/Vita3K/external/LibAtrac9/C/src
+            external/font8x8
+            external/mlib
             ${SDL2_INCLUDE_DIRS}
         DEFINES _FILE_OFFSET_BITS=64
-        LIBS ${SDL2_LIBRARIES} ${CMAKE_DL_LIBS} m pthread)
+        LIBS mlib ${SDL2_LIBRARIES} ${CMAKE_DL_LIBS} m pthread)
 endif()
 
 # shader_smoke takes a .gxp path, so it registers one ctest entry per fixture

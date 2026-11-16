@@ -18,8 +18,33 @@ if(VITA2NATIVE_HEADLESS)
     set(VITA2NATIVE_DISPLAY_SOURCE source/modules/SceDisplay_null.c)
     set(VITA2NATIVE_CTRL_SOURCE source/modules/SceCtrl_null.c)
 else()
+    # The target's SDL2 is whatever the devices run, taken from a Debian
+    # sysroot (tools/debian-sysroot.py). PKG_CONFIG_LIBDIR points at that
+    # sysroot's .pc files, but PKG_CONFIG_SYSROOT_DIR is deliberately left unset:
+    # zig already applies --sysroot to absolute -I/-L paths, so pre-prefixing
+    # them here would search inside the sysroot twice.
+    if(VITA2NATIVE_SYSROOT)
+        set(_v2n_triplet "arm-linux-gnueabihf")
+        set(ENV{PKG_CONFIG_LIBDIR}
+            "${VITA2NATIVE_SYSROOT}/usr/lib/${_v2n_triplet}/pkgconfig:${VITA2NATIVE_SYSROOT}/usr/lib/pkgconfig:${VITA2NATIVE_SYSROOT}/usr/share/pkgconfig")
+    endif()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(SDL2 REQUIRED sdl2)
+    if(VITA2NATIVE_SYSROOT)
+        # zig applies --sysroot to -L but not to -I, so include directories have
+        # to be made absolute here while library directories stay as the .pc
+        # file wrote them.
+        set(_v2n_sdl_includes "")
+        foreach(_v2n_include IN LISTS SDL2_INCLUDE_DIRS)
+            # --sysroot already covers the target's /usr/include, and naming it
+            # explicitly puts the C library ahead of zig's libc++ wrapper
+            # headers, which then fail to find their own <ctype.h>.
+            if(NOT "${_v2n_include}" STREQUAL "/usr/include")
+                list(APPEND _v2n_sdl_includes "${VITA2NATIVE_SYSROOT}${_v2n_include}")
+            endif()
+        endforeach()
+        set(SDL2_INCLUDE_DIRS "${_v2n_sdl_includes}")
+    endif()
     set(VITA2NATIVE_DISPLAY_SOURCE source/modules/SceDisplay_linux.c)
     set(VITA2NATIVE_CTRL_SOURCE source/modules/SceCtrl_linux.c)
 endif()
