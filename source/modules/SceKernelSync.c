@@ -51,6 +51,11 @@ typedef struct {
     int init_count;
     int max_count;
     int waiting;
+    /* Lookup references, so deletion can wait for users to leave. */
+    _Atomic int refs;
+    bool removed;
+    /* Bumped by Cancel so a blocked waiter can tell it was cancelled. */
+    unsigned int cancel_generation;
     pthread_mutex_t mutex;
     pthread_cond_t cond;
 } VitaSemaInfo;
@@ -75,18 +80,35 @@ static SceUID trace_thread_uid(void)
     return ti ? ti->uid : 0;
 }
 
+/*
+ * Takes a reference on the object, so a concurrent delete cannot free it while
+ * this caller is using it. Pair every acquire with a release.
+ */
 static VitaSemaInfo *sema_lookup(SceUID uid)
 {
     VitaSemaInfo *sema;
-
     VitaSemaInfo **slot;
 
     rwlockReadLock(&g_semas_lock);
     slot = vita_sema_dict_get(g_semas, uid);
     sema = slot ? *slot : NULL;
+    if (sema)
+        atomic_fetch_add(&sema->refs, 1);
     rwlockReadUnlock(&g_semas_lock);
 
     return sema;
+}
+
+static void sema_release(VitaSemaInfo *sema)
+{
+    if (!sema)
+        return;
+
+    if (atomic_fetch_sub(&sema->refs, 1) == 1 && sema->removed) {
+        pthread_cond_destroy(&sema->cond);
+        pthread_mutex_destroy(&sema->mutex);
+        free(sema);
+    }
 }
 
 static void deadline_from_us(struct timespec *ts, SceUInt microseconds)
@@ -131,13 +153,19 @@ static int sema_wait(VitaSemaInfo *sema, int need, const SceUInt *timeout)
      */
     {
         struct timespec deadline;
+        unsigned int generation;
         bool timed = timeout != NULL;
 
         if (timed)
             deadline_from_us(&deadline, *timeout);
 
         pthread_mutex_lock(&sema->mutex);
+        generation = sema->cancel_generation;
         while (sema->count < need) {
+            if (sema->removed) {
+                result = SCE_KERNEL_ERROR_WAIT_DELETE;
+                break;
+            }
             sema->waiting++;
 
             if (timed) {
@@ -150,6 +178,9 @@ static int sema_wait(VitaSemaInfo *sema, int need, const SceUInt *timeout)
             }
 
             sema->waiting--;
+            /* A cancel that arrived while we slept is our result, not a signal. */
+            if (result == 0 && sema->cancel_generation != generation)
+                result = SCE_KERNEL_ERROR_WAIT_CANCEL;
             if (result != 0)
                 break;
         }
@@ -235,14 +266,17 @@ EXPORT(SceThreadmgr, 0xDB32948A, int, sceKernelDeleteSema, SceUID uid)
     vita_sema_dict_erase(g_semas, uid);
     rwlockWriteUnlock(&g_semas_lock);
 
+    /*
+     * Mark the object deleted and wake anyone blocked on it, so they can return
+     * WAIT_DELETE. The object itself is destroyed by whichever holder drops the
+     * last reference - usually a waiter leaving its loop.
+     */
     pthread_mutex_lock(&sema->mutex);
+    sema->removed = true;
     pthread_cond_broadcast(&sema->cond);
     pthread_mutex_unlock(&sema->mutex);
 
-    pthread_cond_destroy(&sema->cond);
-    pthread_mutex_destroy(&sema->mutex);
-    free(sema);
-
+    sema_release(sema);
     return 0;
 }
 
@@ -262,6 +296,7 @@ EXPORT(SceThreadmgr, 0xE6B761D1, int, sceKernelSignalSema, SceUID uid, int signa
     pthread_mutex_lock(&sema->mutex);
     if (sema->count + signal > sema->max_count) {
         pthread_mutex_unlock(&sema->mutex);
+        sema_release(sema);
         return SCE_KERNEL_ERROR_SEMA_OVF;
     }
     sema->count += signal;
@@ -272,6 +307,7 @@ EXPORT(SceThreadmgr, 0xE6B761D1, int, sceKernelSignalSema, SceUID uid, int signa
         LOG("SemaSignal uid=0x%x signal=%d count=%d thid=0x%x ra=%p", uid, signal, sema->count,
             trace_thread_uid(), __builtin_return_address(0));
 
+    sema_release(sema);
     return 0;
 }
 
@@ -287,6 +323,7 @@ EXPORT(SceLibKernel, 0x0C7B834B, int, sceKernelWaitSema, SceUID uid, int signal,
         LOG("SemaWait uid=0x%x need=%d count=%d thid=0x%x ra=%p", uid, signal, sema->count,
             trace_thread_uid(), __builtin_return_address(0));
 
+    sema_release(sema);
     return sema_wait(sema, signal, timeout);
 }
 
@@ -324,11 +361,13 @@ EXPORT(SceThreadmgr, 0x866EF048, int, sceKernelPollSema, SceUID uid, int signal)
     pthread_mutex_lock(&sema->mutex);
     if (sema->count < signal) {
         pthread_mutex_unlock(&sema->mutex);
+        sema_release(sema);
         return SCE_KERNEL_ERROR_SEMA_ZERO;
     }
     sema->count -= signal;
     pthread_mutex_unlock(&sema->mutex);
 
+    sema_release(sema);
     return 0;
 }
 
@@ -353,9 +392,12 @@ EXPORT(SceLibKernel, 0x66D6BF05, int, sceKernelCancelSema, SceUID uid, int set_c
         *num_wait_threads = sema->waiting;
     if (set_count >= 0)
         sema->count = set_count;
+    /* Waiters compare this to the value they saw when they started waiting. */
+    sema->cancel_generation++;
     pthread_cond_broadcast(&sema->cond);
     pthread_mutex_unlock(&sema->mutex);
 
+    sema_release(sema);
     return 0;
 }
 
@@ -387,6 +429,7 @@ EXPORT(SceLibKernel, 0x595D3FA6, int, sceKernelGetSemaInfo, SceUID uid, SceKerne
     info->numWaitThreads = sema->waiting;
     pthread_mutex_unlock(&sema->mutex);
 
+    sema_release(sema);
     return 0;
 }
 
@@ -420,7 +463,13 @@ EXPORT(SceThreadmgr, 0xCBE235C7, SceUID, sceKernelOpenSema, const char *name)
 
 EXPORT(SceThreadmgr, 0xA2D81F9E, int, sceKernelCloseSema, SceUID uid)
 {
-    return sema_lookup(uid) ? 0 : SCE_KERNEL_ERROR_UNKNOWN_SEMA_ID;
+    VitaSemaInfo *sema = sema_lookup(uid);
+
+    if (!sema)
+        return SCE_KERNEL_ERROR_UNKNOWN_SEMA_ID;
+
+    sema_release(sema);
+    return 0;
 }
 
 /* ------------------------------------------------------------ event flags */
@@ -432,6 +481,9 @@ typedef struct {
     uint32_t init_pattern;
     uint32_t pattern;
     int waiting;
+    _Atomic int refs;
+    bool removed;
+    unsigned int cancel_generation;
     pthread_mutex_t mutex;
     pthread_cond_t cond;
 } VitaEventFlagInfo;
@@ -440,18 +492,32 @@ DICT_DEF2(vita_event_flag_dict, SceUID, M_DEFAULT_OPLIST, VitaEventFlagInfo *, M
 static vita_event_flag_dict_t g_event_flags;
 static RwLock g_event_flags_lock;
 
+/* See sema_lookup: a reference keeps the object alive across a delete. */
 static VitaEventFlagInfo *event_flag_lookup(SceUID uid)
 {
     VitaEventFlagInfo *evf;
-
     VitaEventFlagInfo **slot;
 
     rwlockReadLock(&g_event_flags_lock);
     slot = vita_event_flag_dict_get(g_event_flags, uid);
     evf = slot ? *slot : NULL;
+    if (evf)
+        atomic_fetch_add(&evf->refs, 1);
     rwlockReadUnlock(&g_event_flags_lock);
 
     return evf;
+}
+
+static void event_flag_release(VitaEventFlagInfo *evf)
+{
+    if (!evf)
+        return;
+
+    if (atomic_fetch_sub(&evf->refs, 1) == 1 && evf->removed) {
+        pthread_cond_destroy(&evf->cond);
+        pthread_mutex_destroy(&evf->mutex);
+        free(evf);
+    }
 }
 
 static bool event_flag_matches(const VitaEventFlagInfo *evf, uint32_t bits, SceUInt wait)
@@ -481,14 +547,22 @@ static int event_flag_wait(VitaEventFlagInfo *evf, uint32_t bits, SceUInt wait,
     {
         /* As with the semaphore: one absolute deadline for the whole wait. */
         struct timespec deadline;
+        unsigned int generation;
         bool timed = timeout != NULL;
 
         if (timed)
             deadline_from_us(&deadline, *timeout);
 
     pthread_mutex_lock(&evf->mutex);
+    generation = evf->cancel_generation;
 
     for (;;) {
+        if (evf->removed) {
+            if (out_bits)
+                *out_bits = evf->pattern;
+            result = SCE_KERNEL_ERROR_WAIT_DELETE;
+            break;
+        }
         if (event_flag_matches(evf, bits, wait)) {
             if (out_bits)
                 *out_bits = evf->pattern;
@@ -511,6 +585,8 @@ static int event_flag_wait(VitaEventFlagInfo *evf, uint32_t bits, SceUInt wait,
             pthread_cond_wait(&evf->cond, &evf->mutex);
         }
         evf->waiting--;
+        if (result == 0 && evf->cancel_generation != generation)
+            result = SCE_KERNEL_ERROR_WAIT_CANCEL;
 
         if (result != 0) {
             if (out_bits)
@@ -573,14 +649,13 @@ EXPORT(SceThreadmgr, 0x5840162C, int, sceKernelDeleteEventFlag, SceUID uid)
     vita_event_flag_dict_erase(g_event_flags, uid);
     rwlockWriteUnlock(&g_event_flags_lock);
 
+    /* As with semaphores: mark, wake with WAIT_DELETE, free on the last release. */
     pthread_mutex_lock(&evf->mutex);
+    evf->removed = true;
     pthread_cond_broadcast(&evf->cond);
     pthread_mutex_unlock(&evf->mutex);
 
-    pthread_cond_destroy(&evf->cond);
-    pthread_mutex_destroy(&evf->mutex);
-    free(evf);
-
+    event_flag_release(evf);
     return 0;
 }
 
@@ -596,6 +671,7 @@ EXPORT(SceThreadmgr, 0xEC94DFF7, int, sceKernelSetEventFlag, SceUID uid, unsigne
     pthread_cond_broadcast(&evf->cond);
     pthread_mutex_unlock(&evf->mutex);
 
+    event_flag_release(evf);
     return 0;
 }
 
@@ -611,6 +687,7 @@ EXPORT(SceThreadmgr, 0x4CB87CA7, int, sceKernelClearEventFlag, SceUID uid, unsig
     pthread_cond_broadcast(&evf->cond);
     pthread_mutex_unlock(&evf->mutex);
 
+    event_flag_release(evf);
     return 0;
 }
 
@@ -622,6 +699,7 @@ EXPORT(SceLibKernel, 0x83C0E2AF, int, sceKernelWaitEventFlag, SceUID uid, unsign
     if (!evf)
         return SCE_KERNEL_ERROR_UNKNOWN_EVF_ID;
 
+    event_flag_release(evf);
     return event_flag_wait(evf, bits, wait, out_bits, timeout, true);
 }
 
@@ -657,6 +735,7 @@ EXPORT(SceLibKernel, 0x1FBB0FE1, int, sceKernelPollEventFlag, int uid, unsigned 
     if (!evf)
         return SCE_KERNEL_ERROR_UNKNOWN_EVF_ID;
 
+    event_flag_release(evf);
     return event_flag_wait(evf, bits, wait, out_bits, NULL, false);
 }
 
@@ -682,6 +761,7 @@ EXPORT(SceLibKernel, 0x8BA4C0C1, int, sceKernelGetEventFlagInfo, SceUID uid,
     info->numWaitThreads = evf->waiting;
     pthread_mutex_unlock(&evf->mutex);
 
+    event_flag_release(evf);
     return 0;
 }
 
@@ -711,9 +791,11 @@ EXPORT(SceLibKernel, 0x2A12D9B7, int, sceKernelCancelEventFlag, SceUID uid, unsi
     if (num_wait_threads)
         *num_wait_threads = evf->waiting;
     evf->pattern = set_pattern;
+    evf->cancel_generation++;
     pthread_cond_broadcast(&evf->cond);
     pthread_mutex_unlock(&evf->mutex);
 
+    event_flag_release(evf);
     return 0;
 }
 
@@ -742,7 +824,13 @@ EXPORT(SceThreadmgr, 0xBC19F8A1, SceUID, sceKernelOpenEventFlag, const char *nam
 
 EXPORT(SceThreadmgr, 0x9A68F547, int, sceKernelCloseEventFlag, SceUID uid)
 {
-    return event_flag_lookup(uid) ? 0 : SCE_KERNEL_ERROR_UNKNOWN_EVF_ID;
+    VitaEventFlagInfo *evf = event_flag_lookup(uid);
+
+    if (!evf)
+        return SCE_KERNEL_ERROR_UNKNOWN_EVF_ID;
+
+    event_flag_release(evf);
+    return 0;
 }
 
 /* ------------------------------------------------------------ lw mutexes */
@@ -1093,10 +1181,19 @@ EXPORT(SceLibKernel, 0x91FA6614, int, sceKernelUnlockLwMutex, SceKernelLwMutexWo
 
 int SceKernelSync_classify_uid(SceUID uid)
 {
-    if (sema_lookup(uid))
+    VitaSemaInfo *sema = sema_lookup(uid);
+    VitaEventFlagInfo *evf;
+
+    if (sema) {
+        sema_release(sema);
         return SCE_KERNEL_TMID_Semaphore;
-    if (event_flag_lookup(uid))
+    }
+
+    evf = event_flag_lookup(uid);
+    if (evf) {
+        event_flag_release(evf);
         return SCE_KERNEL_TMID_EventFlag;
+    }
 
     return -1;
 }

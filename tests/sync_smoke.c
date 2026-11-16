@@ -5,6 +5,7 @@
  */
 
 #include <pthread.h>
+#include <stdbool.h>
 #include <psp2/kernel/error.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/threadmgr/eventflag.h>
@@ -70,6 +71,35 @@ static void *handoff_worker(void *arg)
     handoff->result = sceKernelWaitSema(handoff->sema, 1, NULL);
     atomic_store(&handoff->ran, 1);
     return NULL;
+}
+
+typedef struct {
+    SceUID sema;
+    atomic_int done;
+    int result;
+} WaitProbe;
+
+static void *wait_worker(void *arg)
+{
+    WaitProbe *probe = arg;
+
+    probe->result = sceKernelWaitSema(probe->sema, 1, NULL);
+    atomic_store(&probe->done, 1);
+    return NULL;
+}
+
+/* Blocks until the plugin reports a waiter on the semaphore. */
+static bool wait_for_waiter(SceUID sema)
+{
+    for (int i = 0; i < 200; i++) {
+        SceKernelSemaInfo info;
+        struct timespec delay = {0, 5 * 1000 * 1000};
+
+        if (sceKernelGetSemaInfo(sema, &info) == 0 && info.numWaitThreads > 0)
+            return true;
+        nanosleep(&delay, NULL);
+    }
+    return false;
 }
 
 static uint64_t monotonic_ms(void)
@@ -217,6 +247,77 @@ int main(void)
         }
 
         sceKernelDeleteSema(deadline_sema);
+    }
+
+    /* --- cancelling a waiter reports the cancellation ------------------- */
+    {
+        SceUID cancel_sema = sceKernelCreateSema("test-sema-cancel", 0, 0, 1, NULL);
+        WaitProbe probe;
+        pthread_t worker;
+        int waiters = 0;
+
+        probe.sema = cancel_sema;
+        atomic_init(&probe.done, 0);
+        probe.result = -1;
+
+        if (cancel_sema < 0 ||
+            pthread_create(&worker, NULL, wait_worker, &probe) != 0) {
+            puts("sync_smoke: could not set up the cancel case");
+            return 1;
+        }
+        if (!wait_for_waiter(cancel_sema)) {
+            puts("sync_smoke: the cancel waiter never blocked");
+            return 1;
+        }
+
+        if (sceKernelCancelSema(cancel_sema, -1, &waiters) != 0 || waiters != 1) {
+            puts("sync_smoke: CancelSema did not report the blocked waiter");
+            return 1;
+        }
+        pthread_join(worker, NULL);
+        if (probe.result != SCE_KERNEL_ERROR_WAIT_CANCEL) {
+            printf("sync_smoke: cancelled wait returned 0x%x\n", (unsigned)probe.result);
+            return 1;
+        }
+
+        /* A later waiter is independent of that cancellation. */
+        if (sceKernelSignalSema(cancel_sema, 1) != 0 ||
+            sceKernelWaitSema(cancel_sema, 1, NULL) != 0) {
+            puts("sync_smoke: a fresh wait after cancellation failed");
+            return 1;
+        }
+        sceKernelDeleteSema(cancel_sema);
+    }
+
+    /* --- deleting a semaphore wakes its waiters with WAIT_DELETE -------- */
+    {
+        SceUID delete_sema = sceKernelCreateSema("test-sema-delete", 0, 0, 1, NULL);
+        WaitProbe probe;
+        pthread_t worker;
+
+        probe.sema = delete_sema;
+        atomic_init(&probe.done, 0);
+        probe.result = -1;
+
+        if (delete_sema < 0 || pthread_create(&worker, NULL, wait_worker, &probe) != 0) {
+            puts("sync_smoke: could not set up the delete case");
+            return 1;
+        }
+        if (!wait_for_waiter(delete_sema)) {
+            puts("sync_smoke: the delete waiter never blocked");
+            return 1;
+        }
+
+        if (sceKernelDeleteSema(delete_sema) != 0) {
+            puts("sync_smoke: deleting a semaphore with a waiter failed");
+            return 1;
+        }
+        pthread_join(worker, NULL);
+        if (probe.result != SCE_KERNEL_ERROR_WAIT_DELETE) {
+            printf("sync_smoke: a deleted semaphore's waiter returned 0x%x\n",
+                   (unsigned)probe.result);
+            return 1;
+        }
     }
 
     /* --- lightweight mutex --------------------------------------------- */
