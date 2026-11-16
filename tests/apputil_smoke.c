@@ -100,7 +100,11 @@ int main(void)
         return 1;
     }
 
-    snprintf(check_path, sizeof(check_path), "%s/savedata/data.bin", TEST_ROOT);
+    /* savedata0: is per title; ask the VFS where the file actually went. */
+    if (host_fs_resolve_path("savedata0:/data.bin", check_path, sizeof(check_path)) != 0) {
+        puts("apputil_smoke: could not resolve the saved file");
+        return 1;
+    }
     fp = fopen(check_path, "rb");
     if (!fp || fread(text, 1, sizeof(text), fp) != 6 || memcmp(text, "hello", 6) != 0) {
         puts("apputil_smoke: saved file contents are wrong");
