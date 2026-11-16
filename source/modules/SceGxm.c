@@ -5975,7 +5975,13 @@ static int gxm_skip_readback(void)
 
 static int gxm_direct_present_enabled(void)
 {
-    return host_display_uses_kms();
+    /*
+     * Direct presentation means the video layer takes the render target itself
+     * instead of a copy of the guest framebuffer: the KMS scanout plane, or an
+     * EGL window surface. The second case only exists while the video layer is
+     * running, which is why it is asked at use time rather than cached.
+     */
+    return host_display_uses_kms() || host_video_presents_texture();
 }
 
 /* Lets the same-thread present overlap be disabled for A/B comparisons. */

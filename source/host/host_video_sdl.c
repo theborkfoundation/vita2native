@@ -1118,6 +1118,13 @@ bool host_video_present_texture(HostVideo *video, unsigned int texture, int widt
         if (attached != 0) {
             fprintf(stderr, "vita2native: EGL %s attach failed\n",
                     video->direct_present ? "scanout" : "window");
+            /*
+             * A window whose visual does not match the EGL config fails the
+             * same way every frame, so stop asking and let the caller keep
+             * using the SDL renderer rather than logging once per frame.
+             */
+            if (!video->direct_present)
+                video->gl_window = false;
             return false;
         }
         video->egl_attached = true;
@@ -1127,6 +1134,13 @@ bool host_video_present_texture(HostVideo *video, unsigned int texture, int widt
                          video->overlay_height);
     host_gpu_present_texture(device, texture, width, height);
     return true;
+}
+
+bool host_video_presents_texture(void)
+{
+    HostVideo *video = g_active_video;
+
+    return video && (video->direct_present || video->gl_window);
 }
 
 void host_video_set_overlay(HostVideo *video, const void *rgba, int width, int height)

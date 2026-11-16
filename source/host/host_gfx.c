@@ -176,6 +176,15 @@ void host_gpu_present_framebuffer(HostGpuDevice device, const void *rgba, int wi
         host_gfx_gl_present_framebuffer(device, rgba, width, height, stride_in_pixels);
 }
 
+/*
+ * Standalone test binaries link this file without the video backend, which is
+ * what owns the real answer. The emulator's definition wins.
+ */
+__attribute__((weak)) bool host_video_presents_texture(void)
+{
+    return false;
+}
+
 void host_gpu_present_texture(HostGpuDevice device, unsigned int texture, int width, int height)
 {
     if (!device)

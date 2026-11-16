@@ -119,6 +119,13 @@ void host_video_present(HostVideo *video, const void *rgba, int width, int heigh
 bool host_video_present_texture(HostVideo *video, unsigned int texture, int width, int height);
 
 /*
+ * True once the video layer can present a GPU render target directly - the KMS
+ * scanout plane or an EGL window surface. The guest side uses this to decide
+ * whether presenting the render target is worth setting up at all.
+ */
+bool host_video_presents_texture(void);
+
+/*
  * Sets the RGBA8 debug overlay drawn over directly presented frames. Pass NULL
  * to clear it. The pixels must stay valid until the next direct present.
  */

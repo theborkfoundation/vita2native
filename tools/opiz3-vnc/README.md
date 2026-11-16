@@ -81,6 +81,13 @@ so the 960x544 frame is displayed 1:1 and stays sharp.
   virtual display. The guest-side readback, not VNC, is the bottleneck: at
   native scale heavy 3D titles run at a few fps; `V2N_RENDER_SCALE=0.6667` is
   faster but blurs small fonts, so `1` is the readable setting.
+- `V2N_EGL_WINDOW=1` is meant to present the guest's render target straight
+  into the VNC window through EGL, skipping the CPU copy that the default path
+  makes; frames the guest presents from memory (decoded video, guest-side
+  composites) use the SDL renderer either way. **It does not work on X11 yet**:
+  the EGL config we pick has a different native visual from the window SDL
+  creates, so `eglCreateWindowSurface` returns `EGL_BAD_MATCH` (0x300b) and the
+  session falls back to the SDL renderer after one log line. Off by default.
 - Set `V2N_FPS_OVERLAY=1` to draw the FPS graph in the top-right corner;
   `V2N_FPS=1` only writes FPS lines to the log.
 - VNC has no audio. The game writes to the PulseAudio `v2n` null sink.
