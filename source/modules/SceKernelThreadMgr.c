@@ -1156,8 +1156,34 @@ EXPORT(SceThreadmgr, 0xE78BCCF7, int, sceKernelDeleteMsgPipe, SceUID uid)
     return 0;
 }
 
+/*
+ * Waits on the pipe's condition variable while holding the pipe lock.
+ *
+ * condvarWait() locks the mutex itself, which deadlocked every blocking pipe
+ * operation on a nonrecursive mutex: the lock was already held, so the waiter
+ * blocked on itself and the other side could never get in. The caller also gets
+ * one absolute deadline for the whole operation instead of a fresh timeout per
+ * wake.
+ */
+static int msgpipe_wait_locked(VitaMsgPipeInfo *info, CondVar *condvar, bool timed,
+                               uint64_t deadline_ns)
+{
+    uint64_t now;
+
+    (void)info;
+    if (!timed) {
+        condvarWaitLocked(condvar, &info->lock);
+        return 0;
+    }
+
+    now = host_monotonic_ns();
+    if (now >= deadline_ns)
+        return -1;
+    return condvarWaitTimeoutLocked(condvar, &info->lock, deadline_ns - now) == 0 ? 0 : -1;
+}
+
 static int msgpipe_send(VitaMsgPipeInfo *info, const void *message, unsigned int size,
-                        unsigned int *result, bool wait)
+                        unsigned int *result, bool wait, unsigned int timeout_us)
 {
     const uint8_t *src = message;
 
@@ -1166,9 +1192,17 @@ static int msgpipe_send(VitaMsgPipeInfo *info, const void *message, unsigned int
 
     mutexLock(&info->lock);
     if (wait) {
+        bool timed = timeout_us != 0;
+        uint64_t deadline = timed ? host_monotonic_ns() + (uint64_t)timeout_us * 1000ull : 0;
+
         info->send_waiters++;
-        while (info->capacity - info->used < size)
-            condvarWait(&info->not_full, &info->lock);
+        while (info->capacity - info->used < size) {
+            if (msgpipe_wait_locked(info, &info->not_full, timed, deadline) != 0) {
+                info->send_waiters--;
+                mutexUnlock(&info->lock);
+                return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+            }
+        }
         info->send_waiters--;
     } else if (info->capacity - info->used < size) {
         mutexUnlock(&info->lock);
@@ -1190,16 +1224,24 @@ static int msgpipe_send(VitaMsgPipeInfo *info, const void *message, unsigned int
 }
 
 static int msgpipe_receive(VitaMsgPipeInfo *info, void *message, unsigned int size,
-                           unsigned int *result, bool wait)
+                           unsigned int *result, bool wait, unsigned int timeout_us)
 {
     uint8_t *dst = message;
     unsigned int count;
 
     mutexLock(&info->lock);
     if (wait) {
+        bool timed = timeout_us != 0;
+        uint64_t deadline = timed ? host_monotonic_ns() + (uint64_t)timeout_us * 1000ull : 0;
+
         info->receive_waiters++;
-        while (!info->used)
-            condvarWait(&info->not_empty, &info->lock);
+        while (!info->used) {
+            if (msgpipe_wait_locked(info, &info->not_empty, timed, deadline) != 0) {
+                info->receive_waiters--;
+                mutexUnlock(&info->lock);
+                return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+            }
+        }
         info->receive_waiters--;
     } else if (!info->used) {
         mutexUnlock(&info->lock);
@@ -1227,7 +1269,7 @@ typedef struct {
 } VitaMsgPipeVector;
 
 static int msgpipe_send_vector(SceUID uid, const VitaMsgPipeVector *vec, unsigned int count,
-                               void *result_ptr, bool wait)
+                               void *result_ptr, bool wait, unsigned int timeout_us)
 {
     VitaMsgPipeInfo *info = get_msgpipe_info(uid);
     unsigned int total = 0;
@@ -1243,7 +1285,7 @@ static int msgpipe_send_vector(SceUID uid, const VitaMsgPipeVector *vec, unsigne
 
         if (!vec[i].message && vec[i].size)
             return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
-        ret = msgpipe_send(info, vec[i].message, vec[i].size, &sent, wait);
+        ret = msgpipe_send(info, vec[i].message, vec[i].size, &sent, wait, timeout_us);
         if (ret < 0)
             break;
         total += sent;
@@ -1256,7 +1298,7 @@ static int msgpipe_send_vector(SceUID uid, const VitaMsgPipeVector *vec, unsigne
 }
 
 static int msgpipe_receive_vector(SceUID uid, const VitaMsgPipeVector *vec, unsigned int count,
-                                  void *result_ptr, bool wait)
+                                  void *result_ptr, bool wait, unsigned int timeout_us)
 {
     VitaMsgPipeInfo *info = get_msgpipe_info(uid);
     unsigned int total = 0;
@@ -1272,7 +1314,8 @@ static int msgpipe_receive_vector(SceUID uid, const VitaMsgPipeVector *vec, unsi
 
         if (!vec[i].message && vec[i].size)
             return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
-        ret = msgpipe_receive(info, (void *)vec[i].message, vec[i].size, &received, wait);
+        ret = msgpipe_receive(info, (void *)vec[i].message, vec[i].size, &received, wait,
+                                  timeout_us);
         if (ret < 0)
             break;
         total += received;
@@ -1292,11 +1335,10 @@ EXPORT(SceLibKernel, 0x0CA71EA2, int, sceKernelSendMsgPipe, SceUID uid, void *me
     VitaMsgPipeInfo *info = get_msgpipe_info(uid);
 
     (void)unk1;
-    (void)timeout;
     if (!info)
         return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
 
-    return msgpipe_send(info, message, size, unk2, true);
+    return msgpipe_send(info, message, size, unk2, true, timeout ? *timeout : 0);
 }
 
 EXPORT(SceLibKernel, 0xA5CA74AC, int, sceKernelSendMsgPipeCB, SceUID uid, void *message,
@@ -1311,8 +1353,7 @@ EXPORT(SceLibKernel, 0x94D506F7, int, sceKernelSendMsgPipeVector, SceUID uid,
        unsigned int *timeout)
 {
     (void)unk1;
-    (void)timeout;
-    return msgpipe_send_vector(uid, vec, count, unk2, true);
+    return msgpipe_send_vector(uid, vec, count, unk2, true, timeout ? *timeout : 0);
 }
 
 EXPORT(SceLibKernel, 0x9C6F7F79, int, sceKernelSendMsgPipeVectorCB, SceUID uid,
@@ -1332,14 +1373,14 @@ EXPORT(SceLibKernel, 0xDFC670E0, int, sceKernelTrySendMsgPipe, SceUID uid, void 
     if (!info)
         return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
 
-    return msgpipe_send(info, message, size, unk2, false);
+    return msgpipe_send(info, message, size, unk2, false, 0);
 }
 
 EXPORT(SceLibKernel, 0x60DB346F, int, sceKernelTrySendMsgPipeVector, SceUID uid,
        const VitaMsgPipeVector *vec, SceSize count, int unk1, void *unk2)
 {
     (void)unk1;
-    return msgpipe_send_vector(uid, vec, count, unk2, false);
+    return msgpipe_send_vector(uid, vec, count, unk2, false, 0);
 }
 
 EXPORT(SceLibKernel, 0x4E81DD5C, int, sceKernelReceiveMsgPipe, SceUID uid, void *message,
@@ -1348,11 +1389,10 @@ EXPORT(SceLibKernel, 0x4E81DD5C, int, sceKernelReceiveMsgPipe, SceUID uid, void 
     VitaMsgPipeInfo *info = get_msgpipe_info(uid);
 
     (void)unk1;
-    (void)timeout;
     if (!info)
         return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
 
-    return msgpipe_receive(info, message, size, unk2, true);
+    return msgpipe_receive(info, message, size, unk2, true, timeout ? *timeout : 0);
 }
 
 EXPORT(SceLibKernel, 0x33AF829B, int, sceKernelReceiveMsgPipeCB, SceUID uid, void *message,
@@ -1367,8 +1407,7 @@ EXPORT(SceLibKernel, 0x9F899087, int, sceKernelReceiveMsgPipeVector, SceUID uid,
        unsigned int *timeout)
 {
     (void)unk1;
-    (void)timeout;
-    return msgpipe_receive_vector(uid, vec, count, unk2, true);
+    return msgpipe_receive_vector(uid, vec, count, unk2, true, timeout ? *timeout : 0);
 }
 
 EXPORT(SceLibKernel, 0xBE5B3E27, int, sceKernelReceiveMsgPipeVectorCB, SceUID uid,
@@ -1388,14 +1427,14 @@ EXPORT(SceLibKernel, 0x5615B006, int, sceKernelTryReceiveMsgPipe, SceUID uid, vo
     if (!info)
         return SCE_KERNEL_ERROR_UNKNOWN_MSG_PIPE_ID;
 
-    return msgpipe_receive(info, message, size, unk2, false);
+    return msgpipe_receive(info, message, size, unk2, false, 0);
 }
 
 EXPORT(SceLibKernel, 0x86ECC0FF, int, sceKernelTryReceiveMsgPipeVector, SceUID uid,
        const VitaMsgPipeVector *vec, SceSize count, int unk1, void *unk2)
 {
     (void)unk1;
-    return msgpipe_receive_vector(uid, vec, count, unk2, false);
+    return msgpipe_receive_vector(uid, vec, count, unk2, false, 0);
 }
 
 EXPORT(SceThreadmgr, 0xCE769C83, int, _sceKernelCancelMsgPipe, SceUID uid, int *send_waiters,
@@ -2482,8 +2521,7 @@ EXPORT(SceThreadmgr, 0x5E65E454, int, _sceKernelSendMsgPipeVector, SceUID uid,
        unsigned int *timeout)
 {
     (void)unk1;
-    (void)timeout;
-    return msgpipe_send_vector(uid, vec, count, unk2, true);
+    return msgpipe_send_vector(uid, vec, count, unk2, true, timeout ? *timeout : 0);
 }
 
 EXPORT(SceThreadmgr, 0xF6D515DC, int, _sceKernelSendMsgPipeVectorCB, SceUID uid,
@@ -2499,8 +2537,7 @@ EXPORT(SceThreadmgr, 0x3DD9E4AB, int, _sceKernelReceiveMsgPipeVector, SceUID uid
        unsigned int *timeout)
 {
     (void)unk1;
-    (void)timeout;
-    return msgpipe_receive_vector(uid, vec, count, unk2, true);
+    return msgpipe_receive_vector(uid, vec, count, unk2, true, timeout ? *timeout : 0);
 }
 
 EXPORT(SceThreadmgr, 0x4DBF648E, int, _sceKernelReceiveMsgPipeVectorCB, SceUID uid,
@@ -2515,14 +2552,14 @@ EXPORT(SceThreadmgr, 0xB3D600AB, int, _sceKernelTrySendMsgPipeVector, SceUID uid
        const VitaMsgPipeVector *vec, SceSize count, int unk1, void *unk2)
 {
     (void)unk1;
-    return msgpipe_send_vector(uid, vec, count, unk2, false);
+    return msgpipe_send_vector(uid, vec, count, unk2, false, 0);
 }
 
 EXPORT(SceThreadmgr, 0x03CFCF00, int, _sceKernelTryReceiveMsgPipeVector, SceUID uid,
        const VitaMsgPipeVector *vec, SceSize count, int unk1, void *unk2)
 {
     (void)unk1;
-    return msgpipe_receive_vector(uid, vec, count, unk2, false);
+    return msgpipe_receive_vector(uid, vec, count, unk2, false, 0);
 }
 
 EXPORT(SceThreadmgr, 0xF3489EF4, int, sceKernelWaitThreadEnd_089, SceUID thid, int *stat,

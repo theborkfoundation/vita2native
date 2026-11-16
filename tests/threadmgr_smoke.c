@@ -14,6 +14,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <time.h>
 #include <string.h>
 
 #include "host.h"
@@ -398,6 +399,30 @@ int main(void)
         REQUIRE(_sceKernelTryReceiveMsgPipeVector(mpp, (const void *)&receive_vector, 1, 0,
                                                   &result) == SCE_KERNEL_ERROR_MSG_PIPE_EMPTY,
                 "a try-receive on an empty pipe succeeded");
+    }
+
+    /* --- a blocking receive honours its timeout ------------------------ */
+    /*
+     * The wait used to lock the pipe mutex it already held, so this call never
+     * returned at all; it also ignored the timeout.
+     */
+    {
+        char received[8];
+        unsigned int result = 0;
+        unsigned int timeout = 100000;
+        struct timespec started, finished;
+        long elapsed_ms;
+
+        clock_gettime(CLOCK_MONOTONIC, &started);
+        REQUIRE(sceKernelReceiveMsgPipe(mpp, received, sizeof(received), 0, &result, &timeout) ==
+                    SCE_KERNEL_ERROR_WAIT_TIMEOUT,
+                "an empty pipe did not time out");
+        clock_gettime(CLOCK_MONOTONIC, &finished);
+
+        elapsed_ms = (finished.tv_sec - started.tv_sec) * 1000L +
+                     (finished.tv_nsec - started.tv_nsec) / 1000000L;
+        REQUIRE(elapsed_ms >= 50 && elapsed_ms < 1000,
+                "a 100 ms receive timed out at the wrong time");
     }
 
     REQUIRE(sceKernelDeleteMsgPipe(mpp) == 0, "could not delete the message pipe");
