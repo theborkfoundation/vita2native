@@ -9677,6 +9677,24 @@ static uint32_t gxm_transfer_bpp(SceGxmTransferFormat format)
     }
 }
 
+/*
+ * The GPU signals a transfer's notification when the work completes. These
+ * transfers are synchronous, so the value is published before returning;
+ * without this a guest that waits on it (sceGxmNotificationWait loops until the
+ * word changes) hangs on work that has already finished.
+ */
+static void gxm_transfer_signal(const SceGxmNotification *notification)
+{
+    if (notification && notification->address)
+        __atomic_store_n(notification->address, notification->value, __ATOMIC_RELEASE);
+}
+
+/* A linear transfer's stride is in bytes and may be negative (bottom-up rows). */
+static ptrdiff_t gxm_transfer_row(int32_t stride, uint32_t row)
+{
+    return (ptrdiff_t)stride * (ptrdiff_t)row;
+}
+
 EXPORT(SceGxm, 0x69DDFF5E, int, sceGxmTransferFill, uint32_t color,
        SceGxmTransferFormat destFormat, void *destAddress, uint32_t destX, uint32_t destY,
        uint32_t destWidth, uint32_t destHeight, int32_t destStride, SceGxmSyncObject *syncObject,
@@ -9686,9 +9704,8 @@ EXPORT(SceGxm, 0x69DDFF5E, int, sceGxmTransferFill, uint32_t color,
 
     (void)syncObject;
     (void)syncFlags;
-    (void)notification;
 
-    if (!destAddress || !destWidth || !destHeight || destStride <= 0)
+    if (!destAddress || !destWidth || !destHeight || destStride == 0)
         return SCE_GXM_ERROR_INVALID_POINTER;
 
     gxm_ds_note_write(destAddress);
@@ -9697,7 +9714,7 @@ EXPORT(SceGxm, 0x69DDFF5E, int, sceGxmTransferFill, uint32_t color,
         gxm_batch_flush(g_current_context);
 
     for (uint32_t y = 0; y < destHeight; y++) {
-        uint8_t *row = (uint8_t *)destAddress + (size_t)(destY + y) * (size_t)destStride * bpp +
+        uint8_t *row = (uint8_t *)destAddress + gxm_transfer_row(destStride, destY + y) +
                        (size_t)destX * bpp;
 
         for (uint32_t x = 0; x < destWidth; x++) {
@@ -9720,6 +9737,7 @@ EXPORT(SceGxm, 0x69DDFF5E, int, sceGxmTransferFill, uint32_t color,
         }
     }
 
+    gxm_transfer_signal(notification);
     return 0;
 }
 
@@ -9741,7 +9759,6 @@ EXPORT(SceGxm, 0x62312BF8, int, sceGxmTransferCopy, uint32_t width, uint32_t hei
     (void)destType;
     (void)syncObject;
     (void)syncFlags;
-    (void)notification;
 
     if (!srcAddress || !destAddress || !width || !height)
         return SCE_GXM_ERROR_INVALID_POINTER;
@@ -9754,11 +9771,9 @@ EXPORT(SceGxm, 0x62312BF8, int, sceGxmTransferCopy, uint32_t width, uint32_t hei
 
     for (uint32_t y = 0; y < height; y++) {
         const uint8_t *src = (const uint8_t *)srcAddress +
-                             (size_t)(srcY + y) * (size_t)srcStride * src_bpp +
-                             (size_t)srcX * src_bpp;
+                             gxm_transfer_row(srcStride, srcY + y) + (size_t)srcX * src_bpp;
         uint8_t *dst = (uint8_t *)destAddress +
-                       (size_t)(destY + y) * (size_t)destStride * dst_bpp +
-                       (size_t)destX * dst_bpp;
+                       gxm_transfer_row(destStride, destY + y) + (size_t)destX * dst_bpp;
 
         if (src_bpp == dst_bpp)
             memcpy(dst, src, (size_t)width * src_bpp);
@@ -9766,6 +9781,7 @@ EXPORT(SceGxm, 0x62312BF8, int, sceGxmTransferCopy, uint32_t width, uint32_t hei
             return SCE_GXM_ERROR_INVALID_VALUE;
     }
 
+    gxm_transfer_signal(notification);
     return 0;
 }
 
@@ -9781,7 +9797,6 @@ EXPORT(SceGxm, 0xD10F7EAD, int, sceGxmTransferDownscale, SceGxmTransferFormat sr
 
     (void)syncObject;
     (void)syncFlags;
-    (void)notification;
 
     if (!srcAddress || !destAddress || !srcWidth || !srcHeight || src_bpp != dst_bpp)
         return SCE_GXM_ERROR_INVALID_VALUE;
@@ -9791,20 +9806,15 @@ EXPORT(SceGxm, 0xD10F7EAD, int, sceGxmTransferDownscale, SceGxmTransferFormat sr
 
     for (unsigned int y = 0; y < srcHeight / 2; y++) {
         for (unsigned int x = 0; x < srcWidth / 2; x++) {
-            const uint8_t *p00 = (const uint8_t *)srcAddress +
-                                 (size_t)(srcY + y * 2) * (size_t)srcStride * src_bpp +
-                                 (size_t)(srcX + x * 2) * src_bpp;
-            const uint8_t *p01 = (const uint8_t *)srcAddress +
-                                 (size_t)(srcY + y * 2) * (size_t)srcStride * src_bpp +
-                                 (size_t)(srcX + x * 2 + 1) * src_bpp;
-            const uint8_t *p10 = (const uint8_t *)srcAddress +
-                                 (size_t)(srcY + y * 2 + 1) * (size_t)srcStride * src_bpp +
-                                 (size_t)(srcX + x * 2) * src_bpp;
-            const uint8_t *p11 = (const uint8_t *)srcAddress +
-                                 (size_t)(srcY + y * 2 + 1) * (size_t)srcStride * src_bpp +
-                                 (size_t)(srcX + x * 2 + 1) * src_bpp;
-            uint8_t *dst = (uint8_t *)destAddress +
-                           (size_t)(destY + y) * (size_t)destStride * dst_bpp +
+            const uint8_t *row0 =
+                (const uint8_t *)srcAddress + gxm_transfer_row(srcStride, srcY + y * 2);
+            const uint8_t *row1 =
+                (const uint8_t *)srcAddress + gxm_transfer_row(srcStride, srcY + y * 2 + 1);
+            const uint8_t *p00 = row0 + (size_t)(srcX + x * 2) * src_bpp;
+            const uint8_t *p01 = row0 + (size_t)(srcX + x * 2 + 1) * src_bpp;
+            const uint8_t *p10 = row1 + (size_t)(srcX + x * 2) * src_bpp;
+            const uint8_t *p11 = row1 + (size_t)(srcX + x * 2 + 1) * src_bpp;
+            uint8_t *dst = (uint8_t *)destAddress + gxm_transfer_row(destStride, destY + y) +
                            (size_t)(destX + x) * dst_bpp;
 
             for (uint32_t c = 0; c < dst_bpp; c++)
@@ -9812,6 +9822,7 @@ EXPORT(SceGxm, 0xD10F7EAD, int, sceGxmTransferDownscale, SceGxmTransferFormat sr
         }
     }
 
+    gxm_transfer_signal(notification);
     return 0;
 }
 

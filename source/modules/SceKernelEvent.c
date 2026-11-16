@@ -89,7 +89,19 @@ static SceUID event_create(const char *name, uint32_t attr, uint32_t init_patter
 
         memset(event, 0, sizeof(*event));
         pthread_mutex_init(&event->mutex, NULL);
-        pthread_cond_init(&event->cond, NULL);
+        /*
+         * The waits compute a CLOCK_MONOTONIC deadline, so the condition
+         * variable has to count in that clock; with the default one every
+         * timed wait expired immediately.
+         */
+        {
+            pthread_condattr_t attr;
+
+            pthread_condattr_init(&attr);
+            pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+            pthread_cond_init(&event->cond, &attr);
+            pthread_condattr_destroy(&attr);
+        }
         event->used = true;
         event->uid = SceSysmem_get_next_uid();
         event->refs = 1;

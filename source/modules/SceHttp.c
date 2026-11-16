@@ -18,6 +18,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -265,6 +266,48 @@ static bool buffer_reserve(HttpBuffer *buffer, size_t extra)
     buffer->data = data;
     buffer->capacity = capacity;
     return true;
+}
+
+static bool buffer_append(HttpBuffer *buffer, const void *data, size_t size);
+
+/*
+ * Formats one request line into a heap buffer sized to fit.
+ *
+ * The request path can approach 2 KiB, and snprintf returns the length it
+ * *would* have written - copying that many bytes from a truncated buffer read
+ * past it. Measuring first and allocating exactly removes the trap for every
+ * line, including guest-supplied header values.
+ */
+static bool buffer_append_format(HttpBuffer *buffer, const char *format, ...)
+{
+    va_list arguments;
+    va_list measure;
+    char *line;
+    int needed;
+    bool ok;
+
+    va_start(arguments, format);
+    va_copy(measure, arguments);
+    needed = vsnprintf(NULL, 0, format, measure);
+    va_end(measure);
+
+    if (needed < 0) {
+        va_end(arguments);
+        return false;
+    }
+
+    line = malloc((size_t)needed + 1);
+    if (!line) {
+        va_end(arguments);
+        return false;
+    }
+
+    vsnprintf(line, (size_t)needed + 1, format, arguments);
+    va_end(arguments);
+
+    ok = buffer_append(buffer, line, (size_t)needed);
+    free(line);
+    return ok;
 }
 
 static bool buffer_append(HttpBuffer *buffer, const void *data, size_t size)
@@ -570,38 +613,32 @@ static int perform_request(HttpRequest *request, const void *post_data, unsigned
 
     /* Build the request. */
     {
-        char header_line[512];
         const char *method = method_names[request->method <= 7 ? request->method : 0];
-        int written;
 
-        written = snprintf(header_line, sizeof(header_line), "%s %s HTTP/1.1\r\n", method, path);
-        if (written < 0 || !buffer_append(&request_data, header_line, (size_t)written))
+        if (!buffer_append_format(&request_data, "%s %s HTTP/1.1\r\n", method, path))
             goto out_of_memory;
 
-        written = snprintf(header_line, sizeof(header_line), "Host: %s\r\n", host);
-        if (written < 0 || !buffer_append(&request_data, header_line, (size_t)written))
+        if (!buffer_append_format(&request_data, "Host: %s\r\n", host))
             goto out_of_memory;
 
-        written = snprintf(header_line, sizeof(header_line), "User-Agent: %s\r\n",
-                           tmpl->user_agent[0] ? tmpl->user_agent : "vita2native");
-        if (written < 0 || !buffer_append(&request_data, header_line, (size_t)written))
+        if (!buffer_append_format(&request_data, "User-Agent: %s\r\n",
+                                  tmpl->user_agent[0] ? tmpl->user_agent : "vita2native"))
             goto out_of_memory;
 
         if (!buffer_append(&request_data, "Accept: */*\r\n", 13))
             goto out_of_memory;
 
         if (request->request_content_length || post_size) {
-            written = snprintf(header_line, sizeof(header_line), "Content-Length: %llu\r\n",
-                               request->request_content_length ? request->request_content_length
-                                                               : (unsigned long long)post_size);
-            if (written < 0 || !buffer_append(&request_data, header_line, (size_t)written))
+            if (!buffer_append_format(&request_data, "Content-Length: %llu\r\n",
+                                      request->request_content_length
+                                          ? request->request_content_length
+                                          : (unsigned long long)post_size))
                 goto out_of_memory;
         }
 
         for (int i = 0; i < request->header_count; i++) {
-            written = snprintf(header_line, sizeof(header_line), "%s: %s\r\n",
-                               request->headers[i].name, request->headers[i].value);
-            if (written < 0 || !buffer_append(&request_data, header_line, (size_t)written))
+            if (!buffer_append_format(&request_data, "%s: %s\r\n", request->headers[i].name,
+                                      request->headers[i].value))
                 goto out_of_memory;
         }
 

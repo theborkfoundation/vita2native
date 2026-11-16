@@ -125,31 +125,40 @@ static int sema_wait(VitaSemaInfo *sema, int need, const SceUInt *timeout)
        the user-mutex unlock this way before waiting on a condition variable. */
     SceKernelThreadMgr_run_pending_callbacks();
 
-    pthread_mutex_lock(&sema->mutex);
-    while (sema->count < need) {
-        sema->waiting++;
+    /*
+     * One deadline for the whole wait: recomputing it after each wake let an
+     * unrelated signal extend a bounded wait indefinitely.
+     */
+    {
+        struct timespec deadline;
+        bool timed = timeout != NULL;
 
-        if (timeout) {
-            struct timespec ts;
+        if (timed)
+            deadline_from_us(&deadline, *timeout);
 
-            deadline_from_us(&ts, *timeout);
-            result = pthread_cond_timedwait(&sema->cond, &sema->mutex, &ts) == ETIMEDOUT
-                         ? SCE_KERNEL_ERROR_WAIT_TIMEOUT
-                         : 0;
-        } else {
-            pthread_cond_wait(&sema->cond, &sema->mutex);
-            result = 0;
+        pthread_mutex_lock(&sema->mutex);
+        while (sema->count < need) {
+            sema->waiting++;
+
+            if (timed) {
+                result = pthread_cond_timedwait(&sema->cond, &sema->mutex, &deadline) == ETIMEDOUT
+                             ? SCE_KERNEL_ERROR_WAIT_TIMEOUT
+                             : 0;
+            } else {
+                pthread_cond_wait(&sema->cond, &sema->mutex);
+                result = 0;
+            }
+
+            sema->waiting--;
+            if (result != 0)
+                break;
         }
 
-        sema->waiting--;
-        if (result != 0)
-            break;
+        if (result == 0)
+            sema->count -= need;
+
+        pthread_mutex_unlock(&sema->mutex);
     }
-
-    if (result == 0)
-        sema->count -= need;
-
-    pthread_mutex_unlock(&sema->mutex);
     return result;
 }
 
@@ -469,6 +478,14 @@ static int event_flag_wait(VitaEventFlagInfo *evf, uint32_t bits, SceUInt wait,
     if (blocking)
         SceKernelThreadMgr_run_pending_callbacks();
 
+    {
+        /* As with the semaphore: one absolute deadline for the whole wait. */
+        struct timespec deadline;
+        bool timed = timeout != NULL;
+
+        if (timed)
+            deadline_from_us(&deadline, *timeout);
+
     pthread_mutex_lock(&evf->mutex);
 
     for (;;) {
@@ -487,11 +504,8 @@ static int event_flag_wait(VitaEventFlagInfo *evf, uint32_t bits, SceUInt wait,
         }
 
         evf->waiting++;
-        if (timeout) {
-            struct timespec ts;
-
-            deadline_from_us(&ts, *timeout);
-            if (pthread_cond_timedwait(&evf->cond, &evf->mutex, &ts) == ETIMEDOUT)
+        if (timed) {
+            if (pthread_cond_timedwait(&evf->cond, &evf->mutex, &deadline) == ETIMEDOUT)
                 result = SCE_KERNEL_ERROR_WAIT_TIMEOUT;
         } else {
             pthread_cond_wait(&evf->cond, &evf->mutex);
@@ -506,6 +520,7 @@ static int event_flag_wait(VitaEventFlagInfo *evf, uint32_t bits, SceUInt wait,
     }
 
     pthread_mutex_unlock(&evf->mutex);
+    }
     return result;
 }
 

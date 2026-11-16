@@ -252,10 +252,22 @@ EXPORT(SceIofilemgr, 0xFDB32293, SceSSize, sceIoRead, SceUID fd, void *buf, SceS
 EXPORT(SceIofilemgr, 0x34EFD876, SceSSize, sceIoWrite, SceUID fd, const void *buf, SceSize nbyte)
 {
     VitaOpenedFile *vfile = get_opened_file_for_fd(fd);
+    size_t written;
+
     if (!vfile)
         return SCE_ERROR_ERRNO_EBADF;
 
-    return fwrite(buf, 1, nbyte, vfile->fp);
+    written = fwrite(buf, 1, nbyte, vfile->fp);
+
+    /*
+     * Flush before reporting success: the guest opens the same file twice and
+     * expects the second descriptor to see the write, and a full disk only
+     * shows up at this point rather than in fwrite.
+     */
+    if (fflush(vfile->fp) != 0 || written != nbyte)
+        return SCE_ERROR_ERRNO_EIO;
+
+    return (SceSSize)written;
 }
 
 EXPORT(SceIofilemgr, 0x49252B9B, long, sceIoLseek32, SceUID fd, long offset, int whence)

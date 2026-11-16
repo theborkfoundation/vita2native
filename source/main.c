@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <signal.h>
 #include <time.h>
 
 #if defined(__GLIBC__)
@@ -954,6 +955,13 @@ int main(int argc, char *argv[])
 #endif
 
     vita2native_settings_check();
+
+    /*
+     * A write to a peer-closed socket must fail with EPIPE for the guest, not
+     * terminate the process: the guest signal handlers do not cover SIGPIPE,
+     * and sceNetSend, HTTP and TLS all reach the same host send().
+     */
+    signal(SIGPIPE, SIG_IGN);
     if (vita2native_env_flag("VITA2NATIVE_ENV_DUMP")) {
         vita2native_settings_dump();
         return 0;
