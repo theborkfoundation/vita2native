@@ -5,12 +5,13 @@
  * the device stream. Queues are what make sceAudioOutOutput block, which is
  * how guest audio threads pace themselves.
  *
- * SDL is loaded with dlopen rather than linked, like host_video_sdl.c. That
- * keeps the ARM build free of a build-time SDL dependency while still using
- * the SDL the target already has at runtime.
+ * SDL comes from the target's own packages, linked like everywhere else in the
+ * host layer (see cmake/toolchains/zig-linux.cmake).
  */
 
-#include <dlfcn.h>
+#define SDL_MAIN_HANDLED
+#include <SDL.h>
+
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -23,34 +24,6 @@
 #include "SceAudio_internal.h"
 
 #define AUDIO_MAX_QUEUES 16
-
-#define SDL_INIT_AUDIO 0x00000010u
-#define SDL_AUDIO_S16LSB 0x8010u
-
-typedef struct SDL_AudioSpec {
-    int freq;
-    uint16_t format;
-    uint8_t channels;
-    uint8_t silence;
-    uint16_t samples;
-    uint16_t padding;
-    uint32_t size;
-    void (*callback)(void *userdata, uint8_t *stream, int len);
-    void *userdata;
-} SDL_AudioSpec;
-
-typedef struct SdlAudioApi {
-    void *library;
-    int (*init_subsystem)(uint32_t flags);
-    void (*quit_subsystem)(uint32_t flags);
-    const char *(*get_error)(void);
-    uint32_t (*open_audio_device)(const char *device, int iscapture,
-                                  const SDL_AudioSpec *desired, SDL_AudioSpec *obtained,
-                                  int allowed_changes);
-    void (*close_audio_device)(uint32_t dev);
-    void (*pause_audio_device)(uint32_t dev, int pause_on);
-    const char *(*get_current_audio_driver)(void);
-} SdlAudioApi;
 
 struct HostAudioPort {
     pthread_mutex_t mutex;
@@ -66,9 +39,8 @@ static pthread_mutex_t g_queues_lock = PTHREAD_MUTEX_INITIALIZER;
 static HostAudioPort *g_queues[AUDIO_MAX_QUEUES];
 static unsigned int g_queue_count;
 
-static uint32_t g_device;
+static SDL_AudioDeviceID g_device;
 static bool g_sdl_ready;
-static SdlAudioApi *g_api;
 static uint64_t g_frames_played;
 
 static void queue_push(HostAudioPort *port, const int16_t *frames, size_t count)
@@ -132,89 +104,38 @@ static void audio_callback(void *userdata, uint8_t *stream, int length)
     }
 }
 
-static bool load_sdl_audio(void)
-{
-    static const char *const library_names[] = {
-        "libSDL2-2.0.so.0", "libSDL2-2.0.so", "libSDL2.so", NULL,
-    };
-    SdlAudioApi *api;
-
-    if (g_api)
-        return true;
-
-    api = calloc(1, sizeof(*api));
-    if (!api)
-        return false;
-
-    for (int i = 0; library_names[i] && !api->library; i++)
-        api->library = dlopen(library_names[i], RTLD_NOW | RTLD_LOCAL);
-    if (!api->library) {
-        LOG("SceAudio: SDL is not available; output will be muted");
-        free(api);
-        return false;
-    }
-
-#define LOAD_SDL(field, name)                                                                      \
-    do {                                                                                           \
-        *(void **)(&api->field) = dlsym(api->library, name);                                       \
-        if (!api->field) {                                                                         \
-            LOG("SceAudio: SDL is missing %s", name);                                              \
-            dlclose(api->library);                                                                 \
-            free(api);                                                                             \
-            return false;                                                                          \
-        }                                                                                          \
-    } while (0)
-
-    LOAD_SDL(init_subsystem, "SDL_InitSubSystem");
-    LOAD_SDL(quit_subsystem, "SDL_QuitSubSystem");
-    LOAD_SDL(get_error, "SDL_GetError");
-    LOAD_SDL(open_audio_device, "SDL_OpenAudioDevice");
-    LOAD_SDL(close_audio_device, "SDL_CloseAudioDevice");
-    LOAD_SDL(pause_audio_device, "SDL_PauseAudioDevice");
-    *(void **)(&api->get_current_audio_driver) = dlsym(api->library, "SDL_GetCurrentAudioDriver");
-
-#undef LOAD_SDL
-
-    g_api = api;
-    return true;
-}
-
 bool host_audio_open(int freq)
 {
     SDL_AudioSpec want, have;
 
     if (g_device)
         return true;
-    if (!load_sdl_audio())
-        return false;
 
-    if (g_api->init_subsystem(SDL_INIT_AUDIO) != 0) {
-        LOG("SceAudio: SDL audio init failed: %s", g_api->get_error());
+    if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+        LOG("SceAudio: SDL audio init failed: %s", SDL_GetError());
         return false;
     }
     g_sdl_ready = true;
 
     memset(&want, 0, sizeof(want));
     want.freq = freq;
-    want.format = SDL_AUDIO_S16LSB;
+    want.format = AUDIO_S16LSB;
     want.channels = 2;
     want.samples = 1024;
     want.callback = audio_callback;
 
-    g_device = g_api->open_audio_device(NULL, 0, &want, &have, 0);
+    g_device = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
     if (!g_device) {
-        LOG("SceAudio: SDL_OpenAudioDevice failed: %s", g_api->get_error());
-        g_api->quit_subsystem(SDL_INIT_AUDIO);
+        LOG("SceAudio: SDL_OpenAudioDevice failed: %s", SDL_GetError());
+        SDL_QuitSubSystem(SDL_INIT_AUDIO);
         g_sdl_ready = false;
         return false;
     }
 
-    g_api->pause_audio_device(g_device, 0);
+    SDL_PauseAudioDevice(g_device, 0);
     LOG("SceAudio: SDL device %u opened (%d Hz, %u ch, fmt 0x%04x, %u frames, driver %s)",
-        g_device, have.freq, (unsigned)have.channels, (unsigned)have.format, (unsigned)have.samples,
-        g_api->get_current_audio_driver && g_api->get_current_audio_driver()
-            ? g_api->get_current_audio_driver()
-            : "?");
+        (unsigned)g_device, have.freq, (unsigned)have.channels, (unsigned)have.format,
+        (unsigned)have.samples, SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "?");
     return true;
 }
 
@@ -226,12 +147,12 @@ uint64_t host_audio_frames_played(void)
 void host_audio_close(void)
 {
     if (g_device) {
-        g_api->close_audio_device(g_device);
+        SDL_CloseAudioDevice(g_device);
         g_device = 0;
     }
 
     if (g_sdl_ready) {
-        g_api->quit_subsystem(SDL_INIT_AUDIO);
+        SDL_QuitSubSystem(SDL_INIT_AUDIO);
         g_sdl_ready = false;
     }
 }
