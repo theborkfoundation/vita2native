@@ -1,7 +1,7 @@
 # v2n-extract
 
 Turns a PlayStation Vita `.pkg` (plus its `work.bin` license) into the directory
-`tools/v2n title <ID>` runs on a device.
+vita2native runs from.
 
 ```sh
 tools/v2n-extract/build.sh                       # host build, once
@@ -37,11 +37,11 @@ table of contents.
     Data/...           game data as the title expects it
 ```
 
-That is the layout `tools/v2n title <ID>` expects on the device:
+That layout is what the loader expects: copy the `<TITLE_ID>` directory next to
+the binary (or to the device running it) and pass its `eboot.bin`.
 
 ```sh
-scp -r PCSE00294 opiz3:~/tests/apps/
-tools/v2n title PCSE00294
+./vita2native <TITLE_ID>/eboot.bin
 ```
 
 ## Options

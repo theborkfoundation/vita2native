@@ -1,11 +1,11 @@
-# Attach to a running v2n-arm and stop on the guest's fatal signal.
+# Attach to a running vita2native and stop on the guest's fatal signal.
 #
-#   PIN=$(pgrep -x v2n-arm | tail -1)
+#   PIN=$(pgrep -x vita2native | tail -1)
 #   gdb -nx -batch -p "$PIN" -x tools/gdb/live-attach.gdb
 #
 # Live attach is preferred over a core dump: the JIT region shows up as
-# memfd:vita2native-jit and is often unreadable afterwards, and a Panfrost
-# core is 700-800 MB.
+# memfd:vita2native-jit and is often unreadable afterwards, and a core from a
+# GL driver is easily hundreds of MB.
 set pagination off
 set confirm off
 set width 0

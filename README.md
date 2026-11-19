@@ -152,9 +152,12 @@ handle a missing directory), so create that directory before testing it.
 ### Real ARM32 hardware
 
 The ARM32 build runs natively on a 32-bit ARM Linux userland (armhf on an
-aarch64 kernel works too) with no emulation. Verified on an Orange Pi Zero 3
-(Allwinner H618, Cortex-A53, Mali-G31 via Panfrost, Ubuntu 24.04 armhf
-multiarch):
+aarch64 kernel works too) with no emulation. The figures below were measured on
+two such systems: an SBC with an Allwinner H618 and Mali-G31 through Panfrost
+(Ubuntu 24.04 armhf multiarch), and a handheld with a Rockchip RK3326 and
+Mali-G31 through the vendor blob, on a 640x480 DSI panel.
+
+On the Panfrost system:
 
 - all GXM, texture, EGL and non-graphics smoke tests pass unchanged;
 - VitaShell renders its home screen with real device capacities;
@@ -164,7 +167,7 @@ multiarch):
 Panfrost's tiled/AFBC layouts make `glReadPixels` about twice as slow, and the
 port reads the whole frame back every frame for `sceDisplaySetFrameBuf`.
 
-Performance on that board: VitaShell runs at ~4.8 fps. Consecutive GXM draws
+Performance on that system: VitaShell runs at ~4.8 fps. Consecutive GXM draws
 that share program, textures and render state are merged into one GL draw
 (847 guest draws become ~119 GL draws per frame); triangle strips are expanded
 to triangle lists when merging, because concatenating two strips would add
@@ -187,16 +190,15 @@ upload is several times slower. `VITA2NATIVE_RGBA4=1` and
 `VITA2NATIVE_NO_RGBA4=1` force either path for A/B measurements. PVRTC-I 4bpp
 textures use a specialised decoder (the PowerVR SDK reference implementation
 stays for 2bpp and PVRTC-II): a 1024x1024 texture drops from ~425 ms to ~78 ms
-on the R36S. `VITA2NATIVE_NO_PVRTC_FAST=1` forces the reference decoder.
+on the RK3326 handheld. `VITA2NATIVE_NO_PVRTC_FAST=1` forces the reference
+decoder.
 
-The same ARM32 build also runs on an R36S handheld (Rockchip RK3326, Mali-G31
-through the proprietary Bifrost blob, 640x480 DSI panel). Output goes through
-SDL's KMSDRM driver, which is what the handheld's other titles use;
-`source/host/host_video_sdl.c` only uploads the guest frame as an ABGR8888
-texture and lets SDL scale, letterbox and present. `tests/present_probe.c`
-cycles colours and a moving marker on the panel without starting the emulator.
-On this board VitaShell renders at ~1.3 fps; the blob's per-draw overhead is the
-bottleneck (about 5 ms per `glDrawElements`).
+On the handheld, output goes through SDL's KMSDRM driver, which is what its
+other titles use; `source/host/host_video_sdl.c` only uploads the guest frame as
+an ABGR8888 texture and lets SDL scale, letterbox and present.
+`tests/present_probe.c` cycles colours and a moving marker on the panel without
+starting the emulator. There VitaShell renders at ~1.3 fps; the blob's per-draw
+overhead is the bottleneck (about 5 ms per `glDrawElements`).
 
 Input follows the same split. While SDL video is running, its dedicated video
 thread samples input: keyboards, plus every pad SDL knows about through its
@@ -229,7 +231,7 @@ pad's Select/Start/L3/R3 buttons (which the built-in SDL table leaves unbound)
 are mapped:
 
 ```sh
-SDL_GAMECONTROLLERCONFIG_FILE=/opt/inttools/gamecontrollerdb.txt ./v2n-arm game
+SDL_GAMECONTROLLERCONFIG_FILE=/path/to/gamecontrollerdb.txt ./vita2native game
 ```
 
 `VITA2NATIVE_INPUT_DEBUG=1` logs the pads opened and the mapping SDL chose.
@@ -251,33 +253,6 @@ context never touches the guest's rendering context.
 `VITA2NATIVE_STRETCH=1` fills the display and `VITA2NATIVE_SDL_WINDOWED=1` keeps
 a window instead of going fullscreen.
 
-### Remote testing over X11
-
-Forwarding X11 is the quickest way to drive a title from a desktop keyboard
-without going through the VNC kiosk. Launch XQuartz once, then connect with `-X`
-so ssh forwards it:
-
-```sh
-open -a XQuartz            # once
-DISPLAY=:0 ssh -X opiz3
-```
-
-Stop the kiosk and run the binary by hand from the run directory:
-
-```sh
-ssh opiz3 'sudo systemctl stop tigervncserver@:1.service'
-ssh -tt opiz3 'cd ~/v2n-run && \
-  LD_LIBRARY_PATH=/usr/lib/arm-linux-gnueabihf \
-  SDL_VIDEODRIVER=x11 VITA2NATIVE_SDL_WINDOWED=1 VITA2NATIVE_SDL_SIZE=960x544 \
-  ./v2n-arm ~/tests/apps/PCSE01177/eboot.bin'
-```
-
-`VITA2NATIVE_SDL_SIZE=480x272` uses a smaller window. The guest's GLES context
-stays offscreen (surfaceless with Panfrost or the vendor blob); only
-presentation goes through SDL's X11 driver. That split is deliberate: if the GL
-context is created on the X11 EGL platform, Mesa uses llvmpipe over the
-forwarded connection, which is roughly 5x slower and can crash in LLVM.
-
 ### Headless capture and scripted input
 
 Headless builds can dump guest framebuffers as BMP and drive the pad from a
@@ -296,54 +271,29 @@ replaced with the frame number. Script entries are
 list releases everything. Script frames refer to presented frames, not host
 time, so they do not depend on how slow software rendering is.
 
+`VITA2NATIVE_TOUCH_SCRIPT` drives the front panel the same way, with
+`<frame>:<x>/<y>` to press and `<frame>:` to release, in front-panel coordinates
+(0..1919, 0..1087).
+
 `kill -USR1 <tid>` with `VITA2NATIVE_DEBUG_SAMPLE=1` set dumps a thread's PC and
 call stack, which is how guest/host hotspots were located on the device.
 `VITA2NATIVE_GL_CHECK=1` re-enables the per-draw `glGetError` checks.
 
-### Test devices
-
-`tools/v2n` bundles the host/device routines used while bringing a title up, so
-they are one command instead of a scrollback search:
-
-```sh
-./tools/v2n help
-./tools/v2n deploy                 # build arm-rel, copy, restart the kiosk
-./tools/v2n title PCSE01177        # run a staged title (no argument: list them)
-./tools/v2n shot menu              # -> build/shots/menu.png
-./tools/v2n drive click 480 497    # a tap shorter than a frame is dropped
-./tools/v2n drive key z 0.8
-./tools/v2n log 40                 # live log
-./tools/v2n crash                  # newest preserved crash, run-up to the fault
-./tools/v2n test                   # ARM smoke suite, on the device
-./tools/v2n dump-frame 120,400     # headless capture -> build/shots/frame-*.png
-./tools/v2n gdb                    # attach gdb to the running title
-./tools/v2n clean all               # core dumps (400-500 MB each) + /tmp scratch
-```
-
-`V2N_HOST` selects the device (`opiz3` by default, `r36s` for ArkOS), and
-`V2N_REMOTE_DIR`, `V2N_APPS_DIR` and `V2N_OUT` override the paths. Screenshots
-come from `xwd -root`; `tools/img2png.py` converts both XWD stills and the BMP
-frame dumps using nothing but the standard library.
-
-The judgement that goes with these commands (what a crash means, which render
-knob to turn) lives in the agent skills under `.agents/skills`.
-
 ### Getting a title out of a .pkg
 
-`tools/v2n-extract` turns a Vita `.pkg` plus its `work.bin` into the same
-layout: a decrypted `eboot.bin`, decrypted `sce_module/*.suprx` and the game
+`tools/v2n-extract` turns a Vita `.pkg` plus its `work.bin` into a runnable
+directory: a decrypted `eboot.bin`, decrypted `sce_module/*.suprx` and the game
 data under `<TITLE_ID>/`.
 
 ```sh
 tools/v2n-extract/build.sh
 build/v2n-extract-host/v2n-extract --pkg game.pkg --work-bin work.bin --out ~/tests/apps
-scp -r ~/tests/apps/<TITLE_ID> opiz3:~/tests/apps/
-./tools/v2n title <TITLE_ID>
 ```
 
 The pkg container needs no keys (three public constants); the license supplies
 the klicensee for the PFS and SELF layers. `--list` prints the contents and
-needs no license. See `tools/v2n-extract/README.md` for the three layers.
+needs no license. See `tools/v2n-extract/README.md` for the three layers and
+the output layout.
 
 ## Building from source
 

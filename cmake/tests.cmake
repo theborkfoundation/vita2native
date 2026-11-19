@@ -56,8 +56,8 @@ endfunction()
 #   32-bit host only       : dialog_smoke texture_smoke avplayer_smoke
 #
 # The second group emulates guest structs by putting *host* pointers in 32-bit
-# fields, so on a 64-bit build the pointer truncates and the test faults. The
-# devices run everything through tools/v2n; on x64 it is the compile check that
+# fields, so on a 64-bit build the pointer truncates and the test faults. Those
+# tests therefore only run on a 32-bit host; on x64 the compile check is what
 # matters.
 
 vita2native_add_smoke(settings_smoke

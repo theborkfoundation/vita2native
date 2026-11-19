@@ -4,7 +4,7 @@
 The output is a fixed-address ET_SCE_EXEC that vita2native can load directly:
 
     python3 tools/ctrl_test/build.py
-    ./v2n-arm build/ctrl-test/ctrl_test.elf
+    ./vita2native build/ctrl-test/ctrl_test.elf
 
 Zig is used as the ARM compiler; no VitaSDK installation is required.
 """
@@ -167,7 +167,7 @@ def main():
             import_end,
         )
     )
-    print(f"ctrl_test: run with: v2n-arm {output}")
+    print(f"ctrl_test: run with: vita2native {output}")
     return 0
 
 

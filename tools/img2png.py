@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Convert X11 XWD screenshots and 24-bit BMP frame dumps to PNG.
 
-Both formats are produced by the device-side tooling (`xwd -root` for a
-screenshot, `VITA2NATIVE_DUMP_FRAME` for a headless frame dump). The image is
-written with zlib only, so this runs on any host with a stock python3.
+The BMPs are the ones `VITA2NATIVE_DUMP_FRAME` produces; XWD support is kept
+for X11 captures. The image is written with zlib only, so this runs on any host
+with a stock python3.
 
     tools/img2png.py shot.xwd shot.png
     tools/img2png.py frame_0400.bmp frame_0400.png

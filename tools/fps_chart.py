@@ -9,9 +9,10 @@ set:
 Usage:
     python3 tools/fps_chart.py [metrics.csv] [port]
 
-The server binds to 127.0.0.1, so on a remote device use an SSH tunnel:
+The server binds to 127.0.0.1, so when the emulator runs on another machine,
+forward the port over SSH:
 
-    ssh -L 8099:127.0.0.1:8099 opiz3
+    ssh -L 8099:127.0.0.1:8099 <device>
 
 then open http://127.0.0.1:8099 in a local browser.
 """
