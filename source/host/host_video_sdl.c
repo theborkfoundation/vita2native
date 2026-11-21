@@ -56,22 +56,10 @@ struct HostVideo {
     bool init_ok;
     bool stop;
 
-    /* Frame mailbox: the guest copies into `frame`, the video thread uploads
-       it. Frames that arrive while the thread is still presenting are dropped
-       (latest-wins is fine when the guest itself runs at a few fps). */
-    uint8_t *frame;
-    size_t frame_capacity;
-    int frame_width;
-    int frame_height;
-    int frame_pitch;
-    bool has_frame;
-    bool busy;
-
     SDL_Window *window;
-    SDL_Renderer *renderer;
-    SDL_Texture *texture;
-    int texture_width;
-    int texture_height;
+    /* Guest frame size, for mapping the pointer through the letterbox. */
+    int guest_width;
+    int guest_height;
     int width;
     int height;
     int window_width;
@@ -101,12 +89,10 @@ struct HostVideo {
     uint16_t rumble_high;
     bool window_closed;
 
-    /* Direct EGL presentation to the KMS/DRM scanout plane. */
-    bool direct_present;
+    /* Set once EGL has a window surface for it (see video_ensure_egl). */
     bool egl_attached;
 
-    /* The SDL window handed to EGL, so frames go straight to the window
-       surface instead of through a renderer readback. */
+    /* The window SDL created, presented to through EGL. */
     bool gl_window;
     void *native_window;
     /* Re-read on the video thread: SDL can replace the X window after first
@@ -130,45 +116,6 @@ static uint64_t video_now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
-static void video_present(HostVideo *video, const void *rgba, int width, int height,
-                          int pitch_pixels)
-{
-
-    if (!video->renderer)
-        return;
-
-    if (!video->texture || video->texture_width != width || video->texture_height != height) {
-        if (video->texture)
-            SDL_DestroyTexture(video->texture);
-        video->texture = SDL_CreateTexture(video->renderer, SDL_PIXELFORMAT_ABGR8888,
-                                             SDL_TEXTUREACCESS_STREAMING, width, height);
-        if (!video->texture) {
-            video->texture_width = 0;
-            video->texture_height = 0;
-            return;
-        }
-        video->texture_width = width;
-        video->texture_height = height;
-        /*
-         * SDL_RenderCopy filters linearly unless told otherwise, which blurs
-         * the guest's output: a 2D title drawn at 640x368 and presented onto a
-         * 640x480 panel is upscaled vertically, and an odd render scale makes
-         * the horizontal ratio fractional too. Nearest keeps pixel art sharp
-         * for the titles that care and costs nothing for the ones that do not.
-         */
-        if (SDL_SetTextureScaleMode)
-            SDL_SetTextureScaleMode(video->texture, SDL_ScaleModeNearest);
-        if (!video->stretch)
-            SDL_RenderSetLogicalSize(video->renderer, width, height);
-    }
-
-    /* Guest pixels are A8B8G8R8, i.e. SDL_PIXELFORMAT_ABGR8888. */
-    SDL_UpdateTexture(video->texture, NULL, rgba, pitch_pixels * 4);
-    SDL_RenderClear(video->renderer);
-    SDL_RenderCopy(video->renderer, video->texture, NULL, NULL);
-    SDL_RenderPresent(video->renderer);
-}
-
 static void video_close_devices(HostVideo *video)
 {
     for (int i = 0; i < video->pad_count; i++) {
@@ -184,14 +131,8 @@ static void video_close_devices(HostVideo *video)
 static void video_destroy_sdl(HostVideo *video)
 {
     video_close_devices(video);
-    if (video->texture)
-        SDL_DestroyTexture(video->texture);
-    if (video->renderer)
-        SDL_DestroyRenderer(video->renderer);
     if (video->window)
         SDL_DestroyWindow(video->window);
-    video->texture = NULL;
-    video->renderer = NULL;
     video->window = NULL;
 }
 
@@ -229,8 +170,13 @@ static void video_capture_window_id(HostVideo *video)
     if (info.subsystem == SDL_SYSWM_X11)
         video->native_window = (void *)(uintptr_t)info.info.x11.window;
     else if (info.subsystem == SDL_SYSWM_WAYLAND)
-        /* EGL wants the wl_egl_window, not the plain wl_surface. */
-        video->native_window = info.info.wl.egl_window;
+        /*
+         * The window is SDL's wl_surface. The wl_egl_window an EGL surface
+         * needs is an EGL-side object, so the GL layer creates it; SDL only
+         * makes one itself when asked for an SDL_GLContext, which is not how
+         * this port works.
+         */
+        video->native_window = info.info.wl.surface;
     else
         return;
 
@@ -300,24 +246,14 @@ static bool video_init_sdl(HostVideo *video)
     }
 
     /*
-     * Preferred: let EGL render into the window, so a presented frame is the
-     * guest's render target itself rather than guest pixels copied to the CPU
-     * and uploaded again. Opt-in until the X11/Wayland surfaces have been
-     * verified on a device.
-     *
-     * The renderer is created either way: titles that decode video or composite
-     * in guest memory present CPU frames, and those still need the readback
-     * path. Without it those frames would be dropped and the window would stay
-     * black while the guest kept running.
+     * EGL is the only output path: it draws straight into the window, so both
+     * the guest's render target and any CPU frame go through it. No
+     * SDL_Renderer is created - a second GL context behind our back is exactly
+     * the interference this design avoids.
      */
-    video_try_gl_window(video);
-
-    video->renderer = SDL_CreateRenderer(
-        video->window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    if (!video->renderer)
-        video->renderer = SDL_CreateRenderer(video->window, -1, 0);
-    if (!video->renderer && !video->gl_window) {
-        fprintf(stderr, "vita2native: SDL renderer creation failed: %s\n", SDL_GetError());
+    if (!video_try_gl_window(video)) {
+        fprintf(stderr, "vita2native: no EGL window for this video driver (%s)\n",
+                SDL_GetCurrentVideoDriver ? SDL_GetCurrentVideoDriver() : "none");
         return false;
     }
 
@@ -326,25 +262,9 @@ static bool video_init_sdl(HostVideo *video)
     video->width = panel_width > 0 ? panel_width : 960;
     video->height = panel_height > 0 ? panel_height : 544;
 
-    if (video->renderer && SDL_GetRendererInfo) {
-        SDL_RendererInfo info;
-
-        memset(&info, 0, sizeof(info));
-        if (SDL_GetRendererInfo(video->renderer, &info) == 0)
-            fprintf(stderr, "vita2native: SDL renderer '%s' flags 0x%x\n",
-                    info.name ? info.name : "?", info.flags);
-    }
-
-    if (video->gl_window)
-        fprintf(stderr,
-                "vita2native: presenting through EGL on the window (%s video, %dx%d), "
-                "with an SDL renderer for CPU frames\n",
-                SDL_GetCurrentVideoDriver ? SDL_GetCurrentVideoDriver() : "unknown",
-                video->width, video->height);
-    else
-        fprintf(stderr, "vita2native: presenting through SDL (%s video, %dx%d window)\n",
-                SDL_GetCurrentVideoDriver ? SDL_GetCurrentVideoDriver() : "unknown",
-                video->width, video->height);
+    fprintf(stderr, "vita2native: presenting through EGL (%s video, %dx%d window)\n",
+            SDL_GetCurrentVideoDriver ? SDL_GetCurrentVideoDriver() : "unknown", video->width,
+            video->height);
 
     video->controller_scan_at_ns = video_now_ns();
     return true;
@@ -633,15 +553,16 @@ static void video_sample_touch(HostVideo *video)
         int content_x = 0, content_y = 0;
         int content_w = video->width, content_h = video->height;
 
-        /* Mirror SDL_RenderSetLogicalSize's letterbox, so the black bars are
-           not touchable and the visible frame maps onto the full panel. */
-        if (!video->stretch && video->texture_width > 0 && video->texture_height > 0) {
-            int scale_x = video->width * 1000 / video->texture_width;
-            int scale_y = video->height * 1000 / video->texture_height;
+        /* Mirror the presenter's letterbox (host_gfx_gl_present_texture), so the
+           black bars are not touchable and the visible frame maps onto the full
+           panel. The guest frame is the Vita's 960x544. */
+        if (!video->stretch && video->guest_width > 0 && video->guest_height > 0) {
+            int scale_x = video->width * 1000 / video->guest_width;
+            int scale_y = video->height * 1000 / video->guest_height;
             int scale = scale_x < scale_y ? scale_x : scale_y;
 
-            content_w = video->texture_width * scale / 1000;
-            content_h = video->texture_height * scale / 1000;
+            content_w = video->guest_width * scale / 1000;
+            content_h = video->guest_height * scale / 1000;
             content_x = (video->width - content_w) / 2;
             content_y = (video->height - content_h) / 2;
         }
@@ -889,8 +810,6 @@ static void *video_thread(void *arg)
     }
 
     for (;;) {
-        const uint8_t *frame;
-        int width, height, pitch;
         struct timespec wait_until;
 
         /* Poll input even when no frame is waiting, so a desktop keyboard or
@@ -899,8 +818,8 @@ static void *video_thread(void *arg)
 
         /*
          * An attach that has not succeeded yet needs a current window id: SDL
-         * can replace the X window, and the guest's presenting thread cannot
-         * ask SDL. Once a second is enough; frames in between use the renderer.
+         * can replace the X window, and the presenting thread cannot ask SDL.
+         * Once a second is enough.
          */
         if (video->gl_window && !video->native_window_ok) {
             uint64_t now = video_now_ns();
@@ -917,6 +836,11 @@ static void *video_thread(void *arg)
             _exit(0);
         }
 
+        /*
+         * This thread owns the window and the input devices, and nothing else:
+         * frames are presented on the thread that renders them (see
+         * host_video_present), so there is no mailbox to drain here.
+         */
         clock_gettime(CLOCK_REALTIME, &wait_until);
         wait_until.tv_nsec += 16 * 1000000L;
         if (wait_until.tv_nsec >= 1000000000L) {
@@ -925,32 +849,12 @@ static void *video_thread(void *arg)
         }
 
         pthread_mutex_lock(&video->lock);
-        while (!video->stop && !video->has_frame) {
-            if (pthread_cond_timedwait(&video->cond, &video->lock, &wait_until) == ETIMEDOUT)
-                break;
-        }
+        if (!video->stop)
+            pthread_cond_timedwait(&video->cond, &video->lock, &wait_until);
         if (video->stop) {
             pthread_mutex_unlock(&video->lock);
             break;
         }
-        if (!video->has_frame) {
-            pthread_mutex_unlock(&video->lock);
-            continue;
-        }
-
-        video->has_frame = false;
-        video->busy = true;
-        frame = video->frame;
-        width = video->frame_width;
-        height = video->frame_height;
-        pitch = video->frame_pitch;
-        pthread_mutex_unlock(&video->lock);
-
-        video_present(video, frame, width, height, pitch);
-
-        pthread_mutex_lock(&video->lock);
-        video->busy = false;
-        pthread_cond_broadcast(&video->cond);
         pthread_mutex_unlock(&video->lock);
     }
 
@@ -1060,7 +964,8 @@ bool host_video_window_info(HostWindowInfo *info)
     case SDL_SYSWM_WAYLAND:
         info->type = HOST_WINDOW_WAYLAND;
         info->display = wm.info.wl.display;
-        info->window = wm.info.wl.egl_window;
+        /* The window is SDL's wl_surface; EGL builds its wl_egl_window on it. */
+        info->window = wm.info.wl.surface;
         break;
 #if SDL_VERSION_ATLEAST(2, 0, 12)
     case SDL_SYSWM_KMSDRM:
@@ -1091,7 +996,6 @@ void host_video_close(HostVideo *video)
     if (video->thread_started) {
         pthread_mutex_lock(&video->lock);
         video->stop = true;
-        video->has_frame = false;
         pthread_cond_broadcast(&video->cond);
         pthread_mutex_unlock(&video->lock);
         pthread_join(video->thread, NULL);
@@ -1099,7 +1003,6 @@ void host_video_close(HostVideo *video)
 
     pthread_mutex_destroy(&video->lock);
     pthread_cond_destroy(&video->cond);
-    free(video->frame);
     free(video);
 }
 
@@ -1113,75 +1016,79 @@ int host_video_height(const HostVideo *video)
     return video ? video->height : 0;
 }
 
+/*
+ * Ensures the GL backend has an EGL window surface for SDL's window.
+ *
+ * Called on the presenting thread, which is where the GL context is current.
+ * Returns the device, or NULL when there is no window to present to.
+ */
+static HostGpuDevice video_ensure_egl(HostVideo *video)
+{
+    HostGpuDevice device;
+    HostWindowInfo info;
+
+    if (!video || !video->gl_window)
+        return NULL;
+
+    device = host_gpu_current();
+    if (!device)
+        return NULL;
+
+    if (video->egl_attached)
+        return device;
+
+    if (!host_video_window_info(&info)) {
+        video->native_window_ok = false;
+        return NULL;
+    }
+
+    if (host_gpu_attach_window(device, &info) != 0) {
+        fprintf(stderr, "vita2native: EGL window attach failed\n");
+        /* SDL may have replaced the window; the video thread re-reads it. */
+        video->native_window_ok = false;
+        return NULL;
+    }
+
+    video->egl_attached = true;
+    return device;
+}
+
 void host_video_present(HostVideo *video, const void *rgba, int width, int height,
                         int pitch_pixels)
 {
-    size_t needed;
+    HostGpuDevice device;
 
     if (!video || !rgba || width <= 0 || height <= 0 || pitch_pixels < width)
         return;
 
-    needed = (size_t)pitch_pixels * (size_t)height * 4;
-    pthread_mutex_lock(&video->lock);
-
-    /* The consumer is uploading the previous frame; drop this one rather than
-       blocking the guest or overwriting pixels it is reading. */
-    if (video->busy) {
-        pthread_mutex_unlock(&video->lock);
-        return;
+    /*
+     * EGL is the only output path, so a CPU frame is presented right here
+     * rather than handed to the video thread: the window surface belongs to the
+     * thread whose GL context is current, and that is this one.
+     */
+    device = video_ensure_egl(video);
+    if (device) {
+        video->guest_width = width;
+        video->guest_height = height;
+        host_gpu_set_overlay(device, video->overlay_pixels, video->overlay_width,
+                             video->overlay_height);
+        host_gpu_present_framebuffer(device, rgba, width, height, pitch_pixels);
     }
-
-    if (video->frame_capacity < needed) {
-        uint8_t *grown = realloc(video->frame, needed);
-
-        if (!grown) {
-            pthread_mutex_unlock(&video->lock);
-            return;
-        }
-        video->frame = grown;
-        video->frame_capacity = needed;
-    }
-
-    memcpy(video->frame, rgba, needed);
-    video->frame_width = width;
-    video->frame_height = height;
-    video->frame_pitch = pitch_pixels;
-    video->has_frame = true;
-    pthread_cond_signal(&video->cond);
-    pthread_mutex_unlock(&video->lock);
 }
 
 bool host_video_present_texture(HostVideo *video, unsigned int texture, int width, int height)
 {
     HostGpuDevice device;
 
-    if (!video || (!video->direct_present && !video->gl_window) || !texture || width <= 0 ||
-        height <= 0)
-        return false;
-    if (video->gl_window && !video->direct_present && !video->native_window_ok)
+    if (!video || !texture || width <= 0 || height <= 0)
         return false;
 
-    device = host_gpu_current();
+    device = video_ensure_egl(video);
     if (!device)
         return false;
 
-    if (!video->egl_attached) {
-        /* Runs on the guest thread, which is where the GL context is current. */
-        int attached = host_gpu_attach_window(device, video->native_window);
-
-        if (attached != 0) {
-            fprintf(stderr, "vita2native: EGL window attach failed\n");
-            /*
-             * Most likely the window was replaced since its id was read, so
-             * ask the video thread for a current one; frames until then go
-             * through the renderer.
-             */
-            video->native_window_ok = false;
-            return false;
-        }
-        video->egl_attached = true;
-    }
-
+    video->guest_width = width;
+    video->guest_height = height;
     host_gpu_set_overlay(device, video->overlay_pixels, video->overlay_width,
                          video->overlay_height);
     host_gpu_present_texture(device, texture, width, height);
@@ -1198,7 +1105,7 @@ bool host_video_presents_texture(void)
 {
     HostVideo *video = g_active_video;
 
-    return video && (video->direct_present || video->gl_window);
+    return video && video->gl_window;
 }
 
 void host_video_set_overlay(HostVideo *video, const void *rgba, int width, int height)
@@ -1221,11 +1128,22 @@ __attribute__((weak)) HostGpuDevice host_gpu_current(void)
     return NULL;
 }
 
-__attribute__((weak)) int host_gpu_attach_window(HostGpuDevice device, void *native_window)
+__attribute__((weak)) int host_gpu_attach_window(HostGpuDevice device,
+                                                 const HostWindowInfo *window)
 {
     (void)device;
-    (void)native_window;
+    (void)window;
     return -1;
+}
+
+__attribute__((weak)) void host_gpu_present_framebuffer(HostGpuDevice device, const void *rgba,
+                                                        int width, int height, int stride)
+{
+    (void)device;
+    (void)rgba;
+    (void)width;
+    (void)height;
+    (void)stride;
 }
 
 __attribute__((weak)) void host_gpu_present_texture(HostGpuDevice device, unsigned int texture,

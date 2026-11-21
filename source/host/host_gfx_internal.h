@@ -24,8 +24,8 @@ void host_gfx_gl_finish(HostGpuDevice device);
 void host_gfx_gl_thread_enter(HostGpuDevice device);
 void host_gfx_gl_note_render_thread(HostGpuDevice device);
 bool host_gfx_gl_last_present_is_current_thread(HostGpuDevice device);
-int host_gfx_gl_attach_window(HostGpuDevice device, void *native_window);
-bool host_gfx_gl_can_present_window(HostGpuDevice device);
+
+int host_gfx_gl_attach_window(HostGpuDevice device, const HostWindowInfo *window);
 void host_gfx_gl_detach_window(HostGpuDevice device);
 void host_gfx_gl_present_framebuffer(HostGpuDevice device, const void *rgba, int width, int height,
                                      int stride_in_pixels);

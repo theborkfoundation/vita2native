@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "host.h"
+
 typedef struct HostGpuDevice *HostGpuDevice;
 typedef struct HostGpuMemBlock *HostGpuMemBlock;
 
@@ -73,12 +75,14 @@ bool host_gpu_last_present_is_current_thread(HostGpuDevice device);
 /*
  * Presentation.
  *
- * attach_window() takes a native window handle (an X11 Window, or a Wayland
- * wl_egl_window on platforms that support it) and makes an EGL window surface
- * current. Returns 0 on success, -1 when the backend or platform cannot
- * present to a window (the caller should fall back to CPU presentation).
+ * attach_window() takes the window SDL created and makes an EGL window surface
+ * current on it. The backend builds whatever EGL needs from it (an X11 Window
+ * is used directly; a Wayland wl_surface gets a wl_egl_window). Returns 0 on
+ * success, -1 when the platform cannot present to that window, in which case
+ * the caller falls back to CPU presentation.
  */
-int host_gpu_attach_window(HostGpuDevice device, void *native_window);
+
+int host_gpu_attach_window(HostGpuDevice device, const HostWindowInfo *window);
 void host_gpu_detach_window(HostGpuDevice device);
 
 /*

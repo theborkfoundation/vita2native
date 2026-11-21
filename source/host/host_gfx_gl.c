@@ -52,8 +52,9 @@ static const EGLint g_thread_pbuffer_attribs[] = {
     EGL_NONE,
 };
 
-/* True when the config was advertised with EGL_PBUFFER_BIT. */
-static bool egl_config_has_pbuffer(HostGles *g, EGLConfig config);
+/* EGL native window and window surface, built from the SDL window. */
+static void *gles_native_window(HostGles *g, const HostWindowInfo *win);
+static EGLSurface gles_attach_window_surface(HostGles *g, void *native_window);
 
 static void gl_remember_thread_context(HostGles *g, EGLContext context, EGLSurface surface)
 {
@@ -86,8 +87,13 @@ static EGLContext gl_thread_context(HostGles *g)
     if (g_thread_state.gles == g && g_thread_state.context != EGL_NO_CONTEXT)
         return g_thread_state.context;
 
-    context = g->eglCreateContext(g->display, g->egl_config, g->context,
-                                  g_thread_context_attribs);
+    /*
+     * Shares objects with the primary context. Built from the pbuffer config
+     * when there is one, so this thread's drawable can be a pbuffer: the window
+     * config a window surface needs usually cannot make one.
+     */
+    context = g->eglCreateContext(g->display, g->thread_config ? g->thread_config : g->egl_config,
+                                  g->context, g_thread_context_attribs);
     if (context == EGL_NO_CONTEXT) {
         fprintf(stderr, "vita2native: eglCreateContext(thread) failed: 0x%x\n",
                 g->eglGetError());
@@ -95,17 +101,17 @@ static EGLContext gl_thread_context(HostGles *g)
     }
 
     /*
-     * Guest threads render into their own FBOs, so a surfaceless context is
-     * enough. Only ask for a pbuffer when the config has EGL_PBUFFER_BIT: a
-     * window-only config rejects one with EGL_BAD_MATCH.
+     * Guest threads each need a drawable, and the window config usually has no
+     * EGL_PBUFFER_BIT. Give them a pbuffer from the pbuffer-only config; if the
+     * display has none, they fall back to surfaceless.
      */
-    if (egl_config_has_pbuffer(g, g->egl_config))
-        surface = g->eglCreatePbufferSurface(g->display, g->egl_config,
+    if (g->thread_config)
+        surface = g->eglCreatePbufferSurface(g->display, g->thread_config,
                                              g_thread_pbuffer_attribs);
     else
         surface = EGL_NO_SURFACE;
 
-    if (surface == EGL_NO_SURFACE && egl_config_has_pbuffer(g, g->egl_config)) {
+    if (surface == EGL_NO_SURFACE && g->thread_config) {
         fprintf(stderr, "vita2native: eglCreatePbufferSurface(thread) failed: 0x%x\n",
                 g->eglGetError());
         g->eglDestroyContext(g->display, context);
@@ -116,8 +122,18 @@ static EGLContext gl_thread_context(HostGles *g)
     g_thread_state.gles = g;
     g_thread_state.context = context;
     g_thread_state.surface = surface;
-    g_thread_state.bound = EGL_NO_SURFACE;
+    /*
+     * Nothing is current yet, so "bound" must not claim the surface we are
+     * about to bind: gl_thread_bind() skips eglMakeCurrent when the two match,
+     * and a context that was never made current fails every shader compile with
+     * an empty info log.
+     */
+    g_thread_state.bound = (EGLSurface)(uintptr_t)-1;
     g_thread_state.window = false;
+
+    if (vita2native_env_flag("VITA2NATIVE_DIRECT_PRESENT_DEBUG"))
+        fprintf(stderr, "vita2native: thread ctx created (pbuffer %p, config %p)\n",
+                (void *)surface, (void *)g->thread_config);
 
     return context;
 }
@@ -247,18 +263,6 @@ __attribute__((weak)) bool host_video_window_info(HostWindowInfo *info)
     return false;
 }
 
-/* True when the config was advertised with EGL_PBUFFER_BIT. */
-static bool egl_config_has_pbuffer(HostGles *g, EGLConfig config)
-{
-    EGLint surface_type = 0;
-
-    if (!g->eglGetConfigAttrib || !g->eglGetConfigAttrib(g->display, config, EGL_SURFACE_TYPE,
-                                                         &surface_type))
-        return false;
-
-    return (surface_type & EGL_PBUFFER_BIT) != 0;
-}
-
 HostGpuDevice host_gfx_gl_create(const HostGpuConfig *config)
 {
     static const char *const egl_names[] = {
@@ -267,6 +271,12 @@ HostGpuDevice host_gfx_gl_create(const HostGpuConfig *config)
     static const char *const gles_names[] = {
         "libGLESv2.so.2", "libGLESv2.so", "libGLESv2.dylib", NULL,
     };
+    /*
+     * Window *and* pbuffer is what the primary surface wants, but many displays
+     * (this Wayland one included) offer no such config. Ask for window+pbuffer,
+     * then window alone, then pbuffer alone: the primary context draws to the
+     * window, and guest threads take a separate pbuffer config.
+     */
     static const EGLint config_attribs_window[] = {
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT_KHR,
         EGL_SURFACE_TYPE,    EGL_WINDOW_BIT,
@@ -410,6 +420,14 @@ HostGpuDevice host_gfx_gl_create(const HostGpuConfig *config)
         goto fail;
     }
 
+    /*
+     * One config cannot usually be both: this Wayland display (like many
+     * others) has no config carrying EGL_WINDOW_BIT and EGL_PBUFFER_BIT
+     * together. The primary context draws to the window, so it takes a window
+     * config; guest threads each need their own drawable and take a
+     * pbuffer-only config. Contexts created from different configs still share
+     * objects with the primary one.
+     */
     if (!config->headless &&
         g->eglChooseConfig(g->display, config_attribs_window, &egl_config, 1, &num_configs) &&
         num_configs >= 1) {
@@ -423,6 +441,15 @@ HostGpuDevice host_gfx_gl_create(const HostGpuConfig *config)
         goto fail;
     }
 
+    {
+        EGLint thread_configs = 0;
+
+        if (!g->eglChooseConfig(g->display, config_attribs_pbuffer, &g->thread_config, 1,
+                                &thread_configs) ||
+            thread_configs < 1)
+            g->thread_config = NULL;
+    }
+
     g->egl_config = egl_config;
 
     g->context = g->eglCreateContext(g->display, egl_config, EGL_NO_CONTEXT, context_attribs);
@@ -432,19 +459,16 @@ HostGpuDevice host_gfx_gl_create(const HostGpuConfig *config)
     }
 
     /*
-     * A windowable config may still carry EGL_PBUFFER_BIT, but when it does not
-     * the context is surfaceless: the guest renders into its own FBO, so no
-     * drawing surface is needed at all. Only fall back to a pbuffer when the
-     * config actually supports one.
+     * The primary context starts on an offscreen drawable, never the window.
+     *
+     * The device is built on the thread that calls host_gpu_create, but the
+     * guest presents from its own host thread. An EGL window surface can only
+     * be current on the thread that created it, and binding it elsewhere fails
+     * with EGL_BAD_ACCESS, so the window surface is created lazily in
+     * host_gfx_gl_attach_window() - on the thread that presents.
      */
-    if (g->window_capable && egl_config_has_pbuffer(g, egl_config)) {
-        g->surface = g->eglCreatePbufferSurface(g->display, egl_config, pbuffer_attribs);
-        if (g->surface == EGL_NO_SURFACE) {
-            fprintf(stderr, "vita2native: eglCreatePbufferSurface failed: 0x%x\n",
-                    g->eglGetError());
-            goto fail;
-        }
-    }
+    if (g->thread_config)
+        g->surface = g->eglCreatePbufferSurface(g->display, g->thread_config, pbuffer_attribs);
 
     if (!g->eglMakeCurrent(g->display, g->surface, g->surface, g->context)) {
         fprintf(stderr, "vita2native: eglMakeCurrent failed: 0x%x\n", g->eglGetError());
@@ -803,11 +827,8 @@ static EGLSurface gles_attach_window_surface(HostGles *g, void *native_window)
         fprintf(stderr, "vita2native: window visual 0x%x\n", (unsigned)window_visual);
 
     surface = g->eglCreateWindowSurface(g->display, g->egl_config, native_window, NULL);
-    if (surface != EGL_NO_SURFACE) {
-        if (gl_thread_bind(g, surface) == 0)
-            return surface;
-        g->eglDestroySurface(g->display, surface);
-    }
+    if (surface != EGL_NO_SURFACE)
+        return surface;
 
     if (!g->eglGetConfigs || !g->eglGetConfigAttrib ||
         !g->eglGetConfigs(g->display, candidates, 64, &count))
@@ -836,36 +857,90 @@ static EGLSurface gles_attach_window_surface(HostGles *g, void *native_window)
         while (g->eglGetError() != EGL_SUCCESS) {
         }
         surface = g->eglCreateWindowSurface(g->display, candidates[i], native_window, NULL);
-        if (surface == EGL_NO_SURFACE)
-            continue;
-        if (gl_thread_bind(g, surface) == 0) {
-            fprintf(stderr, "vita2native: window presented with a matching EGL config\n");
+        if (surface != EGL_NO_SURFACE)
             return surface;
-        }
-        g->eglDestroySurface(g->display, surface);
     }
 
     return EGL_NO_SURFACE;
 }
 
-bool host_gfx_gl_can_present_window(HostGpuDevice device)
+/*
+ * Builds the EGL native window from what the platform calls a window.
+ *
+ * X11 takes the Window id as-is. Wayland needs a wl_egl_window, which is an
+ * EGL-side object built on the wl_surface, so we create it here rather than
+ * asking SDL for an SDL_GLContext just to obtain one.
+ */
+static void *gles_native_window(HostGles *g, const HostWindowInfo *win)
 {
-    HostGles *g = device ? device->impl : NULL;
+    typedef void *(*wl_egl_window_create_fn)(void *surface, int width, int height);
 
-    return g && g->window_capable;
+    wl_egl_window_create_fn create;
+    void *native;
+
+    if (!win || win->type == HOST_WINDOW_NONE)
+        return NULL;
+
+    if (win->type != HOST_WINDOW_WAYLAND)
+        return win->window;
+
+    if (!g->wayland_egl_lib) {
+        g->wayland_egl_lib = dlopen("libwayland-egl.so.1", RTLD_NOW | RTLD_LOCAL);
+        if (!g->wayland_egl_lib)
+            g->wayland_egl_lib = dlopen("libwayland-egl.so", RTLD_NOW | RTLD_LOCAL);
+        if (g->wayland_egl_lib) {
+            *(void **)(&g->wl_egl_window_create) =
+                dlsym(g->wayland_egl_lib, "wl_egl_window_create");
+            *(void **)(&g->wl_egl_window_destroy) =
+                dlsym(g->wayland_egl_lib, "wl_egl_window_destroy");
+        }
+    }
+
+    create = (wl_egl_window_create_fn)g->wl_egl_window_create;
+    if (!create || !win->window) {
+        fprintf(stderr, "vita2native: libwayland-egl unavailable; cannot make a window surface\n");
+        return NULL;
+    }
+
+    native = create(win->window, win->width > 0 ? win->width : 960,
+                    win->height > 0 ? win->height : 544);
+    if (!native)
+        fprintf(stderr, "vita2native: wl_egl_window_create failed\n");
+
+    return native;
 }
 
-int host_gfx_gl_attach_window(HostGpuDevice device, void *native_window)
+int host_gfx_gl_attach_window(HostGpuDevice device, const HostWindowInfo *win)
 {
     HostGles *g = device->impl;
     EGLSurface surface;
+    void *native_window;
 
-    if (!g || !native_window || !g->window_capable || !g->eglCreateWindowSurface)
+    if (!g || !win || !g->window_capable || !g->eglCreateWindowSurface)
         return -1;
 
-    /* An EGL surface can only be current on one context at a time. */
-    if (g->window_surface != EGL_NO_SURFACE && g_window_thread_valid)
-        return pthread_equal(pthread_self(), g_window_thread) ? 0 : -1;
+    /*
+     * Created on the calling thread, which is the one that presents: an EGL
+     * window surface belongs to the thread that created it. Repeat calls from
+     * the same thread just rebind.
+     */
+    if (g->window_surface != EGL_NO_SURFACE) {
+        if (g_window_thread_valid && !pthread_equal(pthread_self(), g_window_thread))
+            return -1;
+        if (gl_thread_context(g) == EGL_NO_CONTEXT)
+            return -1;
+        if (gl_thread_bind(g, g->window_surface) != 0)
+            return -1;
+        g_thread_state.window = true;
+        return 0;
+    }
+
+    if (gl_thread_context(g) == EGL_NO_CONTEXT)
+        return -1;
+
+    native_window = gles_native_window(g, win);
+    if (!native_window)
+        return -1;
 
     while (g->glGetError() != GL_NO_ERROR) {
     }
@@ -876,11 +951,14 @@ int host_gfx_gl_attach_window(HostGpuDevice device, void *native_window)
         return -1;
     }
 
-    g_thread_state.window = true;
+    if (gl_thread_bind(g, surface) != 0) {
+        g->eglDestroySurface(g->display, surface);
+        return -1;
+    }
 
-    if (g->window_surface != EGL_NO_SURFACE)
-        g->eglDestroySurface(g->display, g->window_surface);
+    g->wayland_egl_window = (win->type == HOST_WINDOW_WAYLAND) ? native_window : NULL;
     g->window_surface = surface;
+    g_thread_state.window = true;
     g_window_thread = pthread_self();
     g_window_thread_valid = true;
 
@@ -924,6 +1002,12 @@ void host_gfx_gl_thread_enter(HostGpuDevice device)
     if (gl_thread_context(g) == EGL_NO_CONTEXT)
         return;
 
+    /*
+     * Bind once per thread and leave it: the guest renders into FBOs, which do
+     * not care what the default framebuffer is, so a presenting thread can keep
+     * the window surface current and never switch. Switching costs two
+     * eglMakeCurrent calls per frame, which is measurable on a software driver.
+     */
     if (g_thread_state.window && g->window_surface != EGL_NO_SURFACE)
         gl_thread_bind(g, g->window_surface);
     else
@@ -962,6 +1046,11 @@ void host_gfx_gl_present_framebuffer(HostGpuDevice device, const void *rgba, int
     GLint viewport_x, viewport_y, viewport_width, viewport_height;
 
     if (!g || g->window_surface == EGL_NO_SURFACE)
+        return;
+
+    if (g_window_thread_valid && !pthread_equal(pthread_self(), g_window_thread))
+        return;
+    if (gl_thread_bind(g, g->window_surface) != 0)
         return;
 
     if (!g->eglQuerySurface(g->display, g->window_surface, EGL_WIDTH, &window_width) ||
@@ -1085,6 +1174,8 @@ void host_gfx_gl_present_texture(HostGpuDevice device, unsigned int texture, int
         surface = g->window_surface;
         if (g_window_thread_valid && !pthread_equal(pthread_self(), g_window_thread))
             return;
+        if (gl_thread_bind(g, surface) != 0)
+            return;
         if (!g->eglQuerySurface(g->display, surface, EGL_WIDTH, &window_width) ||
             !g->eglQuerySurface(g->display, surface, EGL_HEIGHT, &window_height) ||
             window_width <= 0 || window_height <= 0)
@@ -1190,8 +1281,6 @@ void host_gfx_gl_present_texture(HostGpuDevice device, unsigned int texture, int
      * order already guarantees the blit reads this frame's contents, so skip
      * the drain and let the CPU run ahead.
      */
-    if (!g->eglSwapBuffers(g->display, surface)) {
+    if (!g->eglSwapBuffers(g->display, surface))
         fprintf(stderr, "vita2native: eglSwapBuffers failed: 0x%x\n", g->eglGetError());
-        return;
-    }
 }

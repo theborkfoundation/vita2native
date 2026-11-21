@@ -61,13 +61,6 @@ const char *host_gpu_description(HostGpuDevice device)
     return device ? device->description : "unavailable";
 }
 
-bool host_gpu_can_present_window(HostGpuDevice device)
-{
-    if (!device || device->backend != HOST_GPU_BACKEND_GLES)
-        return false;
-    return host_gfx_gl_can_present_window(device);
-}
-
 void host_gpu_begin_frame(HostGpuDevice device)
 {
     if (!device)
@@ -137,12 +130,12 @@ bool host_gpu_last_present_is_current_thread(HostGpuDevice device)
     return host_gfx_gl_last_present_is_current_thread(device);
 }
 
-int host_gpu_attach_window(HostGpuDevice device, void *native_window)
+int host_gpu_attach_window(HostGpuDevice device, const HostWindowInfo *window)
 {
     if (!device || device->backend != HOST_GPU_BACKEND_GLES)
         return -1;
 
-    return host_gfx_gl_attach_window(device, native_window);
+    return host_gfx_gl_attach_window(device, window);
 }
 
 void host_gpu_detach_window(HostGpuDevice device)

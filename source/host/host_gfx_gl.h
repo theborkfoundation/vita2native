@@ -144,8 +144,20 @@ typedef struct HostGles {
     PFNEGLRELEASETHREADPROC eglReleaseThread;
 
     EGLConfig egl_config;
+    /*
+     * Guest threads other than the drawing one need a drawable. A window
+     * config often has no EGL_PBUFFER_BIT, so threads use a second config that
+     * is pbuffer-only, if the display offers one.
+     */
+    EGLConfig thread_config;
     bool window_capable;
     EGLSurface window_surface;
+
+    /* libwayland-egl, for the wl_egl_window an EGL window surface needs. */
+    void *wayland_egl_lib;
+    void *wl_egl_window_create;
+    void *wl_egl_window_destroy;
+    void *wayland_egl_window;
 
     GLuint present_program;
     GLuint present_texture;

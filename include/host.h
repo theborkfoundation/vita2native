@@ -128,7 +128,12 @@ typedef struct {
      * EGL_DEFAULT_DISPLAY and let EGL open the DRM node itself.
      */
     void *display;
-    /* X11: the Window id. Wayland: the wl_egl_window. KMSDRM: the gbm_surface. */
+    /*
+     * The window itself, as the platform names it:
+     *   X11     - the Window id (EGL takes it directly)
+     *   Wayland - the wl_surface (EGL needs a wl_egl_window built on it)
+     *   KMSDRM  - unused; the GL layer makes a gbm_surface on gbm_device
+     */
     void *window;
     /* KMSDRM only. */
     void *gbm_device;
