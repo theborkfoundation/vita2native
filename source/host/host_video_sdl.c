@@ -245,26 +245,27 @@ static bool video_init_sdl(HostVideo *video)
         return false;
     }
 
-    /*
-     * EGL is the only output path: it draws straight into the window, so both
-     * the guest's render target and any CPU frame go through it. No
-     * SDL_Renderer is created - a second GL context behind our back is exactly
-     * the interference this design avoids.
-     */
-    if (!video_try_gl_window(video)) {
-        fprintf(stderr, "vita2native: no EGL window for this video driver (%s)\n",
-                SDL_GetCurrentVideoDriver ? SDL_GetCurrentVideoDriver() : "none");
-        return false;
-    }
-
     SDL_ShowCursor(0);
     SDL_GetWindowSize(video->window, &panel_width, &panel_height);
     video->width = panel_width > 0 ? panel_width : 960;
     video->height = panel_height > 0 ? panel_height : 544;
 
-    fprintf(stderr, "vita2native: presenting through EGL (%s video, %dx%d window)\n",
-            SDL_GetCurrentVideoDriver ? SDL_GetCurrentVideoDriver() : "unknown", video->width,
-            video->height);
+    /*
+     * EGL is the only output path: it draws straight into the window, so both
+     * the guest's render target and any CPU frame go through it. No
+     * SDL_Renderer is created - a second GL context behind our back is exactly
+     * the interference this design avoids.
+     *
+     * Drivers with no window to present to (offscreen, dummy) are not an error:
+     * the emulator runs on, headless, and frame dumps still work.
+     */
+    if (video_try_gl_window(video))
+        fprintf(stderr, "vita2native: presenting through EGL (%s video, %dx%d window)\n",
+                SDL_GetCurrentVideoDriver ? SDL_GetCurrentVideoDriver() : "unknown", video->width,
+                video->height);
+    else
+        fprintf(stderr, "vita2native: %s video has no EGL window; running headless\n",
+                SDL_GetCurrentVideoDriver ? SDL_GetCurrentVideoDriver() : "no");
 
     video->controller_scan_at_ns = video_now_ns();
     return true;
