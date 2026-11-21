@@ -20,7 +20,6 @@
  * little-endian host, so frames are uploaded without a conversion. SDL also
  * does the scaling and letterboxing.
  */
-#include "display.h"
 #include "gfx.h"
 #include "host.h"
 #include "settings.h"
@@ -197,33 +196,17 @@ static void video_destroy_sdl(HostVideo *video)
 }
 
 /*
- * Brings SDL's video subsystem up, without leaving the caller to pick a driver.
+ * Brings SDL's video subsystem up.
  *
- * With direct presentation the DRM device belongs to this emulator and SDL is
- * only here for input, so any video driver will do - and the KMSDRM one is the
- * worst choice, since it probes the same CRTC and connector. Prefer the
- * offscreen driver, and only fall back to the others when it is not built in.
- * An explicit SDL_VIDEODRIVER always wins.
+ * SDL picks the driver. It probes X11, Wayland, KMSDRM, offscreen and dummy in
+ * its own order and honours an explicit SDL_VIDEODRIVER from the caller.
+ * Overriding it here only ever fought SDL.
  */
 static bool video_init_video_subsystem(HostVideo *video)
 {
-    static const char *const kms_drivers[] = {"offscreen", "kmsdrm", "dummy"};
+    (void)video;
 
-    if (!host_display_uses_kms() || getenv("SDL_VIDEODRIVER"))
-        return SDL_InitSubSystem(SDL_INIT_VIDEO) == 0;
-
-    for (unsigned int i = 0; i < sizeof(kms_drivers) / sizeof(kms_drivers[0]); i++) {
-        setenv("SDL_VIDEODRIVER", kms_drivers[i], 1);
-        if (SDL_InitSubSystem(SDL_INIT_VIDEO) == 0)
-            return true;
-
-        fprintf(stderr, "vita2native: SDL video driver '%s' unavailable: %s\n", kms_drivers[i],
-                SDL_GetError());
-        if (SDL_QuitSubSystem)
-            SDL_QuitSubSystem(SDL_INIT_VIDEO);
-    }
-
-    return false;
+    return SDL_InitSubSystem(SDL_INIT_VIDEO) == 0;
 }
 
 /*
@@ -246,7 +229,8 @@ static void video_capture_window_id(HostVideo *video)
     if (info.subsystem == SDL_SYSWM_X11)
         video->native_window = (void *)(uintptr_t)info.info.x11.window;
     else if (info.subsystem == SDL_SYSWM_WAYLAND)
-        video->native_window = info.info.wl.surface;
+        /* EGL wants the wl_egl_window, not the plain wl_surface. */
+        video->native_window = info.info.wl.egl_window;
     else
         return;
 
@@ -258,43 +242,31 @@ static void video_capture_window_id(HostVideo *video)
 }
 
 /*
- * True when the window's native handle can be given to EGL. The attach itself
- * happens on the presenting thread (see host_video_present_texture): EGL
- * surfaces belong to the thread whose context is current, and the window is
- * created on this one.
+ * Reports the window handle EGL can attach to.
+ *
+ * The device does not exist yet when the window is created - the GL layer is
+ * built on this handle, not the other way round - so this only records what SDL
+ * gave us. Whether EGL can actually present to it is decided later, when
+ * host_video_present_texture() runs with a device.
  */
 static bool video_try_gl_window(HostVideo *video)
 {
-    HostGpuDevice device = host_gpu_current();
     const char *driver;
 
     if (!video->window)
         return false;
 
-    /* EGL can only take these window types; anything else keeps the renderer. */
     driver = SDL_GetCurrentVideoDriver ? SDL_GetCurrentVideoDriver() : "";
-    if (!driver || (strcmp(driver, "x11") != 0 && strcmp(driver, "wayland") != 0))
+    if (!driver || (strcmp(driver, "x11") != 0 && strcmp(driver, "wayland") != 0 &&
+                    strcmp(driver, "kmsdrm") != 0))
         return false;
 
-    /*
-     * Presenting the render target is only worth the extra machinery when the
-     * window's EGL is real hardware. On a software rasteriser the "direct"
-     * present is llvmpipe drawing a full-screen quad and copying it to the
-     * server, which measured 96 ms a frame against 3-5 ms for SDL's X11 blit.
-     */
-    if (!device || !host_gpu_can_present_window(device)) {
-        /* A surfaceless display (EGL_PLATFORM=surfaceless) never can. */
-        fprintf(stderr, "vita2native: EGL has no window support here; presenting through SDL\n");
+    video_capture_window_id(video);
+    if (!video->native_window_ok)
         return false;
-    }
-    if (host_gpu_is_software(device)) {
-        fprintf(stderr, "vita2native: EGL is a software renderer; presenting through SDL\n");
-        return false;
-    }
 
     video->gl_window = true;
-    video_capture_window_id(video);
-    fprintf(stderr, "vita2native: handing the window to EGL (%s video)\n", driver);
+    fprintf(stderr, "vita2native: window handed to EGL (%s video)\n", driver);
     return true;
 }
 
@@ -314,19 +286,6 @@ static bool video_init_sdl(HostVideo *video)
         video->controller_ready = true;
     } else {
         fprintf(stderr, "vita2native: SDL controller init failed: %s\n", SDL_GetError());
-    }
-
-    if (host_display_uses_kms()) {
-        /* KMS presentation draws straight to the scanout buffers; SDL only
-           provides evdev input, so no window (and no extra GBM/EGL state) is
-           created here. */
-        video->direct_present = true;
-        video->width = 960;
-        video->height = 544;
-        fprintf(stderr, "vita2native: direct KMS presentation enabled (SDL %s input only)\n",
-                SDL_GetCurrentVideoDriver ? SDL_GetCurrentVideoDriver() : "unknown");
-        video->controller_scan_at_ns = video_now_ns();
-        return true;
     }
 
     if (!video->windowed)
@@ -1076,6 +1035,51 @@ fail:
     return NULL;
 }
 
+bool host_video_window_info(HostWindowInfo *info)
+{
+    HostVideo *video = g_active_video;
+    SDL_SysWMinfo wm;
+
+    if (!info)
+        return false;
+
+    memset(info, 0, sizeof(*info));
+    if (!video || !video->window)
+        return false;
+
+    SDL_VERSION(&wm.version);
+    if (!SDL_GetWindowWMInfo(video->window, &wm))
+        return false;
+
+    switch (wm.subsystem) {
+    case SDL_SYSWM_X11:
+        info->type = HOST_WINDOW_X11;
+        info->display = (void *)wm.info.x11.display;
+        info->window = (void *)(uintptr_t)wm.info.x11.window;
+        break;
+    case SDL_SYSWM_WAYLAND:
+        info->type = HOST_WINDOW_WAYLAND;
+        info->display = wm.info.wl.display;
+        info->window = wm.info.wl.egl_window;
+        break;
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    case SDL_SYSWM_KMSDRM:
+        info->type = HOST_WINDOW_KMSDRM;
+        info->gbm_device = wm.info.kmsdrm.gbm_dev;
+        info->drm_fd = wm.info.kmsdrm.drm_fd;
+        /* The gbm_surface is not in SDL_SysWMinfo; the GL layer creates its own
+           on this gbm_device and blits into it. */
+        break;
+#endif
+    default:
+        return false;
+    }
+
+    info->width = video->width > 0 ? video->width : video->window_width;
+    info->height = video->height > 0 ? video->height : video->window_height;
+    return info->type != HOST_WINDOW_NONE;
+}
+
 void host_video_close(HostVideo *video)
 {
     if (!video)
@@ -1163,20 +1167,16 @@ bool host_video_present_texture(HostVideo *video, unsigned int texture, int widt
 
     if (!video->egl_attached) {
         /* Runs on the guest thread, which is where the GL context is current. */
-        int attached = video->direct_present
-                           ? host_gpu_attach_kms(device, -1, 0, 0)
-                           : host_gpu_attach_window(device, video->native_window);
+        int attached = host_gpu_attach_window(device, video->native_window);
 
         if (attached != 0) {
-            fprintf(stderr, "vita2native: EGL %s attach failed\n",
-                    video->direct_present ? "scanout" : "window");
+            fprintf(stderr, "vita2native: EGL window attach failed\n");
             /*
              * Most likely the window was replaced since its id was read, so
              * ask the video thread for a current one; frames until then go
              * through the renderer.
              */
-            if (!video->direct_present)
-                video->native_window_ok = false;
+            video->native_window_ok = false;
             return false;
         }
         video->egl_attached = true;
@@ -1189,12 +1189,6 @@ bool host_video_present_texture(HostVideo *video, unsigned int texture, int widt
 }
 
 __attribute__((weak)) bool host_gpu_can_present_window(HostGpuDevice device)
-{
-    (void)device;
-    return false;
-}
-
-__attribute__((weak)) bool host_gpu_is_software(HostGpuDevice device)
 {
     (void)device;
     return false;
@@ -1231,16 +1225,6 @@ __attribute__((weak)) int host_gpu_attach_window(HostGpuDevice device, void *nat
 {
     (void)device;
     (void)native_window;
-    return -1;
-}
-
-__attribute__((weak)) int host_gpu_attach_kms(HostGpuDevice device, int drm_fd, int width,
-                                               int height)
-{
-    (void)device;
-    (void)drm_fd;
-    (void)width;
-    (void)height;
     return -1;
 }
 

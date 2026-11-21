@@ -13,7 +13,6 @@
 #include <malloc.h>
 #endif
 
-#include "display.h"
 #include "fs.h"
 #include "gfx.h"
 #include "host.h"
@@ -816,6 +815,16 @@ static int host_init(void)
     HostGpuConfig gpu_config = { 960, 544, g_headless };
     int ret;
 
+    /*
+     * SDL creates the window first: the GL layer builds its EGL display on the
+     * native handle SDL reports, so the window has to exist before the device.
+     * SceDisplay_init owns the vblank epoch and the video layer, which must
+     * also be up before any guest thread renders.
+     */
+    ret = SceDisplay_init(NULL);
+    if (ret != 0)
+        return ret;
+
     g_device = host_gpu_create(&gpu_config);
     if (!g_device)
         return -1;
@@ -841,9 +850,6 @@ static int host_init(void)
     if (ret != 0)
         return ret;
     ret = SceProcessmgr_init();
-    if (ret != 0)
-        return ret;
-    ret = SceDisplay_init(g_device);
     if (ret != 0)
         return ret;
     ret = SceGxm_init(g_device);
@@ -976,12 +982,11 @@ int main(int argc, char *argv[])
         }
     }
 
-    /* Offscreen unless a presentation path needs a window-capable EGL display:
-       direct KMS shows the scanout surface, and X11/Wayland take the window
-       surface of a display server. Anything else would only move every GL call
-       onto a window system that is not there. */
-    if (!g_headless && !host_display_uses_kms() && !getenv("DISPLAY") &&
-        !getenv("WAYLAND_DISPLAY"))
+    /* Offscreen unless a display server is there to present to. SDL decides
+       which video driver to use; this only avoids initialising video at all on
+       a machine with no display, where the guest still renders and BMP capture
+       still works. */
+    if (!g_headless && !getenv("DISPLAY") && !getenv("WAYLAND_DISPLAY"))
         g_headless = true;
 
     create_vita2native_paths();

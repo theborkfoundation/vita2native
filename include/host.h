@@ -104,8 +104,44 @@ void host_sleep_ns(int64_t nanoseconds);
  * fullscreen.
  */
 typedef struct HostVideo HostVideo;
+
+/*
+ * The native window SDL created, in the form EGL needs to build a display and
+ * a window surface on it.
+ *
+ * SDL decides the platform - it probes X11, Wayland, KMSDRM, offscreen and
+ * dummy in its own order - and this reports what it settled on. The GL layer
+ * reads it and creates the EGL display, context and surface itself, on that
+ * native handle. Nothing in the emulator chooses or overrides a video driver.
+ */
+typedef enum {
+    HOST_WINDOW_NONE = 0, /* no window: headless, or SDL found no driver */
+    HOST_WINDOW_X11,
+    HOST_WINDOW_WAYLAND,
+    HOST_WINDOW_KMSDRM,
+} HostWindowType;
+
+typedef struct {
+    HostWindowType type;
+    /*
+     * X11: the Display*. Wayland: the wl_display*. KMSDRM: unused - pass
+     * EGL_DEFAULT_DISPLAY and let EGL open the DRM node itself.
+     */
+    void *display;
+    /* X11: the Window id. Wayland: the wl_egl_window. KMSDRM: the gbm_surface. */
+    void *window;
+    /* KMSDRM only. */
+    void *gbm_device;
+    int drm_fd;
+    int width;
+    int height;
+} HostWindowInfo;
+
 HostVideo *host_video_open(void);
 void host_video_close(HostVideo *video);
+
+/* Fills `info` from the window SDL created. Returns false when there is none. */
+bool host_video_window_info(HostWindowInfo *info);
 int host_video_width(const HostVideo *video);
 int host_video_height(const HostVideo *video);
 void host_video_present(HostVideo *video, const void *rgba, int width, int height,

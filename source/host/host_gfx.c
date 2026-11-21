@@ -2,7 +2,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "display.h"
 #include "host_gfx_internal.h"
 
 struct HostGpuMemBlock {
@@ -24,16 +23,6 @@ HostGpuDevice host_gpu_create(const HostGpuConfig *config)
 
     if (!config)
         config = &defaults;
-
-    /*
-     * Panfrost's default tiled/AFBC layouts make glReadPixels roughly twice as
-     * slow (195 ns/pixel on Mali-G31), and this port reads the whole frame
-     * back every frame for sceDisplaySetFrameBuf. Linear layouts only affect
-     * Panfrost, and a caller-supplied PAN_MESA_DEBUG wins. Direct presentation
-     * removes the readback, so it keeps the faster tiled layout.
-     */
-    if (!host_display_uses_kms() && !getenv("PAN_MESA_DEBUG"))
-        setenv("PAN_MESA_DEBUG", "linear", 0);
 
     device = host_gfx_gl_create(config);
     if (device) {
@@ -77,17 +66,6 @@ bool host_gpu_can_present_window(HostGpuDevice device)
     if (!device || device->backend != HOST_GPU_BACKEND_GLES)
         return false;
     return host_gfx_gl_can_present_window(device);
-}
-
-bool host_gpu_is_software(HostGpuDevice device)
-{
-    static const char *const names[] = {"llvmpipe", "softpipe", "swrast", "swiftshader"};
-    const char *description = host_gpu_description(device);
-
-    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
-        if (strstr(description, names[i]))
-            return true;
-    return false;
 }
 
 void host_gpu_begin_frame(HostGpuDevice device)
@@ -165,14 +143,6 @@ int host_gpu_attach_window(HostGpuDevice device, void *native_window)
         return -1;
 
     return host_gfx_gl_attach_window(device, native_window);
-}
-
-int host_gpu_attach_kms(HostGpuDevice device, int drm_fd, int width, int height)
-{
-    if (!device || device->backend != HOST_GPU_BACKEND_GLES)
-        return -1;
-
-    return host_gfx_gl_attach_kms(device, drm_fd, width, height);
 }
 
 void host_gpu_detach_window(HostGpuDevice device)

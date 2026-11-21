@@ -103,9 +103,13 @@ Vita device paths are remapped below `vita2native/`:
 | `savedata0:/...` | `vita2native/savedata/...` |
 | `os0:`, `vs0:` | `vita2native/system/...` |
 
-On KMS/DRM targets set `SDL_VIDEODRIVER=kmsdrm`; presentation then attaches EGL
-directly to the scanout plane, with no extra flag. On X11/Wayland the SDL
-renderer presents the frame instead.
+SDL chooses the video driver (X11, Wayland, KMSDRM, offscreen), and the GL
+layer builds its EGL display on the native window SDL created. Nothing
+overrides the driver: an explicit `SDL_VIDEODRIVER` is honoured, and the
+compositor or console SDL picks decides which GL device is used. On a
+GPU-composited Wayland or X11 session that is the hardware driver; a
+software-rendered compositor (for example Weston on its Pixman renderer) gives
+a software GL device instead.
 
 `SceNetCtl` reports the console offline by default so titles take their offline
 fallback. Set `VITA2NATIVE_NETWORK=1` to report the host's real network state.
@@ -163,9 +167,10 @@ On the Panfrost system:
 - VitaShell renders its home screen with real device capacities;
 - the backend reports `GLES 3.1 Mesa (Mali-G31, Panfrost)`.
 
-`PAN_MESA_DEBUG=linear` is set by default when the caller has not set it:
-Panfrost's tiled/AFBC layouts make `glReadPixels` about twice as slow, and the
-port reads the whole frame back every frame for `sceDisplaySetFrameBuf`.
+Frames reach the guest's memory through a readback on the display path, so
+`glReadPixels` cost matters on Panfrost: `PAN_MESA_DEBUG=linear` makes it about
+twice as fast on Mali-G31, at the cost of the tiled layout. It is not set for
+you; set it in the environment when profiling that path.
 
 Performance on that system: VitaShell runs at ~4.8 fps. Consecutive GXM draws
 that share program, textures and render state are merged into one GL draw

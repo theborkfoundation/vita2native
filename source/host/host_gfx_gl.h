@@ -10,6 +10,7 @@
 #include <GLES3/gl3.h>
 
 #include "gfx.h"
+#include "host.h"
 
 /*
  * Everything the GXM backend needs from the GLES device. The function table is
@@ -110,12 +111,9 @@
 typedef struct HostGles {
     void *egl_lib;
     void *gles_lib;
-    void *gbm_lib;
-    void *gbm_device;
-    int drm_fd;
-    bool owns_gbm_device;
-    bool owns_drm_fd;
-    bool display_is_gbm;
+
+    /* The window SDL created, reported as native handles for EGL. */
+    HostWindowInfo window_info;
 
     EGLDisplay display;
     EGLContext context;
@@ -149,15 +147,6 @@ typedef struct HostGles {
     bool window_capable;
     EGLSurface window_surface;
 
-    /* KMS/GBM presentation. The surface is created lazily on the presenting
-       thread; kms_state holds the private libdrm/GBM state. */
-    void *gbm_surface;
-    EGLSurface kms_surface;
-    int kms_width;
-    int kms_height;
-    int kms_drm_fd;
-    uint32_t kms_crtc_id;
-    void *kms_state;
     GLuint present_program;
     GLuint present_texture;
     GLuint overlay_texture;

@@ -36,21 +36,6 @@ HostGpuBackend host_gpu_backend(HostGpuDevice device);
 /* Human-readable backend/renderer/version, e.g. "GLES 3.2 (Mesa...)". */
 const char *host_gpu_description(HostGpuDevice device);
 
-/*
- * True when the GL/EGL implementation is a software rasteriser (llvmpipe,
- * softpipe, swrast, SwiftShader). Presenting through EGL is a CPU round-trip of
- * a different shape there, and the SDL blit is faster, so the window path asks
- * this before agreeing to take the render target.
- */
-bool host_gpu_is_software(HostGpuDevice device);
-
-/*
- * True when the EGL display was initialised with window support, i.e. an
- * EGLConfig with EGL_WINDOW_BIT was found. A surfaceless display always says
- * no: it has no window system to draw into.
- */
-bool host_gpu_can_present_window(HostGpuDevice device);
-
 /* Bind the offscreen color target and make it current for drawing. */
 void host_gpu_begin_frame(HostGpuDevice device);
 /* Finish the frame. Presentation is added together with the GXM backend. */
@@ -95,16 +80,6 @@ bool host_gpu_last_present_is_current_thread(HostGpuDevice device);
  */
 int host_gpu_attach_window(HostGpuDevice device, void *native_window);
 void host_gpu_detach_window(HostGpuDevice device);
-
-/*
- * Attaches a KMS/GBM presentation surface. The backend uses the GPU device's
- * own DRM connection (it has to, while GLES buffers are allocated there) and
- * makes it DRM master. `drm_fd` is accepted for callers that already own a
- * master fd but is currently unused; `width`/`height` are an optional mode
- * request, and 0 keeps the connector's current/preferred mode. Returns 0 on
- * success, -1 when the backend cannot present on KMS.
- */
-int host_gpu_attach_kms(HostGpuDevice device, int drm_fd, int width, int height);
 
 /*
  * Uploads an RGBA8 guest framebuffer (stride in pixels) and swaps the window.

@@ -23,7 +23,6 @@
 #include <time.h>
 
 #include "config.h"
-#include "display.h"
 #include "frame_profile.h"
 #include "fs.h"
 #include "gfx.h"
@@ -5977,11 +5976,10 @@ static int gxm_direct_present_enabled(void)
 {
     /*
      * Direct presentation means the video layer takes the render target itself
-     * instead of a copy of the guest framebuffer: the KMS scanout plane, or an
-     * EGL window surface. The second case only exists while the video layer is
-     * running, which is why it is asked at use time rather than cached.
+     * instead of a copy of the guest framebuffer. Only the video layer knows
+     * whether it is running, so it is asked at use time rather than cached.
      */
-    return host_display_uses_kms() || host_video_presents_texture();
+    return host_video_presents_texture();
 }
 
 /* Lets the same-thread present overlap be disabled for A/B comparisons. */
@@ -10693,7 +10691,7 @@ bool SceGxm_get_present_frame(const void *data, unsigned int *texture, int *widt
      * a screen settles: while it rotates textures the memo recovers by itself,
      * and when it stops it does not.
      */
-    if (host_display_uses_kms()) {
+    if (host_video_presents_texture()) {
         memset(g_bound_texture, 0, sizeof(g_bound_texture));
         memset(g_unit_texture_valid, 0, sizeof(g_unit_texture_valid));
         g_active_texture_unit = UINT_MAX;
