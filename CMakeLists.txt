@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.13)
 
 set(VITA2NATIVE_MAJOR 0)
-set(VITA2NATIVE_MINOR 4)
-set(VITA2NATIVE_PATCH 0)
+set(VITA2NATIVE_MINOR 0)
+set(VITA2NATIVE_PATCH 1)
 execute_process(COMMAND
     git describe --dirty --always --exclude '*'
     OUTPUT_VARIABLE VITA2NATIVE_HASH
