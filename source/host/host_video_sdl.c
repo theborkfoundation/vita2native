@@ -177,6 +177,17 @@ static void video_capture_window_id(HostVideo *video)
          * this port works.
          */
         video->native_window = info.info.wl.surface;
+#if SDL_VERSION_ATLEAST(2, 0, 12) && defined(SDL_VIDEO_DRIVER_KMSDRM)
+    else if (info.subsystem == SDL_SYSWM_KMSDRM)
+        /*
+         * SDL drives the DRM node directly. It exposes the gbm_device but not
+         * the gbm_surface EGL needs, so the GL layer builds one on this device
+         * and page-flips it. Record the device as the handle: it is what EGL
+         * can attach to, and the presence of a device is what makes KMS
+         * presentable at all.
+         */
+        video->native_window = info.info.kmsdrm.gbm_dev;
+#endif
     else
         return;
 

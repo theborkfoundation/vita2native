@@ -117,5 +117,6 @@ set(VITA2NATIVE_HOST_GFX_SOURCES
     source/frame_profile.c
     source/host/host_gfx.c
     source/host/host_gfx_gl.c
+    source/host/host_kms_present.c
     source/host/host_gfx_null.c
 )

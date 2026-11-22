@@ -21,6 +21,7 @@
 #include "frame_profile.h"
 #include "host_gfx_gl.h"
 #include "host_gfx_internal.h"
+#include "host_kms_present.h"
 #include "settings.h"
 
 /*
@@ -233,6 +234,7 @@ static void gles_destroy_impl(HostGles *g)
         }
         free(g->thread_contexts);
         free(g->thread_surfaces);
+        /* The gbm_surface must outlive the EGL surface built on it. */
         if (g->window_surface != EGL_NO_SURFACE)
             g->eglDestroySurface(g->display, g->window_surface);
         if (g->surface != EGL_NO_SURFACE)
@@ -243,6 +245,10 @@ static void gles_destroy_impl(HostGles *g)
             g->eglReleaseThread();
         g->eglTerminate(g->display);
     }
+
+    /* After the EGL surface that wraps it, never before. */
+    host_kms_present_destroy(g->kms);
+    g->kms = NULL;
 
     if (g->egl_lib)
         dlclose(g->egl_lib);
@@ -881,6 +887,18 @@ static void *gles_native_window(HostGles *g, const HostWindowInfo *win)
     if (!win || win->type == HOST_WINDOW_NONE)
         return NULL;
 
+    /*
+     * KMSDRM: SDL owns the DRM node and the mode, but SysWMinfo reports only
+     * the gbm_device, and an EGL window surface needs a gbm_surface on it. We
+     * make that surface and, afterwards, the page flip.
+     */
+    if (win->type == HOST_WINDOW_KMSDRM) {
+        if (!g->kms)
+            g->kms = host_kms_present_create(win->gbm_device, win->drm_fd, win->width,
+                                             win->height);
+        return g->kms ? host_kms_present_surface(g->kms) : NULL;
+    }
+
     if (win->type != HOST_WINDOW_WAYLAND)
         return win->window;
 
@@ -1120,6 +1138,8 @@ void host_gfx_gl_present_framebuffer(HostGpuDevice device, const void *rgba, int
     }
 
     g->eglSwapBuffers(g->display, g->window_surface);
+    if (g->kms)
+        host_kms_present_flip(g->kms);
 }
 
 void host_gfx_gl_set_overlay(HostGpuDevice device, const void *rgba, int width, int height)
@@ -1283,4 +1303,6 @@ void host_gfx_gl_present_texture(HostGpuDevice device, unsigned int texture, int
      */
     if (!g->eglSwapBuffers(g->display, surface))
         fprintf(stderr, "vita2native: eglSwapBuffers failed: 0x%x\n", g->eglGetError());
+    else if (g->kms)
+        host_kms_present_flip(g->kms);
 }

@@ -181,6 +181,9 @@ typedef struct HostGles {
     EGLSurface *thread_surfaces;
     unsigned int thread_context_count;
 
+    /* KMS/DRM scanout, when SDL is driving the display directly. */
+    struct HostKmsPresent *kms;
+
     /* Threads involved in direct presentation, see host_gpu_note_render_thread. */
     pthread_t render_thread;
     bool render_thread_valid;
