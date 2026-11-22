@@ -11,14 +11,14 @@ working tree. What the emulator supports today is in `README.md`.
 ## Build
 
 ```sh
-tools/zig-toolchain.sh arm        # once; writes wrappers into build/
-tools/debian-sysroot.py           # once: the armhf sysroot
-cmake --preset arm-rel
-cmake --build --preset arm-rel
+tools/zig-toolchain.sh     # once; writes wrappers into build/
+tools/debian-sysroot.py    # once: the armhf sysroot
+cmake --preset release
+cmake --build --preset release
 ```
 
-The artifact is `build/cmake-arm-rel/vita2native`. For on-device debugging use
-`arm-debug`, which keeps symbols.
+The artifact is `build/release/vita2native`. For on-device debugging use
+`debug`, which keeps symbols.
 
 Cross builds link the target's SDL2 from `build/sysroot-armhf`, pinned by
 `tools/sysroots/armhf.lock`. `tools/debian-sysroot.py --verify` checks the tree
@@ -29,7 +29,7 @@ against its lock.
 **Copy it as `v2n-arm`, into `~/v2n/` on the test bed:**
 
 ```sh
-scp build/cmake-arm-rel/vita2native <host>:~/v2n/v2n-arm
+scp build/release/vita2native <host>:~/v2n/v2n-arm
 ```
 
 Never name it `vita2native`. That name is the runtime's filesystem root
@@ -40,7 +40,7 @@ A running binary cannot be overwritten (`text file busy` on ARM). Stop it first,
 or upload to a temporary name and move:
 
 ```sh
-scp build/cmake-arm-rel/vita2native <host>:~/v2n/v2n-arm.new
+scp build/release/vita2native <host>:~/v2n/v2n-arm.new
 ssh <host> 'pkill -f "[v]2n-arm"; sleep 1; mv ~/v2n/v2n-arm.new ~/v2n/v2n-arm'
 ```
 
@@ -103,7 +103,7 @@ x86_64 Ubuntu 24.04, qemu-user-static, **armhf multiarch with an X display on
 `:0`**. This is where the ARM32 binary is exercised without real hardware.
 
 ```sh
-scp build/cmake-arm-rel/vita2native scratchvm:~/v2n/v2n-arm
+scp build/release/vita2native scratchvm:~/v2n/v2n-arm
 ssh scratchvm 'cd ~/v2n && DISPLAY=:0 SDL_VIDEODRIVER=x11 \
   qemu-arm-static -L /usr/arm-linux-gnueabihf ./v2n-arm \
   ~/vita-games/<TITLEID>/eboot.bin'

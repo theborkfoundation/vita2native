@@ -7,12 +7,12 @@
     },
     "configurePresets": [
         {
-            "name": "arm-rel",
+            "name": "release",
             "displayName": "32-bit ARM release (deploy artifact)",
             "description": "Cross build for armhf with zig. This is the binary that gets deployed to the devices.",
             "hidden": false,
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/build/cmake-arm-rel",
+            "binaryDir": "${sourceDir}/build/release",
             "toolchainFile": "${sourceDir}/cmake/toolchains/zig-arm.cmake",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "RelWithDebInfo",
@@ -21,12 +21,12 @@
             }
         },
         {
-            "name": "arm-debug",
+            "name": "debug",
             "displayName": "32-bit ARM debug",
             "description": "Cross build for armhf with zig and symbols suitable for gdb on the device.",
             "hidden": false,
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/build/cmake-arm",
+            "binaryDir": "${sourceDir}/build/debug",
             "toolchainFile": "${sourceDir}/cmake/toolchains/zig-arm.cmake",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
@@ -35,12 +35,12 @@
             }
         },
         {
-            "name": "arm-minsize",
+            "name": "minsize",
             "displayName": "32-bit ARM minimum size (experiments)",
             "description": "LTO and stripped dynamic symbols. For size experiments only: crash backtraces lose names.",
             "hidden": false,
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/build/cmake-arm-minsize",
+            "binaryDir": "${sourceDir}/build/minsize",
             "toolchainFile": "${sourceDir}/cmake/toolchains/zig-arm.cmake",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "MinSizeRel",
@@ -54,19 +54,19 @@
     ],
     "buildPresets": [
         {
-            "name": "arm-rel",
+            "name": "release",
             "hidden": false,
-            "configurePreset": "arm-rel"
+            "configurePreset": "release"
         },
         {
-            "name": "arm-debug",
+            "name": "debug",
             "hidden": false,
-            "configurePreset": "arm-debug"
+            "configurePreset": "debug"
         },
         {
-            "name": "arm-minsize",
+            "name": "minsize",
             "hidden": false,
-            "configurePreset": "arm-minsize"
+            "configurePreset": "minsize"
         }
     ]
 }

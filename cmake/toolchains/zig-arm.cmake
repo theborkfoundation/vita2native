@@ -1,8 +1,8 @@
 # 32-bit ARM (armhf) Linux cross build using zig's bundled clang.
 #
 # Generate the wrappers this file points at with:
-#   tools/zig-toolchain.sh arm
-# then configure with `cmake --preset arm-rel` (or arm-debug, arm-minsize).
+#   tools/zig-toolchain.sh
+# then configure with `cmake --preset release` (or debug, minsize).
 # The target's system libraries come from build/sysroot-armhf, populated by
 # tools/debian-sysroot.py.
 

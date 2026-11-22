@@ -13,17 +13,17 @@ Needs CMake, Ninja, pkg-config and [Zig](https://ziglang.org) (the presets
 cross-compile with `zig cc`; no system cross toolchain).
 
 ```sh
-tools/zig-toolchain.sh arm        # once
-tools/debian-sysroot.py           # once: the armhf sysroot
-cmake --preset arm-rel
-cmake --build --preset arm-rel
+tools/zig-toolchain.sh     # once
+tools/debian-sysroot.py    # once: the armhf sysroot
+cmake --preset release
+cmake --build --preset release
 ```
 
 | Preset | Use |
 | --- | --- |
-| `arm-rel` | the deployment artifact |
-| `arm-debug` | symbols for on-device `gdb` |
-| `arm-minsize` | size experiments; backtraces lose names |
+| `release` | the deployment artifact |
+| `debug` | symbols for on-device `gdb` |
+| `minsize` | size experiments; backtraces lose names |
 
 On a 32-bit ARM host, `cmake -S . -B build/native-arm -G Ninja` works with the
 distribution's `libsdl2-dev` instead. SDL2 and EGL/GLESv2 are `dlopen`ed, so
@@ -32,7 +32,7 @@ the binary links neither.
 ## Running
 
 ```sh
-./build/cmake-arm-rel/vita2native ./vita2native/executable
+./build/release/vita2native ./vita2native/executable
 ```
 
 The binary must **not** be named `vita2native` — that is the runtime's

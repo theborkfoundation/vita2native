@@ -400,7 +400,7 @@ def main():
         return 0
 
     print()
-    print("configure against it with `cmake --preset arm-rel`.")
+    print("configure against it with `cmake --preset release`.")
     return 0
 
 
