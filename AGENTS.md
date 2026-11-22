@@ -113,9 +113,27 @@ ssh scratchvm 'cd ~/v2n && DISPLAY=:0 SDL_VIDEODRIVER=x11 \
   run <cmd>` injects `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY=wayland-kiosk`. It
   is a user service (`systemctl --user status weston-vnc-kiosk`), 640x480.
   The script is not on `PATH` for non-interactive SSH — call it by full path.
-- Everything runs under `qemu-arm-static`, so absolute speeds are meaningless.
-  Use it for correctness and for frame content (`VITA2NATIVE_DUMP_FRAME`), not
-  for frame-rate comparisons.
+- **`virpipe-run` gives the guest a real GPU.** Wrap the binary with it and GL
+  goes through VirGL to the host's Intel GPU instead of llvmpipe — measured at
+  ~55 fps against ~1.6 fps, so it is the only way to tell a rendering bug from
+  software-rasteriser slowness:
+
+  ```sh
+  ssh scratchvm 'cd ~/v2n && weston-vnc-kiosk run \
+    virpipe-run ./v2n-arm ~/vita-games/<TITLEID>/eboot.bin'
+  ```
+
+  It starts a private `virgl_test_server` and sets `GALLIUM_DRIVER=virpipe` and
+  `VTEST_SOCKET_NAME` for the child only. `virpipe-run --diagnose` reports which
+  renderer wins. The installed copy is the patched one (no `--no-fork`): the
+  stock single-serving server deadlocks a client that opens more than one GL
+  connection, and vita2native opens one per guest thread that gets a context —
+  it hangs inside `eglInitialize` with no error. Keep it in sync by copying that
+  file, not the distribution's.
+- Everything still runs under `qemu-arm-static`, so absolute CPU speed is
+  meaningless. With `virpipe-run` the GL side is not emulated, so frame-rate
+  comparisons between code changes are meaningful there; they are not against
+  the real handhelds.
 - It cannot validate KMS/DRM: the i915 device has no matching armhf Mesa
   driver, SDL aborts kmsdrm init, and `DRM_IOCTL_SET_MASTER` needs the user in
   the `video`/`render` groups. Confirm no stray process holds DRM master
