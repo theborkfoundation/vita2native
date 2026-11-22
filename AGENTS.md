@@ -1,7 +1,12 @@
 # AGENTS
 
-How to build vita2native and get a binary onto a test bed. Issue tracking lives
-in `ISSUES.md`; what the emulator supports is in `README.md`.
+How to build vita2native and get a binary onto a test bed.
+
+**`ISSUES.md` is the issue tracker — read it before starting work and update it
+as you go.** It lists every open defect, performance target and planned feature
+with a stable `I-nn` id, a location to start from, and the evidence behind it.
+It is git-ignored, so it will not appear in `git status`; it exists in the
+working tree. What the emulator supports today is in `README.md`.
 
 ## Build
 
