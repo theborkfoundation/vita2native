@@ -7,15 +7,15 @@ closure from the archive index, downloads the .debs into a cache, and unpacks
 their payloads into a sysroot. Nothing runs package maintainer scripts: a
 sysroot only needs headers, static archives and shared objects.
 
-    tools/debian-sysroot.py            # armhf, the only supported target
+    tools/debian-sysroot.py            # armhf, the only target
     tools/debian-sysroot.py --verify   # compare the tree with its lock
     tools/debian-sysroot.py --update-lock   # move to current versions
 
-The target gets build/sysroot-<arch>, and the resolved package list is
-recorded in tools/sysroots/<arch>.lock. Later runs resolve against that lock, so
-a Debian point release cannot silently change what the build links; --update-lock
-is the deliberate way to move. The CMake presets find the tree for their
-architecture by default, and refuse to configure without one.
+The target gets build/sysroot-armhf, and the resolved package list is recorded in
+tools/sysroots/armhf.lock. Later runs resolve against that lock, so a Debian
+point release cannot silently change what the build links; --update-lock is the
+deliberate way to move. The CMake preset finds the tree by default and refuses to
+configure without one.
 
 The sysroot is idempotent: packages already unpacked at the same version are
 skipped, so re-running only picks up changes.
@@ -34,6 +34,12 @@ import urllib.error
 import urllib.request
 
 MIRROR = "https://deb.debian.org/debian"
+
+# The only architecture this project builds for. Kept as a name rather than a
+# flag: a sysroot for anything else would be a tree no preset consumes, and the
+# layout below (build/sysroot-<arch>, tools/sysroots/<arch>.lock) still reads
+# cleanly against it.
+ARCH = "armhf"
 
 # SDL2 and the libraries its headers reference. libsdl2-dev's own Depends pull
 # in the rest (asound, dbus, drm, egl, gbm, gl, gles, ibus, pulse, samplerate),
@@ -276,7 +282,8 @@ def pkgconfig_paths(dest, arch):
     ]
 
 
-def populate(args, root, arch):
+def populate(args, root):
+    arch = ARCH
     dest = os.path.abspath(args.dest or os.path.join(root, "build", "sysroot-" + arch))
     cache = os.path.abspath(args.cache or os.path.join(root, "build", "debs-" + arch))
     seeds = [name.strip() for name in args.packages.split(",") if name.strip()]
@@ -348,7 +355,6 @@ def populate(args, root, arch):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--suite", default="trixie", help="Debian suite (default: trixie)")
-    parser.add_argument("--arch", default="armhf", help="Debian architecture (default: armhf)")
     parser.add_argument("--components", default="main", help="comma-separated archive components")
     parser.add_argument(
         "--dest", default=None, help="sysroot directory (default: build/sysroot-<arch>)"
@@ -369,8 +375,6 @@ def main():
         "closure; not needed to compile against the libraries)",
     )
     parser.add_argument("--dry-run", action="store_true", help="resolve and list, download nothing")
-    parser.add_argument("--all", action="store_true",
-                        help="populate every architecture the presets use (armhf)")
     parser.add_argument("--update-lock", action="store_true",
                         help="re-resolve and rewrite tools/sysroots/<arch>.lock")
     parser.add_argument("--verify", action="store_true",
@@ -381,25 +385,22 @@ def main():
     args = parser.parse_args()
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    arch = args.arch
+    arch = ARCH
     dest = os.path.abspath(args.dest or os.path.join(root, "build", "sysroot-" + arch))
 
     if args.print_pkgconfig:
         print("PKG_CONFIG_LIBDIR=%s" % ":".join(pkgconfig_paths(dest, arch)))
         return 0
 
-    architectures = ["armhf"] if args.all else [args.arch]
-    for name in architectures:
-        result = populate(args, root, name)
-        if result != 0:
-            return result
+    result = populate(args, root)
+    if result != 0:
+        return result
 
     if args.dry_run or args.verify:
         return 0
 
     print()
-    print("configure against it with `cmake --preset arm-rel`;")
-    print("the toolchains default to build/sysroot-<debian-arch>.")
+    print("configure against it with `cmake --preset arm-rel`.")
     return 0
 
 

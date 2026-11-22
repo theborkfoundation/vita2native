@@ -12,7 +12,7 @@ working tree. What the emulator supports today is in `README.md`.
 
 ```sh
 tools/zig-toolchain.sh arm        # once; writes wrappers into build/
-tools/debian-sysroot.py --all     # once; armhf + amd64 sysroots
+tools/debian-sysroot.py           # once: the armhf sysroot
 cmake --preset arm-rel
 cmake --build --preset arm-rel
 ```
@@ -20,8 +20,8 @@ cmake --build --preset arm-rel
 The artifact is `build/cmake-arm-rel/vita2native`. For on-device debugging use
 `arm-debug`, which keeps symbols.
 
-Cross builds link the target's SDL2 from `tools/sysroots/`, pinned by
-`tools/sysroots/*.lock`. `tools/debian-sysroot.py --verify` checks a tree
+Cross builds link the target's SDL2 from `build/sysroot-armhf`, pinned by
+`tools/sysroots/armhf.lock`. `tools/debian-sysroot.py --verify` checks the tree
 against its lock.
 
 ## Staging the binary

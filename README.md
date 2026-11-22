@@ -14,7 +14,7 @@ cross-compile with `zig cc`; no system cross toolchain).
 
 ```sh
 tools/zig-toolchain.sh arm        # once
-tools/debian-sysroot.py --all     # once
+tools/debian-sysroot.py           # once: the armhf sysroot
 cmake --preset arm-rel
 cmake --build --preset arm-rel
 ```
