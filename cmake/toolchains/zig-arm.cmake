@@ -6,8 +6,10 @@
 # The target's system libraries come from build/sysroot-armhf, populated by
 # tools/debian-sysroot.py.
 
+# Where tools/zig-toolchain.sh writes the wrappers: a directory of its own, so
+# they cannot collide with a preset's build tree in build/.
 if(NOT DEFINED VITA2NATIVE_ZIG_DIR)
-    set(VITA2NATIVE_ZIG_DIR "${CMAKE_SOURCE_DIR}/build")
+    set(VITA2NATIVE_ZIG_DIR "${CMAKE_SOURCE_DIR}/build/toolchain")
 endif()
 
 # A toolchain file is re-read inside try_compile(), where CMAKE_SOURCE_DIR points

@@ -11,7 +11,7 @@ working tree. What the emulator supports today is in `README.md`.
 ## Build
 
 ```sh
-tools/zig-toolchain.sh     # once; writes wrappers into build/
+tools/zig-toolchain.sh     # once; writes wrappers into build/toolchain/
 tools/debian-sysroot.py    # once: the armhf sysroot
 cmake --preset release
 cmake --build --preset release

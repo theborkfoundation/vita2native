@@ -4,7 +4,7 @@
 # ships its own clang, LLD and libc, so it can cross-build the 32-bit ARM target
 # from a 64-bit host (macOS or Linux) without a system cross toolchain.
 #
-#   tools/zig-toolchain.sh             # armhf wrappers in build/
+#   tools/zig-toolchain.sh             # armhf wrappers in build/toolchain/
 #   tools/zig-toolchain.sh /opt/x      # ... in /opt/x
 #
 # Configure with:
@@ -13,7 +13,7 @@
 
 set -eu
 
-out=${1:-build}
+out=${1:-build/toolchain}
 
 target=arm-linux-gnueabihf
 prefix=zig-arm
