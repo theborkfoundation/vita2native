@@ -48,6 +48,24 @@ The binary must **not** be named `vita2native`. That name is the runtime's
 filesystem root, created on first run, so the two collide. Deploy it as
 `v2n-arm`.
 
+### Options
+
+```
+v2n-arm [--headless] [title.vpk|eboot.bin]
+```
+
+| Option | Effect |
+| --- | --- |
+| `-h`, `--help` | show the usage summary and exit |
+| `--help-settings` | list every `VITA2NATIVE_*` setting with its description |
+| `-V`, `--version` | print the version and exit |
+| `--headless` | run without a window |
+
+With no title, `vita2native/executable` is loaded from the working directory.
+`--` ends option parsing, so a title may begin with a dash. Exit status is 0 on
+success, 1 for a runtime failure, and 2 for a usage error — an unknown option, a
+second title, or an empty argument.
+
 Vita device paths are remapped below `vita2native/`:
 
 | Vita path | Linux path |
@@ -96,7 +114,8 @@ Panfrost, and a Rockchip RK3326 with Mali-G31 through the vendor blob.
 ## Diagnostics
 
 Every knob lives in `include/settings.h` and is cached at startup.
-`VITA2NATIVE_ENV_DUMP=1` prints the whole table.
+`--help-settings` lists them with their descriptions; `VITA2NATIVE_ENV_DUMP=1`
+prints the same table with the current values.
 
 | Variable | Effect |
 | --- | --- |
@@ -153,6 +172,8 @@ In `tools/`:
   `external/faad2/COPYING`).
 - [stb](https://github.com/nothings/stb) — image decode/encode used by
   `SceJpeg`.
+- [argparse](https://github.com/cofyc/argparse) — the command-line parser
+  (MIT).
 
 ## Disclaimer
 

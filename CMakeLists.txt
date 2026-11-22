@@ -8,11 +8,26 @@ execute_process(COMMAND
     OUTPUT_VARIABLE VITA2NATIVE_HASH
     OUTPUT_STRIP_TRAILING_WHITESPACE
 )
+# A tarball or a non-git tree leaves this empty, which would print as a bare
+# trailing dash in --version.
+if(NOT VITA2NATIVE_HASH)
+    set(VITA2NATIVE_HASH "unknown")
+endif()
 
 project(
     vita2native
     VERSION ${VITA2NATIVE_MAJOR}.${VITA2NATIVE_MINOR}.${VITA2NATIVE_PATCH}
     LANGUAGES C CXX
+)
+
+# Delivered as compile definitions rather than a configured header so the
+# version in the binary is always the one the build read. Global because
+# source/cli.c reads them and is also linked into cli_smoke.
+add_compile_definitions(
+    VITA2NATIVE_MAJOR="${VITA2NATIVE_MAJOR}"
+    VITA2NATIVE_MINOR="${VITA2NATIVE_MINOR}"
+    VITA2NATIVE_PATCH="${VITA2NATIVE_PATCH}"
+    VITA2NATIVE_HASH="${VITA2NATIVE_HASH}"
 )
 
 set(CMAKE_C_STANDARD 11)

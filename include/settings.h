@@ -58,6 +58,9 @@ void vita2native_settings_check(void);
 /* Print the table with the current values (VITA2NATIVE_ENV_DUMP=1). */
 void vita2native_settings_dump(void);
 
+/* Print just the names and descriptions, one per line (`--help-settings`). */
+void vita2native_settings_help(void);
+
 #ifdef __cplusplus
 }
 #endif

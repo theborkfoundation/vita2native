@@ -1,3 +1,4 @@
+#include "cli.h"
 #include "config.h"
 
 #include <limits.h>
@@ -22,6 +23,7 @@
 #include "module.h"
 #include "netlog.h"
 #include "settings.h"
+#include "version.h"
 #include "vpk.h"
 
 #include "modules/SceCtrl.h"
@@ -968,18 +970,42 @@ int main(int argc, char *argv[])
      * and sceNetSend, HTTP and TLS all reach the same host send().
      */
     signal(SIGPIPE, SIG_IGN);
+
+    /*
+     * Arguments are handled before VITA2NATIVE_ENV_DUMP: an explicit --help must
+     * win over an environment variable, and both exit before any host service,
+     * so neither needs a display.
+     */
+    {
+        CliOptions cli;
+        const char *cli_error = NULL;
+
+        switch (cli_parse(argc, argv, &cli, &cli_error)) {
+        case CLI_HELP:
+            cli_print_usage(stdout, argv[0]);
+            return 0;
+        case CLI_HELP_SETTINGS:
+            vita2native_settings_help();
+            return 0;
+        case CLI_VERSION:
+            cli_print_version(stdout);
+            return 0;
+        case CLI_ERROR:
+            fprintf(stderr, "vita2native: %s\n\n", cli_error);
+            cli_print_usage(stderr, argv[0]);
+            return 2;
+        case CLI_RUN:
+            break;
+        }
+
+        g_headless = cli.headless;
+        if (cli.exe_path)
+            exe_path = cli.exe_path;
+    }
+
     if (vita2native_env_flag("VITA2NATIVE_ENV_DUMP")) {
         vita2native_settings_dump();
         return 0;
-    }
-
-    if (argc > 1) {
-        for (int i = 1; i < argc; i++) {
-            if (strcmp(argv[i], "--headless") == 0)
-                g_headless = true;
-            else if (argv[i][0] != '-')
-                exe_path = argv[i];
-        }
     }
 
     /* Offscreen unless a display server is there to present to. SDL decides
@@ -1007,8 +1033,7 @@ int main(int argc, char *argv[])
 
     log_init(LOG_DEVICE_STDERR | LOG_DEVICE_NETLOG);
 
-    LOG("vita2native " VITA2NATIVE_MAJOR "." VITA2NATIVE_MINOR "." VITA2NATIVE_PATCH "-"
-        VITA2NATIVE_HASH);
+    LOG("%s", VITA2NATIVE_VERSION_STRING);
 
     now = time(NULL);
     strftime(timestr, sizeof(timestr), "%c", localtime(&now));

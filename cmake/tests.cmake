@@ -61,6 +61,10 @@ vita2native_add_smoke(settings_smoke
     SOURCES tests/settings_smoke.c
     ARGUMENTS ${CMAKE_SOURCE_DIR})
 
+vita2native_add_smoke(cli_smoke
+    SOURCES tests/cli_smoke.c source/cli.c external/argparse/argparse.c
+    INCLUDES external/argparse)
+
 vita2native_add_smoke(host_smoke
     SOURCES
         tests/host_smoke.c

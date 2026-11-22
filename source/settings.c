@@ -406,3 +406,21 @@ void vita2native_settings_dump(void)
     }
     fflush(stdout);
 }
+
+/*
+ * The same table without the values, for `--help-settings`.
+ *
+ * The table is already ordered by concern in this file, so the grouping a
+ * reader would want survives without carrying a section name on all 122
+ * entries.
+ */
+void vita2native_settings_help(void)
+{
+    size_t count;
+    const Setting *table = vita2native_settings_table(&count);
+
+    printf("Every setting is an environment variable read once at startup.\n\n");
+    for (size_t i = 0; i < count; i++)
+        printf("  %-34s %s\n", table[i].name, table[i].description);
+    fflush(stdout);
+}

@@ -10,11 +10,13 @@ add_executable(vita2native
     source/host/host_jit.c
     source/host/host_thread.c
     ${VITA2NATIVE_HOST_GFX_SOURCES}
+    external/argparse/argparse.c
     external/Vita3K/external/miniz/miniz.c
     external/sqlite/sqlite3.c
     ${VITA2NATIVE_GXM_TEXTURE_SOURCES}
     source/stb_image_impl.c
     source/stb_image_write_impl.c
+    source/cli.c
     source/load.c
     source/log.c
     source/main.c
@@ -92,6 +94,7 @@ add_executable(vita2native
 target_include_directories(vita2native PRIVATE
     include
     source/host
+    external/argparse
     external/khronos/include
     external/minimp3
     external/font8x8
@@ -125,10 +128,6 @@ endif()
 target_compile_definitions(vita2native PRIVATE
     _GNU_SOURCE=1
     _FILE_OFFSET_BITS=64
-    VITA2NATIVE_MAJOR="${VITA2NATIVE_MAJOR}"
-    VITA2NATIVE_MINOR="${VITA2NATIVE_MINOR}"
-    VITA2NATIVE_PATCH="${VITA2NATIVE_PATCH}"
-    VITA2NATIVE_HASH="${VITA2NATIVE_HASH}"
 )
 
 if(SDL2_LIBRARY_DIRS)

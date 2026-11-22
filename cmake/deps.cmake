@@ -78,6 +78,7 @@ set_source_files_properties(${FAAD2_SOURCES} PROPERTIES COMPILE_OPTIONS "-fno-sa
 # debug instrumentation traps it).
 
 set_source_files_properties(external/sqlite/sqlite3.c PROPERTIES COMPILE_OPTIONS "-w")
+set_source_files_properties(external/argparse/argparse.c PROPERTIES COMPILE_OPTIONS "-w")
 set_source_files_properties(source/mspace.c PROPERTIES COMPILE_OPTIONS "-w")
 set_source_files_properties(
     source/stb_image_impl.c
