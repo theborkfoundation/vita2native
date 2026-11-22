@@ -1,327 +1,98 @@
 # vita2native
 
-A PlayStation Vita to Linux ARM32 translation layer (**_not_** an emulator).
+A PlayStation Vita to Linux ARM32 translation layer — **_not_** an emulator.
 
-This is a fork of [vita2hos](https://github.com/xerpi/vita2hos) that changes the
-host platform from Horizon OS to a typical 32-bit ARM Linux system. It runs
-PlayStation Vita executables (ARMv7) natively by redirecting their
-[module](https://wiki.henkaku.xyz/vita/Modules) imports to host routines backed
-by POSIX, SDL2, and GLES 3.x.
-
-There is no CPU emulation: Vita ARMv7 code executes directly on the host CPU.
-That is why a 32-bit ARMv7-A userland is required.
-
-## Requirements
-
-- 32-bit ARMv7-A userland with NEON and hard-float (`armhf`), e.g. a Raspberry
-  Pi 4/5 with a 32-bit OS.
-- CMake, Ninja, pkg-config, and SDL2 development files (SDL2 is not needed in
-  headless mode), for example on Debian/Raspberry Pi OS:
-  `sudo apt install cmake ninja-build pkg-config libsdl2-dev`.
-- A Vita executable built with the default hard-float VitaSDK toolchain.
-- Optional at runtime: EGL and GLESv2 (Mesa or vendor GLES 3.x driver). Both are
-  loaded with `dlopen`, so the build does not link against them.
+A fork of [vita2hos](https://github.com/xerpi/vita2hos) retargeting the host
+from Horizon OS to 32-bit ARM Linux. Vita executables (ARMv7) run natively,
+their module imports redirected to host routines backed by POSIX, SDL2 and
+GLES 3.x. **No CPU emulation**, so an ARMv7-A armhf userland is required.
 
 ## Building
 
-The supported configurations are CMake presets that cross-compile from a 64-bit
-host with [Zig](https://ziglang.org): it bundles clang, LLD and libc, so no
-system cross toolchain is needed.
-
-| Preset | Target | Use |
-| --- | --- | --- |
-| `arm-rel` | 32-bit ARM, RelWithDebInfo | the deployment artifact |
-| `arm-debug` | 32-bit ARM, Debug | symbols for `gdb` on the device |
-| `arm-minsize` | 32-bit ARM, MinSizeRel + LTO | size experiments only; crash backtraces lose symbol names |
-| `x64-syntax` | 64-bit x86 | compile check and smoke tests; cannot execute Vita code |
-
-Generate the compiler wrappers once. They are written to `build/`, which is not
-tracked:
+Needs CMake, Ninja, pkg-config and [Zig](https://ziglang.org) (the presets
+cross-compile with `zig cc`; no system cross toolchain).
 
 ```sh
- tools/zig-toolchain.sh arm
- tools/zig-toolchain.sh x64   # only needed for x64-syntax
-```
-
-The cross presets link the target's SDL2, so each Debian architecture needs a
-sysroot before the first configure. `tools/debian-sysroot.py` downloads the
-packages from the Debian archive and unpacks them; `tools/sysroots/*.lock`
-records the exact versions it resolved, and a re-run resolves against that lock
-instead of whatever the archive holds that day:
-
-```sh
-tools/debian-sysroot.py --all        # armhf + amd64, ~180 packages each
-tools/debian-sysroot.py --verify     # check the trees match the locks
-tools/debian-sysroot.py --update-lock --all   # deliberately move to current versions
-```
-
-Then configure and build the preset you want:
-
-```sh
+tools/zig-toolchain.sh arm        # once
+tools/debian-sysroot.py --all     # once
 cmake --preset arm-rel
 cmake --build --preset arm-rel
 ```
 
-On a 32-bit ARM host the build also works without a cross toolchain, using the
-SDL2 that distribution provides:
+| Preset | Use |
+| --- | --- |
+| `arm-rel` | the deployment artifact |
+| `arm-debug` | symbols for on-device `gdb` |
+| `arm-minsize` | size experiments; backtraces lose names |
+| `x64-syntax` | compile check and host smoke tests only |
 
-```sh
-sudo apt install libsdl2-dev
-cmake -S . -B build/native-arm -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build/native-arm
-```
-
-Guest exports that pass or return floats use the host hard-float ABI,
-matching the default VitaSDK toolchain and every caller seen so far (VitaSDK
-titles, Unity's eboot and Sony's own modules). An entry point that a base-AAPCS
-caller needs is declared with `EXPORT_SOFTFP` in `include/module.h`, which pins
-that export alone to `pcs("aapcs")`.
+On a 32-bit ARM host, `cmake -S . -B build/native-arm -G Ninja` works with the
+distribution's `libsdl2-dev` instead. SDL2 and EGL/GLESv2 are `dlopen`ed, so
+the binary links neither.
 
 ## Running
-
-Run with the default layout (`vita2native/executable` relative to the current
-working directory), or pass a path explicitly:
 
 ```sh
 ./build/cmake-arm-rel/vita2native ./vita2native/executable
 ```
 
-A VPK can be passed directly. `eboot.bin` is loaded from memory and the
-remaining entries are extracted to `vita2native/app0/` (skipped when the archive
-size and mtime are unchanged), so `app0:` reads work:
+The binary must **not** be named `vita2native` — that is the runtime's
+filesystem root. Deploy as `v2n-arm`.
 
-```sh
-./build/cmake-arm-rel/vita2native ./MyHomebrew.vpk
-```
+`ux0:/` and `app0:/` map to `vita2native/ux0/` and the executable's directory,
+`savedata0:/` to `vita2native/savedata/<title-id>/`.
 
-Vita device paths are remapped below `vita2native/`:
+## Video output
 
-| Vita path | Linux path |
+SDL owns the window; EGL owns the display, context and surfaces. SDL picks the
+driver and the GL layer builds EGL on the handle it reports. On KMSDRM it
+creates a `gbm_surface` on SDL's `gbm_device` and page-flips it.
+
+Presentation is GPU-side: the guest render target is blitted straight to the
+window surface, so no `glReadPixels` runs on the normal path. A software
+compositor (Weston's Pixman backend) yields a software GL device instead, and
+its own swap copy then dominates the frame.
+
+## Status
+
+Homebrew runs end to end: ELF loading, relocations, import patching, threads,
+TLS, file I/O, VPK assets. GXM is translated to GLES 3.x — GXP shaders via
+Vita3K's recompiler, render targets, textures, depth/stencil, MSAA, transfers.
+Audio, `SceNet`, `SceSqlite`, `ScePgf`, `SceTouch` and `SceAvPlayer` work.
+Encrypted SELF, CELP decoding and `sceGu` do not.
+
+Guest code is native code in the host process. **There is no sandbox.**
+
+VitaShell, PixelChess, Pong, Minesweeper, VitaSudoku and ElevenMPV load with
+zero unresolved imports. Angry Birds Trilogy and Iconoclasts run on real ARM32
+hardware (H618 + Mali-G31/Panfrost; RK3326 + Mali-G31).
+
+## Diagnostics
+
+Knobs live in `include/settings.h`; `VITA2NATIVE_ENV_DUMP=1` lists them.
+
+| Variable | Effect |
 | --- | --- |
-| `ux0:/...` | `vita2native/ux0/...` |
-| `app0:/...` | directory containing the executable, or `vita2native/app0/` for a VPK |
-| `savedata0:/...` | `vita2native/savedata/...` |
-| `os0:`, `vs0:` | `vita2native/system/...` |
-
-SDL chooses the video driver (X11, Wayland, KMSDRM, offscreen), and the GL
-layer builds its EGL display on the native window SDL created. Nothing
-overrides the driver: an explicit `SDL_VIDEODRIVER` is honoured, and the
-compositor or console SDL picks decides which GL device is used. On a
-GPU-composited Wayland or X11 session that is the hardware driver; a
-software-rendered compositor (for example Weston on its Pixman renderer) gives
-a software GL device instead.
-
-`SceNetCtl` reports the console offline by default so titles take their offline
-fallback. Set `VITA2NATIVE_NETWORK=1` to report the host's real network state.
-Guest `mspace_*` imports automatically prefer the title's own `libc.suprx` when
-it exports them, falling back to the host implementation otherwise.
-
-Every knob is listed in `include/settings.h` with a cached lookup. A misspelt
-`VITA2NATIVE_*` name is reported at startup with the closest known one, and
-`VITA2NATIVE_ENV_DUMP=1 ./vita2native` prints the whole table with the current
-values and exit:
-
-```
-vita2native: unknown setting VITA2NATIVE_NO_MSA (did you mean VITA2NATIVE_NO_MSAA?)
-```
-
-## Current status
-
-CPU-rendered homebrew runs: ELF loading, relocations, import patching, threads,
-TLS, file I/O, VPK assets, and process lifetime are implemented and tested.
-
-A GLES 3.x GPU device (EGL surfaceless + pbuffer) is created at startup when the
-libraries are available; otherwise a null backend is used. GXM is translated to
-GLES 3.x: GXP shaders through Vita3K's recompiler, render targets, textures,
-depth/stencil, MSAA and the transfer calls. `SceAudioOut`/`SceAudioIn`,
-`SceNgs` (ATRAC9 voices, the PCM/HEVAG player and the master buss mixer),
-MP3/ATRAC9/AAC decoding, JPEG encode/decode, `SceNet`/`SceHttp`/`SceSsl`,
-`SceSqlite`, `ScePgf`, `SceTouch`, `SceCommonDialog` (with an on-screen
-overlay), a synthetic camera and `SceAvPlayer` (a static black 30 fps I420
-frame and silent audio) and the kernel/thread surface are implemented. AAC uses
-the bundled FAAD2 decoder; CELP decoding and encrypted SELF files are not
-supported.
-
-Guest code runs natively in the host process; there is no sandbox or isolation.
-
-### Tested homebrew
-
-VitaShell, PixelChess, Pong, VitaSudoku, Minesweeper, ElevenMPV and the VitaSDK
-AvPlayer sample load with **zero unresolved imports**. VitaShell, PixelChess,
-Pong, Minesweeper and VitaSudoku have been rendered end-to-end under QEMU with
-Mesa softpipe; the other titles reach their main loop and start GXM work.
-VitaSudoku expects `ux0:/data/VitaSudoku` to exist (its Lua script does not
-handle a missing directory), so create that directory before testing it.
-
-### Real ARM32 hardware
-
-The ARM32 build runs natively on a 32-bit ARM Linux userland (armhf on an
-aarch64 kernel works too) with no emulation. The figures below were measured on
-two such systems: an SBC with an Allwinner H618 and Mali-G31 through Panfrost
-(Ubuntu 24.04 armhf multiarch), and a handheld with a Rockchip RK3326 and
-Mali-G31 through the vendor blob, on a 640x480 DSI panel.
-
-On the Panfrost system:
-
-- all GXM, texture, EGL and non-graphics smoke tests pass unchanged;
-- VitaShell renders its home screen with real device capacities;
-- the backend reports `GLES 3.1 Mesa (Mali-G31, Panfrost)`.
-
-Frames reach the guest's memory through a readback on the display path, so
-`glReadPixels` cost matters on Panfrost: `PAN_MESA_DEBUG=linear` makes it about
-twice as fast on Mali-G31, at the cost of the tiled layout. It is not set for
-you; set it in the environment when profiling that path.
-
-Performance on that system: VitaShell runs at ~4.8 fps. Consecutive GXM draws
-that share program, textures and render state are merged into one GL draw
-(847 guest draws become ~119 GL draws per frame); triangle strips are expanded
-to triangle lists when merging, because concatenating two strips would add
-bridging triangles. Draws with different vertex uniforms merge as well: each
-one appends its uniform container to a flat uniform buffer and the shader
-indexes it through a per-vertex draw slot. `VITA2NATIVE_PROFILE=1` prints the
-GXM breakdown, `VITA2NATIVE_PROFILE_FRAME=1` prints the whole-frame split
-(present, vblank, GXM and guest time), `VITA2NATIVE_FPS=1` prints the frame
-rate, `VITA2NATIVE_TRACE_TEXTURES=1` logs texture uploads,
-`VITA2NATIVE_NO_BATCH=1` disables draw batching, and `tests/gpu_bench.c`
-measures the driver in isolation. `VITA2NATIVE_NO_DRAW_UNIFORMS=1` and
-`VITA2NATIVE_NO_PRESENT_OVERLAP=1` disable the per-draw uniform and direct
-present overlap paths for A/B measurements. `VITA2NATIVE_RENDER_SCALE=0.5`
-renders the 3D scene at half resolution and upscales it on present; on the
-Mali-G31 that roughly halves GPU time, which is the dominant cost at the
-native 960x544 resolution. RGBA4444 textures upload as `GL_RGBA4` by default
-on the Mali blob, which cuts a 2048x2048 atlas upload from ~79 ms to ~49 ms;
-Panfrost and software renderers keep the RGBA8 path because their `GL_RGBA4`
-upload is several times slower. `VITA2NATIVE_RGBA4=1` and
-`VITA2NATIVE_NO_RGBA4=1` force either path for A/B measurements. PVRTC-I 4bpp
-textures use a specialised decoder (the PowerVR SDK reference implementation
-stays for 2bpp and PVRTC-II): a 1024x1024 texture drops from ~425 ms to ~78 ms
-on the RK3326 handheld. `VITA2NATIVE_NO_PVRTC_FAST=1` forces the reference
-decoder.
-
-On the handheld, output goes through SDL's KMSDRM driver, which is what its
-other titles use; `source/host/host_video_sdl.c` only uploads the guest frame as
-an ABGR8888 texture and lets SDL scale, letterbox and present.
-`tests/present_probe.c` cycles colours and a moving marker on the panel without
-starting the emulator. There VitaShell renders at ~1.3 fps; the blob's per-draw
-overhead is the bottleneck (about 5 ms per `glDrawElements`).
-
-Input follows the same split. While SDL video is running, its dedicated video
-thread samples input: keyboards, plus every pad SDL knows about through its
-controller database, with a raw-joystick fallback for unknown devices. All
-connected pads are opened, so a built-in pad and a USB, Bluetooth or virtual one
-work at the same time; buttons are the union of them and the sticks follow
-whichever pad is being used. Pads are rescanned once a second, which is what
-makes hot-plug work. Keyboard mapping is arrows for
-the D-pad, `Z`/`Enter` = cross, `X`/`Backspace` = circle, `A` = square,
-`S` = triangle, `Q`/`E` = L1/R1, `1`/`2` = L2/R2 and `Tab`/`Space` =
-Select/Start. Presses are latched until the guest polls, so a tap is not lost
-on a title running at 1 fps.
-`VITA2NATIVE_CTRL_SWAP_AB` swaps cross/circle on all sources, and
-`VITA2NATIVE_INPUT_DEBUG=1` logs the mapping (`SDL mapping ...` shows the
-mapping SDL picked for a controller). The same video-thread poll reads the
-pointer: the front touch panel follows the mouse, mapped through the letterbox
-rectangle into the Vita's 1920x1088 active area, and a click is latched until
-the guest reads it. Clicks on the black bars are ignored. `sceCtrlSetActuator`
-feeds the attached controller's rumble motors through SDL, and closing the SDL
-window (or SDL_QUIT) exits the emulator cleanly.
-
-The headless build uses the same SDL input path; evdev is not read. That is what
-makes hot-plug and the trigger axes of an Xbox-style pad work, both of which the
-evdev path could not do (its nodes are opened once at startup and it has no
-mapping for `ABS_Z`/`ABS_RZ`). A pad SDL has no database entry for is still read
-positionally through the raw-joystick fallback.
-
-On a handheld, point SDL at the mapping database the firmware ships, so the
-pad's Select/Start/L3/R3 buttons (which the built-in SDL table leaves unbound)
-are mapped:
+| `VITA2NATIVE_FPS=1` | frame rate |
+| `VITA2NATIVE_PROFILE_FRAME=1` | present / vblank / GXM / guest split |
+| `VITA2NATIVE_GL_CHECK=1` | per-draw `glGetError` checks |
+| `VITA2NATIVE_DUMP_FRAME` | guest framebuffers as BMP |
+| `VITA2NATIVE_RENDER_SCALE=0.5` | render 3D at half resolution |
 
 ```sh
-SDL_GAMECONTROLLERCONFIG_FILE=/path/to/gamecontrollerdb.txt ./vita2native game
+VITA2NATIVE_DUMP_FRAME=/tmp/f-%04u.bmp VITA2NATIVE_DUMP_FRAME_AT=0,120 \
+VITA2NATIVE_CTRL_SCRIPT="30:down,32:,34:cross,40:" \
+SDL_VIDEODRIVER=dummy ./v2n-arm ./VitaShell.vpk
 ```
 
-`VITA2NATIVE_INPUT_DEBUG=1` logs the pads opened and the mapping SDL chose.
-Scripted input still works and is ORed with the pad. `tools/ctrl_test` is a guest-side probe for this path: build
-it with `python3 tools/ctrl_test/build.py` and it draws the live pad state on a
-960x544 pane while logging every controller state change.
-
-Video output goes through SDL, loaded with `dlopen` so the headless ARM binary
-keeps no SDL build dependency. SDL chooses the platform driver itself: KMSDRM
-on handhelds, X11 or Wayland on desktops, and offscreen/dummy on headless
-machines (`SDL_VIDEODRIVER=dummy` forces a no-op output). With direct KMS
-presentation the DRM device belongs to this emulator and SDL only supplies
-input, so it defaults to the offscreen driver (falling back to KMSDRM and then
-dummy when that is not built in); an explicit `SDL_VIDEODRIVER` always wins.
-The guest frame is uploaded as `SDL_PIXELFORMAT_ABGR8888` — the guest's
-A8B8G8R8 byte order — so SDL does the scaling and letterboxing without a CPU
-conversion. Frames are handed to a dedicated video thread, so SDL's own GL
-context never touches the guest's rendering context.
-`VITA2NATIVE_STRETCH=1` fills the display and `VITA2NATIVE_SDL_WINDOWED=1` keeps
-a window instead of going fullscreen.
-
-### Headless capture and scripted input
-
-Headless builds can dump guest framebuffers as BMP and drive the pad from a
-frame-keyed script, which is how real homebrew is validated under QEMU:
-
-```sh
-VITA2NATIVE_DUMP_FRAME=/tmp/frame-%04u.bmp \
-VITA2NATIVE_DUMP_FRAME_AT=0,120,240 \
-VITA2NATIVE_CTRL_SCRIPT="30:down,32:,34:down,36:,38:cross,40:" \
-GALLIUM_DRIVER=softpipe ./vita2native ./VitaShell.vpk
-```
-
-`..._AT` is a comma-separated list of swap indices; a `%u` in the path is
-replaced with the frame number. Script entries are
-`<frame>:<button>[+<button>...]`, applied until the next entry; an empty button
-list releases everything. Script frames refer to presented frames, not host
-time, so they do not depend on how slow software rendering is.
-
-`VITA2NATIVE_TOUCH_SCRIPT` drives the front panel the same way, with
-`<frame>:<x>/<y>` to press and `<frame>:` to release, in front-panel coordinates
-(0..1919, 0..1087).
-
-`kill -USR1 <tid>` with `VITA2NATIVE_DEBUG_SAMPLE=1` set dumps a thread's PC and
-call stack, which is how guest/host hotspots were located on the device.
-`VITA2NATIVE_GL_CHECK=1` re-enables the per-draw `glGetError` checks.
-
-### Getting a title out of a .pkg
-
-`tools/v2n-extract` turns a Vita `.pkg` plus its `work.bin` into a runnable
-directory: a decrypted `eboot.bin`, decrypted `sce_module/*.suprx` and the game
-data under `<TITLE_ID>/`.
-
-```sh
-tools/v2n-extract/build.sh
-build/v2n-extract-host/v2n-extract --pkg game.pkg --work-bin work.bin --out ~/tests/apps
-```
-
-The pkg container needs no keys (three public constants); the license supplies
-the klicensee for the PFS and SELF layers. `--list` prints the contents and
-needs no license. See `tools/v2n-extract/README.md` for the three layers and
-the output layout.
-
-## Building from source
-
-```sh
-git clone --recurse-submodules <this-repository>
-```
-
-`CMakePresets.json` defines the supported configurations. The build does not
-need devkitPro or any Horizon OS tooling.
+`tools/v2n-extract` turns a `.pkg` plus `work.bin` into a runnable directory.
 
 ## Credits
 
-- [vita2hos](https://github.com/xerpi/vita2hos) by xerpi — the original
-  Horizon OS translation layer this fork is based on.
-- [Vita3K](https://vita3k.org/) — its shader recompiler (and portions of its
-  code) are used here. Consider [donating](https://vita3k.org/#donate) and
-  [contributing](https://vita3k.org/#contribute).
-- The Khronos Group for the EGL/GLES headers vendored under
-  `external/khronos/`.
-- [FAAD2](https://github.com/knik0/faad2) — AAC decoding, vendored under
-  `external/faad2/` (GPLv2; see `external/faad2/COPYING`).
-- [stb](https://github.com/nothings/stb) — image decode/encode used by
-  `SceJpeg` (public domain / MIT).
+[vita2hos](https://github.com/xerpi/vita2hos) by xerpi — the original.
+[Vita3K](https://vita3k.org/) for its GXP shader recompiler. Khronos for the
+vendored EGL/GLES headers. [FAAD2](https://github.com/knik0/faad2) for AAC
+(GPLv2). [stb](https://github.com/nothings/stb) for the `SceJpeg` codec.
 
 ## Disclaimer
 
