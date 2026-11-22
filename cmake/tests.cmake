@@ -2,7 +2,7 @@
 #
 # Included from the top-level CMakeLists.txt after sources.cmake. Every target
 # here is a standalone binary: it compiles the module it exercises straight from
-# source, so it also works in the x64 syntax-check preset.
+# source.
 
 include(CTest)
 
@@ -49,16 +49,13 @@ function(vita2native_add_smoke name)
     endif()
 endfunction()
 
-# Every test builds on every host, but two groups only run on particular ones:
+# Every test builds here, but one group only runs where there is a display:
 #
 #   needs a GL/EGL context : gfx_smoke gl_thread_smoke egl_window_smoke
 #                            gxm_draw_smoke display_egl_smoke
-#   32-bit host only       : dialog_smoke texture_smoke avplayer_smoke
 #
-# The second group emulates guest structs by putting *host* pointers in 32-bit
-# fields, so on a 64-bit build the pointer truncates and the test faults. Those
-# tests therefore only run on a 32-bit host; on x64 the compile check is what
-# matters.
+# The rest emulate guest structs by putting host pointers in 32-bit fields, which
+# is sound because this project only ever builds for 32-bit ARM.
 
 vita2native_add_smoke(settings_smoke
     SOURCES tests/settings_smoke.c
@@ -294,7 +291,7 @@ vita2native_add_smoke(processmgr_smoke
         source/host/host_thread.c
     LIBS pthread m)
 
-# Stores guest pointers in 32-bit struct fields, so it faults on a 64-bit build.
+# Stores guest pointers in 32-bit struct fields, which is sound on a 32-bit target.
 vita2native_add_smoke(dialog_smoke
     SOURCES
         tests/dialog_smoke.c

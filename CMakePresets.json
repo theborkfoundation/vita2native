@@ -50,21 +50,6 @@
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "CMAKE_COLOR_DIAGNOSTICS": "ON"
             }
-        },
-        {
-            "name": "x64-syntax",
-            "displayName": "64-bit x86 compile check",
-            "description": "Full-source compile check and smoke-test build where a 32-bit ARM userland is not available. Cannot execute Vita code.",
-            "hidden": false,
-            "generator": "Ninja",
-            "binaryDir": "${sourceDir}/build/cmake-x64",
-            "toolchainFile": "${sourceDir}/cmake/toolchains/zig-x64.cmake",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-                "VITA2NATIVE_ALLOW_64BIT": "ON",
-                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-                "CMAKE_COLOR_DIAGNOSTICS": "ON"
-            }
         }
     ],
     "buildPresets": [
@@ -82,11 +67,6 @@
             "name": "arm-minsize",
             "hidden": false,
             "configurePreset": "arm-minsize"
-        },
-        {
-            "name": "x64-syntax",
-            "hidden": false,
-            "configurePreset": "x64-syntax"
         }
     ]
 }

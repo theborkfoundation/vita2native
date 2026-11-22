@@ -24,7 +24,6 @@ cmake --build --preset arm-rel
 | `arm-rel` | the deployment artifact |
 | `arm-debug` | symbols for on-device `gdb` |
 | `arm-minsize` | size experiments; backtraces lose names |
-| `x64-syntax` | compile check and host smoke tests only |
 
 On a 32-bit ARM host, `cmake -S . -B build/native-arm -G Ninja` works with the
 distribution's `libsdl2-dev` instead. SDL2 and EGL/GLESv2 are `dlopen`ed, so

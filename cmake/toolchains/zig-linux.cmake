@@ -1,13 +1,12 @@
-# Shared Linux cross-build pieces for the zig wrapper toolchains.
+# Shared Linux cross-build pieces for the zig wrapper toolchain.
 #
-# Included by zig-arm.cmake and zig-x64.cmake after they have set
-# VITA2NATIVE_DEBIAN_ARCH and VITA2NATIVE_MULTIARCH and selected their compiler
-# wrappers. Everything a target needs from its packages lives here, so the two
-# architectures cannot drift apart in how they find them.
+# Included by zig-arm.cmake after it has set VITA2NATIVE_DEBIAN_ARCH and
+# VITA2NATIVE_MULTIARCH and selected its compiler wrappers. Everything the
+# target needs from its packages lives here.
 #
-# The sysroot is a derived artifact: tools/debian-sysroot.py writes one per
-# Debian architecture under build/, and tools/sysroots/<arch>.lock records the
-# exact package versions it resolved. Nothing in it is source.
+# The sysroot is a derived artifact: tools/debian-sysroot.py writes one under
+# build/, and tools/sysroots/<arch>.lock records the exact package versions it
+# resolved. Nothing in it is source.
 
 get_filename_component(_v2n_source_dir "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
 

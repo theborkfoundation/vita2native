@@ -7,12 +7,11 @@ closure from the archive index, downloads the .debs into a cache, and unpacks
 their payloads into a sysroot. Nothing runs package maintainer scripts: a
 sysroot only needs headers, static archives and shared objects.
 
-    tools/debian-sysroot.py --all      # armhf and amd64, one tree each
-    tools/debian-sysroot.py --arch armhf
-    tools/debian-sysroot.py --verify   # compare the trees with the locks
-    tools/debian-sysroot.py --all --update-lock   # move to current versions
+    tools/debian-sysroot.py            # armhf, the only supported target
+    tools/debian-sysroot.py --verify   # compare the tree with its lock
+    tools/debian-sysroot.py --update-lock   # move to current versions
 
-Each architecture gets build/sysroot-<arch>, and the resolved package list is
+The target gets build/sysroot-<arch>, and the resolved package list is
 recorded in tools/sysroots/<arch>.lock. Later runs resolve against that lock, so
 a Debian point release cannot silently change what the build links; --update-lock
 is the deliberate way to move. The CMake presets find the tree for their
@@ -371,7 +370,7 @@ def main():
     )
     parser.add_argument("--dry-run", action="store_true", help="resolve and list, download nothing")
     parser.add_argument("--all", action="store_true",
-                        help="populate every architecture the presets use (armhf, amd64)")
+                        help="populate every architecture the presets use (armhf)")
     parser.add_argument("--update-lock", action="store_true",
                         help="re-resolve and rewrite tools/sysroots/<arch>.lock")
     parser.add_argument("--verify", action="store_true",
@@ -389,7 +388,7 @@ def main():
         print("PKG_CONFIG_LIBDIR=%s" % ":".join(pkgconfig_paths(dest, arch)))
         return 0
 
-    architectures = ["armhf", "amd64"] if args.all else [args.arch]
+    architectures = ["armhf"] if args.all else [args.arch]
     for name in architectures:
         result = populate(args, root, name)
         if result != 0:
@@ -399,7 +398,7 @@ def main():
         return 0
 
     print()
-    print("configure against it with the matching preset (arm-rel / x64-syntax);")
+    print("configure against it with `cmake --preset arm-rel`;")
     print("the toolchains default to build/sysroot-<debian-arch>.")
     return 0
 

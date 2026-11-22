@@ -6,12 +6,10 @@
 # a system cross toolchain.
 #
 #   tools/zig-toolchain.sh arm          # armhf wrappers in build/
-#   tools/zig-toolchain.sh x64          # x86-64 wrappers in build/
 #   tools/zig-toolchain.sh arm /opt/x   # ... in /opt/x
 #
 # Configure with:
-#   cmake --preset arm-rel              # or arm-debug, arm-minsize,
-#                                       #    x64-syntax
+#   cmake --preset arm-rel              # or arm-debug, arm-minsize
 # The Zig binary is taken from $ZIG, or `zig` on PATH.
 
 set -eu
@@ -24,12 +22,8 @@ case "$arch" in
         target=arm-linux-gnueabihf
         prefix=zig-arm
         ;;
-    x64)
-        target=x86_64-linux-gnu
-        prefix=zig-x64
-        ;;
     *)
-        echo "usage: $0 arm|x64 [output-dir]" >&2
+        echo "usage: $0 arm [output-dir]" >&2
         exit 2
         ;;
 esac

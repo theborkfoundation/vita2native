@@ -18,8 +18,7 @@ cmake --build --preset arm-rel
 ```
 
 The artifact is `build/cmake-arm-rel/vita2native`. For on-device debugging use
-`arm-debug`, which keeps symbols. `x64-syntax` is a compile check only — it
-cannot execute Vita code.
+`arm-debug`, which keeps symbols.
 
 Cross builds link the target's SDL2 from `tools/sysroots/`, pinned by
 `tools/sysroots/*.lock`. `tools/debian-sysroot.py --verify` checks a tree
