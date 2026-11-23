@@ -18,11 +18,20 @@
 #include <unistd.h>
 
 #include "gfx.h"
+#include <GLES3/gl3.h>
 
-#define WINDOW_WIDTH  320
-#define WINDOW_HEIGHT 200
-#define FRAME_WIDTH   64
-#define FRAME_HEIGHT  64
+#define WINDOW_WIDTH  640
+#define WINDOW_HEIGHT 480
+#define FRAME_WIDTH   120
+#define FRAME_HEIGHT  68
+
+static HostWindowInfo test_window;
+
+bool host_video_window_info(HostWindowInfo *info)
+{
+    *info = test_window;
+    return true;
+}
 
 typedef struct {
     int width, height;
@@ -211,6 +220,9 @@ int main(int argc, char **argv)
     x11.flush(display);
     x11.sync(display, 0);
 
+    test_window = (HostWindowInfo){.type = HOST_WINDOW_X11, .display = display,
+                                   .window = (void *)(uintptr_t)window,
+                                   .width = WINDOW_WIDTH, .height = WINDOW_HEIGHT};
     device = host_gpu_create(&config);
     if (!device) {
         fprintf(stderr, "egl_window_smoke: no GPU device\n");
@@ -225,7 +237,7 @@ int main(int argc, char **argv)
         goto done;
     }
 
-    if (host_gpu_attach_window(device, (void *)(uintptr_t)window) != 0) {
+    if (host_gpu_attach_window(device, &test_window) != 0) {
         fprintf(stderr, "egl_window_smoke: host_gpu_attach_window failed\n");
         host_gpu_destroy(device);
         goto done;
@@ -250,26 +262,19 @@ int main(int argc, char **argv)
         goto done;
     }
 
-    /*
-     * Sample inside a checker square, not on a boundary: the 64x64 frame is
-     * letterboxed to 200x200 at x=60, so texel (8,8) lands at (85,25) and
-     * texel (24,8) at (135,25).
-     */
-    red = extract_component(x11_pixel(image, 85, 25), image->red_mask);
-    green = extract_component(x11_pixel(image, 85, 25), image->green_mask);
-    blue = extract_component(x11_pixel(image, 85, 25), image->blue_mask);
-
+    /* The Vita aspect ratio fits at y=0..362. Samples stay inside its squares. */
+    red = extract_component(x11_pixel(image, 40, 42), image->red_mask);
+    green = extract_component(x11_pixel(image, 40, 42), image->green_mask);
+    blue = extract_component(x11_pixel(image, 40, 42), image->blue_mask);
     if (!(red > 200 && green < 60 && blue < 60)) {
         fprintf(stderr, "egl_window_smoke: red square is %u,%u,%u\n", red, green, blue);
         x11.free_memory(image);
         host_gpu_destroy(device);
         goto done;
     }
-
-    red = extract_component(x11_pixel(image, 135, 25), image->red_mask);
-    green = extract_component(x11_pixel(image, 135, 25), image->green_mask);
-    blue = extract_component(x11_pixel(image, 135, 25), image->blue_mask);
-
+    red = extract_component(x11_pixel(image, 125, 42), image->red_mask);
+    green = extract_component(x11_pixel(image, 125, 42), image->green_mask);
+    blue = extract_component(x11_pixel(image, 125, 42), image->blue_mask);
     if (!(blue > 200 && red < 60 && green < 60)) {
         fprintf(stderr, "egl_window_smoke: blue square is %u,%u,%u\n", red, green, blue);
         x11.free_memory(image);
@@ -280,18 +285,119 @@ int main(int argc, char **argv)
     if (dump_path && write_bmp(dump_path, image, WINDOW_WIDTH, WINDOW_HEIGHT))
         printf("wrote %s\n", dump_path);
 
-    /* The corners are inside the letterbox bars and must be black. */
-    red = extract_component(x11_pixel(image, 4, 4), image->red_mask);
-    green = extract_component(x11_pixel(image, 4, 4), image->green_mask);
-    blue = extract_component(x11_pixel(image, 4, 4), image->blue_mask);
-    if (red || green || blue) {
-        fprintf(stderr, "egl_window_smoke: letterbox corner is %u,%u,%u\n", red, green, blue);
-        x11.free_memory(image);
-        host_gpu_destroy(device);
-        goto done;
+    /* The frame touches the top edge and the last row above the border. */
+    for (int y = 0; y <= 362; y += 362) {
+        red = extract_component(x11_pixel(image, 40, y), image->red_mask);
+        blue = extract_component(x11_pixel(image, 40, y), image->blue_mask);
+        if (red < 100 && blue < 100) {
+            fprintf(stderr, "egl_window_smoke: guest frame missing at y=%d\n", y);
+            x11.free_memory(image);
+            host_gpu_destroy(device);
+            goto done;
+        }
     }
 
+    /* The unused space begins immediately below the game and is textured. */
+    for (int y = 363; y <= 460; y += 97) {
+        red = extract_component(x11_pixel(image, 320, y), image->red_mask);
+        green = extract_component(x11_pixel(image, 320, y), image->green_mask);
+        blue = extract_component(x11_pixel(image, 320, y), image->blue_mask);
+        if (!(red > 0 && green > red && blue > green)) {
+            fprintf(stderr, "egl_window_smoke: border at y=%d is %u,%u,%u\n", y, red, green, blue);
+            x11.free_memory(image);
+            host_gpu_destroy(device);
+            goto done;
+        }
+    }
     x11.free_memory(image);
+
+    /* The GPU-direct path must preserve the same borders and the guest image. */
+    {
+        void *gles = dlopen("libGLESv2.so.2", RTLD_NOW | RTLD_LOCAL);
+        PFNGLGENTEXTURESPROC gen = gles ? (PFNGLGENTEXTURESPROC)dlsym(gles, "glGenTextures") : NULL;
+        PFNGLBINDTEXTUREPROC bind = gles ? (PFNGLBINDTEXTUREPROC)dlsym(gles, "glBindTexture") : NULL;
+        PFNGLTEXIMAGE2DPROC upload = gles ? (PFNGLTEXIMAGE2DPROC)dlsym(gles, "glTexImage2D") : NULL;
+        PFNGLTEXPARAMETERIPROC param = gles ? (PFNGLTEXPARAMETERIPROC)dlsym(gles, "glTexParameteri") : NULL;
+        PFNGLDELETETEXTURESPROC del = gles ? (PFNGLDELETETEXTURESPROC)dlsym(gles, "glDeleteTextures") : NULL;
+        GLuint texture = 0;
+        uint32_t debug_overlay[16];
+        if (!gen || !bind || !upload || !param || !del) {
+            fprintf(stderr, "egl_window_smoke: GLES texture functions unavailable\n");
+            if (gles) dlclose(gles);
+            host_gpu_destroy(device);
+            goto done;
+        }
+        for (size_t i = 0; i < FRAME_WIDTH * FRAME_HEIGHT; ++i)
+            frame[i] = 0xFF00FF00u;
+        gen(1, &texture);
+        bind(GL_TEXTURE_2D, texture);
+        param(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        param(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        upload(GL_TEXTURE_2D, 0, GL_RGBA8, FRAME_WIDTH, FRAME_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, frame);
+        for (size_t i = 0; i < 16; ++i)
+            debug_overlay[i] = 0xFFFFFFFFu;
+        host_gpu_set_overlay(device, debug_overlay, 4, 4);
+        host_gpu_present_texture(device, texture, FRAME_WIDTH, FRAME_HEIGHT);
+        x11.sync(display, 0);
+        image = x11.get_image(display, window, 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, ~0UL, 2);
+        if (!image) {
+            del(1, &texture);
+            dlclose(gles);
+            host_gpu_destroy(device);
+            goto done;
+        }
+        red = extract_component(x11_pixel(image, 320, 240), image->red_mask);
+        green = extract_component(x11_pixel(image, 320, 240), image->green_mask);
+        blue = extract_component(x11_pixel(image, 320, 240), image->blue_mask);
+        if (red != 0 || green != 255 || blue != 0) {
+            fprintf(stderr, "egl_window_smoke: direct frame is %u,%u,%u\n", red, green, blue);
+            x11.free_memory(image);
+            del(1, &texture);
+            dlclose(gles);
+            host_gpu_destroy(device);
+            goto done;
+        }
+        red = extract_component(x11_pixel(image, 586, 54), image->red_mask);
+        green = extract_component(x11_pixel(image, 586, 54), image->green_mask);
+        blue = extract_component(x11_pixel(image, 586, 54), image->blue_mask);
+        if (red != 255 || green != 255 || blue != 255) {
+            fprintf(stderr, "egl_window_smoke: debug overlay is %u,%u,%u\n", red, green, blue);
+            x11.free_memory(image);
+            del(1, &texture);
+            dlclose(gles);
+            host_gpu_destroy(device);
+            goto done;
+        }
+        for (int y = 0; y <= 362; y += 362) {
+            red = extract_component(x11_pixel(image, 320, y), image->red_mask);
+            green = extract_component(x11_pixel(image, 320, y), image->green_mask);
+            blue = extract_component(x11_pixel(image, 320, y), image->blue_mask);
+            if (red != 0 || green != 255 || blue != 0) {
+                fprintf(stderr, "egl_window_smoke: direct frame missing at y=%d\n", y);
+                x11.free_memory(image);
+                del(1, &texture);
+                dlclose(gles);
+                host_gpu_destroy(device);
+                goto done;
+            }
+        }
+        for (int y = 363; y <= 460; y += 97) {
+            red = extract_component(x11_pixel(image, 320, y), image->red_mask);
+            green = extract_component(x11_pixel(image, 320, y), image->green_mask);
+            blue = extract_component(x11_pixel(image, 320, y), image->blue_mask);
+            if (!(red > 0 && green > red && blue > green)) {
+                fprintf(stderr, "egl_window_smoke: direct border at y=%d is %u,%u,%u\n", y, red, green, blue);
+                x11.free_memory(image);
+                del(1, &texture);
+                dlclose(gles);
+                host_gpu_destroy(device);
+                goto done;
+            }
+        }
+        x11.free_memory(image);
+        del(1, &texture);
+        dlclose(gles);
+    }
 
     /* Presenting NULL clears the window to black. */
     host_gpu_present_framebuffer(device, NULL, 0, 0, 0);

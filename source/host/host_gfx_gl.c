@@ -22,6 +22,7 @@
 #include "host_gfx_gl.h"
 #include "host_gfx_internal.h"
 #include "host_kms_present.h"
+#include "host_present_layout.h"
 #include "settings.h"
 
 /*
@@ -218,6 +219,7 @@ static void gles_destroy_impl(HostGles *g)
         if (g->glDeleteTextures) {
             g->glDeleteTextures(1, &g->color_texture);
             g->glDeleteTextures(1, &g->present_texture);
+            g->glDeleteTextures(1, &g->border_texture);
             g->glDeleteTextures(1, &g->overlay_texture);
         }
         if (g->glDeleteProgram)
@@ -718,6 +720,81 @@ static bool gles_create_present_program(HostGles *g)
     return true;
 }
 
+/* A small generated placeholder texture, uploaded once per device. A finished
+ * design can replace it later without changing frame presentation. */
+static bool gles_create_border_texture(HostGles *g)
+{
+    enum { BORDER_WIDTH = 128, BORDER_HEIGHT = 32 };
+    unsigned char pixels[BORDER_WIDTH * BORDER_HEIGHT * 4];
+
+    for (int y = 0; y < BORDER_HEIGHT; ++y) {
+        for (int x = 0; x < BORDER_WIDTH; ++x) {
+            unsigned char *p = &pixels[(y * BORDER_WIDTH + x) * 4];
+            int stripe = ((x + 2 * y) % 32) < 2 ? 11 : 0;
+            int glow = (x < 64 ? x : 127 - x) / 5;
+            p[0] = (unsigned char)(21 + glow + stripe);
+            p[1] = (unsigned char)(33 + glow + stripe);
+            p[2] = (unsigned char)(48 + glow + stripe);
+            p[3] = 255;
+        }
+    }
+    g->glGenTextures(1, &g->border_texture);
+    if (!g->border_texture)
+        return false;
+    g->glActiveTexture(GL_TEXTURE0);
+    g->glBindTexture(GL_TEXTURE_2D, g->border_texture);
+    g->glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    g->glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    g->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, BORDER_WIDTH, BORDER_HEIGHT, 0, GL_RGBA,
+                    GL_UNSIGNED_BYTE, pixels);
+    g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    return true;
+}
+
+/* Compute one aspect-fit rectangle for both presentation paths. */
+static void gles_present_rect(int window_width, int window_height, int width, int height,
+                              GLint *x, GLint *y, GLint *w, GLint *h)
+{
+    HostPresentRect rect = host_present_layout(window_width, window_height, width, height);
+    *x = rect.x;
+    *y = window_height - rect.y - rect.height; /* GLES origin is bottom left. */
+    *w = rect.width;
+    *h = rect.height;
+}
+
+/* Draw only the space outside the guest frame; no guest pixels are covered. */
+static void gles_draw_border(HostGles *g, int window_width, int window_height,
+                             GLint x, GLint y, GLint width, GLint height)
+{
+    const GLint rectangles[][4] = {
+        {0, 0, window_width, y},
+        {0, y + height, window_width, window_height - y - height},
+        {0, y, x, height},
+        {x + width, y, window_width - x - width, height},
+    };
+    if (x == 0 && y == 0 && width == window_width && height == window_height)
+        return;
+    if (!g->border_texture && !gles_create_border_texture(g))
+        return;
+    g->glUseProgram(g->present_program);
+    g->glUniform1f(g->present_flip_uniform, 0.0f);
+    g->glActiveTexture(GL_TEXTURE0);
+    g->glBindTexture(GL_TEXTURE_2D, g->border_texture);
+    g->glBindVertexArray(g->present_vao);
+    for (unsigned int i = 0; i < sizeof(rectangles) / sizeof(rectangles[0]); ++i) {
+        if (rectangles[i][2] <= 0 || rectangles[i][3] <= 0)
+            continue;
+        g->glViewport(rectangles[i][0], rectangles[i][1], rectangles[i][2], rectangles[i][3]);
+        g->glDrawArrays(GL_TRIANGLES, 0, 3);
+    }
+    g->glBindVertexArray(0);
+    g->glBindTexture(GL_TEXTURE_2D, 0);
+    g->glUseProgram(0);
+}
+
 /*
  * The window's X visual id, read through a dlopen'd libX11.
  *
@@ -1115,17 +1192,13 @@ void host_gfx_gl_present_framebuffer(HostGpuDevice device, const void *rgba, int
 
         g->glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
 
-        /* Letterbox the guest framebuffer, preserving its aspect ratio. */
-        {
-            double scale_x = (double)window_width / width;
-            double scale_y = (double)window_height / height;
-            double scale = scale_x < scale_y ? scale_x : scale_y;
-
-            viewport_width = (GLint)(width * scale + 0.5);
-            viewport_height = (GLint)(height * scale + 0.5);
-            viewport_x = (window_width - viewport_width) / 2;
-            viewport_y = (window_height - viewport_height) / 2;
-        }
+        /* Draw the decorative border, then the aspect-fitted guest frame. */
+        gles_present_rect(window_width, window_height, width, height, &viewport_x, &viewport_y,
+                          &viewport_width, &viewport_height);
+        gles_draw_border(g, window_width, window_height, viewport_x, viewport_y, viewport_width,
+                         viewport_height);
+        g->glActiveTexture(GL_TEXTURE0);
+        g->glBindTexture(GL_TEXTURE_2D, g->present_texture);
 
         g->glViewport(viewport_x, viewport_y, viewport_width, viewport_height);
         g->glUseProgram(g->present_program);
@@ -1227,13 +1300,11 @@ void host_gfx_gl_present_texture(HostGpuDevice device, unsigned int texture, int
     }
 
     {
-        double scale_x = (double)window_width / width;
-        double scale_y = (double)window_height / height;
-        double scale = scale_x < scale_y ? scale_x : scale_y;
-        GLint viewport_width = (GLint)(width * scale + 0.5);
-        GLint viewport_height = (GLint)(height * scale + 0.5);
-        GLint viewport_x = (window_width - viewport_width) / 2;
-        GLint viewport_y = (window_height - viewport_height) / 2;
+        GLint viewport_x, viewport_y, viewport_width, viewport_height;
+        gles_present_rect(window_width, window_height, width, height, &viewport_x, &viewport_y,
+                          &viewport_width, &viewport_height);
+        gles_draw_border(g, window_width, window_height, viewport_x, viewport_y, viewport_width,
+                         viewport_height);
 
         g->glViewport(viewport_x, viewport_y, viewport_width, viewport_height);
         g->glUseProgram(g->present_program);
@@ -1251,10 +1322,9 @@ void host_gfx_gl_present_texture(HostGpuDevice device, unsigned int texture, int
         double scale_x = (double)window_width / width;
         double scale_y = (double)window_height / height;
         double scale = scale_x < scale_y ? scale_x : scale_y;
-        int viewport_width = (int)(width * scale + 0.5);
-        int viewport_height = (int)(height * scale + 0.5);
-        int viewport_x = (window_width - viewport_width) / 2;
-        int viewport_y = (window_height - viewport_height) / 2;
+        GLint viewport_x, viewport_y, viewport_width, viewport_height;
+        gles_present_rect(window_width, window_height, width, height, &viewport_x, &viewport_y,
+                          &viewport_width, &viewport_height);
         int margin = (int)(8.0 * scale + 0.5);
         int overlay_width = (int)(g->overlay_width * scale + 0.5);
         int overlay_height = (int)(g->overlay_height * scale + 0.5);

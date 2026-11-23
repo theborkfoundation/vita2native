@@ -22,6 +22,7 @@
  */
 #include "gfx.h"
 #include "host.h"
+#include "host_present_layout.h"
 #include "settings.h"
 
 #define SDL_MAIN_HANDLED
@@ -565,18 +566,14 @@ static void video_sample_touch(HostVideo *video)
         int content_x = 0, content_y = 0;
         int content_w = video->width, content_h = video->height;
 
-        /* Mirror the presenter's letterbox (host_gfx_gl_present_texture), so the
-           black bars are not touchable and the visible frame maps onto the full
-           panel. The guest frame is the Vita's 960x544. */
+        /* Use the same top-aligned rectangle as the presenter. */
         if (!video->stretch && video->guest_width > 0 && video->guest_height > 0) {
-            int scale_x = video->width * 1000 / video->guest_width;
-            int scale_y = video->height * 1000 / video->guest_height;
-            int scale = scale_x < scale_y ? scale_x : scale_y;
-
-            content_w = video->guest_width * scale / 1000;
-            content_h = video->guest_height * scale / 1000;
-            content_x = (video->width - content_w) / 2;
-            content_y = (video->height - content_h) / 2;
+            HostPresentRect rect = host_present_layout(video->width, video->height,
+                                                       video->guest_width, video->guest_height);
+            content_x = rect.x;
+            content_y = rect.y;
+            content_w = rect.width;
+            content_h = rect.height;
         }
 
         if (content_w > 0 && content_h > 0 && mouse_x >= content_x &&

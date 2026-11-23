@@ -161,6 +161,7 @@ typedef struct HostGles {
 
     GLuint present_program;
     GLuint present_texture;
+    GLuint border_texture;
     GLuint overlay_texture;
     GLuint present_vao;
     GLint present_flip_uniform;

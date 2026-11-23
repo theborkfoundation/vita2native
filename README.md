@@ -90,6 +90,9 @@ on the native handle SDL reports. Nothing overrides that beyond an explicit
 Presentation is GPU-side: the guest render target is blitted straight to the
 window surface, so no `glReadPixels` runs on the normal path. A CPU frame (video
 decode, guest-side composite) is uploaded as a texture and blitted the same way.
+The aspect-fitted game frame is aligned to the top of the screen. A temporary
+blue-gray texture fills the remaining space, forming a larger bottom margin on
+a 640×480 screen.
 
 Under a software compositor — for example Weston on its Pixman backend — the GL
 device is software too, and the compositor's own swap copy then dominates the
