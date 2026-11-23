@@ -1,15 +1,121 @@
-#include <cstdlib>
-#include <fcntl.h>
-#include <sys/wait.h>
-#include <unistd.h>
-
 #include "state.h"
+#include "extract.h"
+
+#include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
+#include <deque>
+#include <exception>
+#include <mutex>
+#include <thread>
+#include <utility>
+#include <unistd.h>
 
 namespace launcher
 {
+namespace
+{
+struct ImportEvent {
+    enum class Kind { Progress, Finished } kind;
+    std::string text;
+    int result = 0;
+};
+
+// A bounded, single-consumer channel. Sending waits for space; receiving never
+// blocks the UI. Closing wakes a sender during shutdown.
+class ImportChannel {
+  public:
+    bool send(ImportEvent event)
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        space_.wait(lock, [&] { return closed_ || queue_.size() < capacity; });
+        if (closed_)
+            return false;
+        queue_.push_back(std::move(event));
+        return true;
+    }
+
+    bool try_receive(ImportEvent &event)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (queue_.empty())
+            return false;
+        event = std::move(queue_.front());
+        queue_.pop_front();
+        space_.notify_one();
+        return true;
+    }
+
+    void close()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        closed_ = true;
+        space_.notify_all();
+    }
+
+  private:
+    static constexpr size_t capacity = 8;
+    std::mutex mutex_;
+    std::condition_variable space_;
+    std::deque<ImportEvent> queue_;
+    bool closed_ = false;
+};
+} // namespace
+
+class ImportWorker {
+  public:
+    ImportWorker(std::string package, std::string license, std::string output)
+        : thread_([this, package = std::move(package), license = std::move(license),
+                   output = std::move(output)] {
+              int result = -1;
+              const std::string log_path = output + "/import.log";
+              std::FILE *log = std::fopen(log_path.c_str(), "w");
+              if (log) {
+                  result = 1;
+                  try {
+                      V2nExtractOptions options;
+                      options.pkg_path = package.c_str();
+                      options.work_bin = license.c_str();
+                      options.out_dir = output.c_str();
+                      options.log = log;
+                      options.progress_context = &channel_;
+                      options.progress = [](void *context, const char *message) {
+                          static_cast<ImportChannel *>(context)->send(
+                              {ImportEvent::Kind::Progress, message});
+                      };
+                      result = v2n_extract_package(options);
+                  } catch (const std::exception &e) {
+                      std::fprintf(log, "Import failed: %s\n", e.what());
+                  } catch (...) {
+                      std::fprintf(log, "Import failed: unexpected exception\n");
+                  }
+                  std::fclose(log);
+              }
+              channel_.send({ImportEvent::Kind::Finished, {}, result});
+          })
+    {
+    }
+
+    ~ImportWorker()
+    {
+        channel_.close();
+        if (thread_.joinable())
+            thread_.join();
+    }
+
+    bool try_receive(ImportEvent &event) { return channel_.try_receive(event); }
+
+  private:
+    ImportChannel channel_;
+    std::thread thread_;
+};
+
+State::State() = default;
+State::~State() = default;
+
 void State::start_import()
 {
-    if (child > 0)
+    if (import_running())
         return;
     if (pkg.empty() || license.empty()) {
         message = "Select a package and work.bin first.";
@@ -24,82 +130,59 @@ void State::start_import()
         return;
     }
     stage = p;
-    std::string executable;
-    const char *env = getenv("V2N_EXTRACT");
-    if (env && *env)
-        executable = env;
-    else {
-        char *base = SDL_GetBasePath();
-        if (base) {
-            fs::path sibling = fs::path(base) / "v2n-extract";
-            SDL_free(base);
-            if (access(sibling.c_str(), X_OK) == 0)
-                executable = sibling.string();
-        }
-        if (executable.empty())
-            executable = "v2n-extract";
-    }
-    child = fork();
-    if (child == 0) {
-        int fd = open((stage / "import.log").c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
-        if (fd >= 0) {
-            dup2(fd, STDOUT_FILENO);
-            dup2(fd, STDERR_FILENO);
-            close(fd);
-        }
-        execlp(executable.c_str(), executable.c_str(), "--pkg", pkg.c_str(), "--work-bin",
-               license.c_str(), "--out", stage.c_str(), (char *)nullptr);
-        _exit(127);
-    }
-    if (child < 0) {
-        child = -1;
+    message = "Importing... Please wait.";
+    try {
+        worker = std::make_unique<ImportWorker>(pkg.string(), license.string(), stage.string());
+    } catch (const std::exception &) {
         std::error_code ec;
         fs::remove_all(stage, ec);
-        message = "Could not start extractor.";
-    } else
-        message = "Importing... Please wait.";
+        message = "Could not start import worker.";
+    }
 }
 
 void State::poll()
 {
-    if (child <= 0)
+    if (!worker)
         return;
-    int status = 0;
-    pid_t result = waitpid(child, &status, WNOHANG);
-    if (result == 0)
-        return;
-    child = -1;
-    std::error_code ec;
-    if (result < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        message = (result > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 127)
-                      ? "Extractor not found. Set V2N_EXTRACT."
-                      : "Import failed. Log: " + stage.filename().string() + "/import.log";
+    ImportEvent event;
+    while (worker->try_receive(event)) {
+        if (event.kind == ImportEvent::Kind::Progress) {
+            message = event.text;
+            continue;
+        }
+        worker.reset(); // Joins the finished thread before its channel is destroyed.
+        if (event.result != 0) {
+            message = event.result < 0 ? "Could not create import log."
+                                       : "Import failed. Log: " + stage.filename().string() + "/import.log";
+            return;
+        }
+        std::error_code ec;
+        std::vector<fs::path> outputs;
+        fs::directory_iterator it(stage, ec), end;
+        while (!ec && it != end) {
+            if (it->is_directory(ec) && it->path().filename().string().rfind(".v2n-temp-", 0) != 0)
+                outputs.push_back(it->path());
+            it.increment(ec);
+        }
+        if (ec || outputs.size() != 1) {
+            message = "Import output invalid. See staging folder.";
+            return;
+        }
+        fs::path dest = fs::current_path() / outputs[0].filename();
+        if (fs::exists(dest, ec) || ec) {
+            message = "Title exists. Saved in " + stage.filename().string();
+            return;
+        }
+        fs::rename(outputs[0], dest, ec);
+        if (ec) {
+            message = "Could not move title. See staging folder.";
+            return;
+        }
+        fs::remove_all(stage, ec);
+        message = "Import complete: " + dest.filename().string();
+        pkg.clear();
+        license.clear();
         return;
     }
-    std::vector<fs::path> outputs;
-    fs::directory_iterator it(stage, ec), end;
-    while (!ec && it != end) {
-        if (it->is_directory(ec) && it->path().filename().string().rfind(".v2n-temp-", 0) != 0)
-            outputs.push_back(it->path());
-        it.increment(ec);
-    }
-    if (ec || outputs.size() != 1) {
-        message = "Import output invalid. See staging folder.";
-        return;
-    }
-    fs::path dest = fs::current_path() / outputs[0].filename();
-    if (fs::exists(dest, ec) || ec) {
-        message = "Title exists. Saved in " + stage.filename().string();
-        return;
-    }
-    fs::rename(outputs[0], dest, ec);
-    if (ec) {
-        message = "Could not move title. See staging folder.";
-        return;
-    }
-    fs::remove_all(stage, ec);
-    message = "Import complete: " + dest.filename().string();
-    pkg.clear();
-    license.clear();
 }
 } // namespace launcher

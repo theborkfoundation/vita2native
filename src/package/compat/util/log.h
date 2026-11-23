@@ -13,6 +13,9 @@
 #include <filesystem>
 #include <string>
 #include <utility>
+// Vita3K's sce_types.h relies on these arriving through util/log.h.
+#include <unordered_map>
+#include <vector>
 
 #include <fmt/format.h>
 

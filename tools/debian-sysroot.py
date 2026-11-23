@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Populate a cross-compilation sysroot from Debian .deb packages.
 
-The devices run Debian trixie/armhf, so the system libraries the cross build
-links against are just that suite's packages. This tool resolves a dependency
+The devices run Debian trixie/armhf, so most system libraries the cross build
+links against come from that suite. Static OpenSSL comes from bookworm for
+compatibility with the launcher’s older ARM libc target. This tool resolves a dependency
 closure from the archive index, downloads the .debs into a cache, and unpacks
 their payloads into a sysroot. Nothing runs package maintainer scripts: a
 sysroot only needs headers, static archives and shared objects.
@@ -46,6 +47,8 @@ ARCH = "armhf"
 # which is the point: the closure is resolved from the archive, not hardcoded.
 DEFAULT_PACKAGES = [
     "libsdl2-dev",
+    # Package extraction in the launcher uses libcrypto.
+    "libssl-dev",
     # SDL_syswm.h includes the windowing headers of every backend the target's
     # SDL was built with, so compiling against it needs these even though the
     # emulator itself only uses the window/KMSDRM paths.
@@ -297,6 +300,15 @@ def populate(args, root):
         index = {}
         for component in args.components.split(","):
             index.update(load_index(args.suite, component.strip(), arch))
+
+        # The launcher links libcrypto statically. Trixie's archive uses C23
+        # libc symbols newer than the handheld ABI selected by Zig. Bookworm's
+        # OpenSSL 3 supports that ABI while retaining the required crypto API.
+        # Keep both matching packages together when deliberately updating locks.
+        if args.suite == "trixie" and "libssl-dev" in seeds:
+            compatible_crypto = load_index("bookworm", "main", arch)
+            for name in ("libssl-dev", "libssl3"):
+                index[name] = compatible_crypto[name]
 
         unknown = [name for name in seeds if name not in index]
         if unknown:

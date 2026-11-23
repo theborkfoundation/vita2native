@@ -94,7 +94,7 @@ void run(SDL_Window *window)
                  event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
                  event.window.event == SDL_WINDOWEVENT_SHOWN))
                 dirty = true;
-            if (event.type == SDL_QUIT && state.child <= 0)
+            if (event.type == SDL_QUIT && !state.import_running())
                 state.running = false;
             input.handle(event, state);
         }
@@ -131,7 +131,7 @@ void run(SDL_Window *window)
 }
 } // namespace
 
-int main()
+int main(int, char **)
 {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK | SDL_INIT_TIMER) <
         0) {

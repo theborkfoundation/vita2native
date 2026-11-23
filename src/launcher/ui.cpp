@@ -437,7 +437,7 @@ static void draw_import(const State &a)
     label(26, 315, fs::current_path().string(), 11, rgba(224, 235, 237), false, 395);
     rect(453, 304, 162, 40,
          a.import_focus == ImportFocus::Start ? rgba(225, 237, 239) : rgba(92, 115, 124), 5);
-    centered(534, 324, a.child > 0 ? "IMPORTING..." : "IMPORT GAME", 11,
+    centered(534, 324, a.import_running() ? "IMPORTING..." : "IMPORT GAME", 11,
              a.import_focus == ImportFocus::Start ? rgba(14, 28, 35) : rgba(225, 236, 239), true);
     rect(25, 365, 590, 47, rgba(255, 255, 255, 12), 5);
     label(39, 373, a.message.empty() ? "Your files will be prepared for vita2native." : a.message,

@@ -103,6 +103,8 @@ libsm6 2:1.2.6-1 pool/main/libs/libsm/libsm6_1.2.6-1_armhf.deb
 libsndfile1 1.2.2-2+deb13u1 pool/main/libs/libsndfile/libsndfile1_1.2.2-2+deb13u1_armhf.deb
 libsndio-dev 1.10.0-0.1 pool/main/s/sndio/libsndio-dev_1.10.0-0.1_armhf.deb
 libsndio7.0 1.10.0-0.1 pool/main/s/sndio/libsndio7.0_1.10.0-0.1_armhf.deb
+libssl-dev 3.0.20-1~deb12u2 pool/main/o/openssl/libssl-dev_3.0.20-1~deb12u2_armhf.deb
+libssl3 3.0.20-1~deb12u2 pool/main/o/openssl/libssl3_3.0.20-1~deb12u2_armhf.deb
 libstdc++6 14.2.0-19 pool/main/g/gcc-14/libstdc++6_14.2.0-19_armhf.deb
 libsysprof-capture-4-dev 48.0-2 pool/main/s/sysprof/libsysprof-capture-4-dev_48.0-2_armhf.deb
 libsystemd-dev 257.13-1~deb13u1 pool/main/s/systemd/libsystemd-dev_257.13-1~deb13u1_armhf.deb

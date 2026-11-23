@@ -194,7 +194,7 @@ void State::handle_import(Action action)
 
 void State::action(Action action)
 {
-    if (child > 0) {
+    if (import_running()) {
         if (action == Action::Back)
             message = "Import is running; please wait.";
         return;

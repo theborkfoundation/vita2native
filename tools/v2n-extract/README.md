@@ -5,7 +5,7 @@ vita2native runs from.
 
 ```sh
 tools/v2n-extract/build.sh                       # host build, once
-build/v2n-extract-host/v2n-extract --list game.pkg
+build/v2n-extract-host/v2n-extract --pkg game.pkg --list
 build/v2n-extract-host/v2n-extract --pkg game.pkg --work-bin work.bin --out ~/tests/apps
 ```
 
@@ -58,10 +58,11 @@ the binary (or to the device running it) and pass its `eboot.bin`.
 
 ## Build
 
-Host-only target: it links OpenSSL 3 and the PFS engine, neither of which
-belongs in the 32-bit ARM build.
+The standalone command is a host build. It shares the extraction pipeline in
+`src/package/` with the launcher; the launcher links that pipeline into its own
+ARM or native binary and does not require the command.
 
-- CMake 3.16+, a C and C++17 compiler
+- CMake 3.18+, a C and C++17 compiler
 - OpenSSL 3 (`brew install openssl@3` on macOS; `libssl-dev` on Debian)
 - zlib
 
@@ -70,19 +71,18 @@ Homebrew OpenSSL keg when it finds one.
 
 ## Where the code comes from
 
-- **pkg reader** (`src/pkg_reader.c`) — C, written here; the container layout
+- **pkg reader** (`src/package/pkg_reader.c`) — C, written here; the container layout
   and the three public keys follow [pkg2zip](https://github.com/mmozeiko/pkg2zip)
   (public domain) and Vita3K's `packages/pkg.cpp`.
 - **PFS layer** — the vendored `external/Vita3K/external/psvpfstools`
   (TeamMolecule's psvpfstools, GPLv2), called through its `execute()` entry
   point exactly as Vita3K does.
 - **SELF layer** — Vita3K's `vita3k/packages/src/sce_utils.cpp` (GPLv2), which
-  carries the key store and `decrypt_fself()`. `compat/util/log.h` replaces its
+  carries the key store and `decrypt_fself()`. `src/package/compat/util/log.h` replaces its
   spdlog logging so only that translation unit is needed.
 
-The emulator already links GPLv2 Vita3K code for the shader recompiler, so this
-adds no new licensing obligation; the tool is a host binary and is not part of
-the deployed artifact.
+The launcher and standalone command link GPLv2 Vita3K and psvpfstools code.
+The emulator also links GPLv2 Vita3K code for the shader recompiler.
 
 ## Notes
 

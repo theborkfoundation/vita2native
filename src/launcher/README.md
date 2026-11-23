@@ -9,18 +9,25 @@ The startup progress is simulated.
 Initialize the NanoVG submodule with `git submodule update --init --recursive`.
 The launcher needs an OpenGL ES 2.0 context on Linux (OpenGL 3 on macOS).
 
-The normal ARM build includes `build/release/src/launcher/v2n-launcher`:
+The primary target is 64-bit ARM Linux (aarch64). On the target, install SDL2,
+OpenGL ES 2, OpenSSL 3 and zlib development files (including the static
+libcrypto archive), pkg-config, CMake 3.18+, a C/C++ compiler and Python 3:
+
+```sh
+cmake -S src/launcher -B build/launcher-arm64 -DCMAKE_BUILD_TYPE=Release
+cmake --build build/launcher-arm64
+```
+
+The resulting executable is `build/launcher-arm64/v2n-launcher`. The same
+standalone build also works natively on macOS, using a separate build directory.
+
+The repository's `release` preset targets 32-bit ARM for the vita2native
+runtime. It can also build a 32-bit launcher for compatible systems, but it is
+not the launcher's primary target:
 
 ```sh
 cmake --preset release
 cmake --build --preset release --target v2n-launcher
-```
-
-For a native build, install SDL2 development files, pkg-config, CMake and Python 3:
-
-```sh
-cmake -S src/launcher -B build/launcher-host
-cmake --build build/launcher-host
 ```
 
 Inter and the sample cover artwork are embedded in the executable. The font
@@ -41,18 +48,19 @@ cd ~/v2n
 ./v2n-launcher
 ```
 
-Import needs a `v2n-extract` executable built for the **same machine** and its
-OpenSSL 3 and zlib runtime libraries. Place it beside the launcher or on `PATH`,
-or set `V2N_EXTRACT` to its path. On an ARM device, build the extractor natively
-with `tools/v2n-extract/build.sh` after installing CMake, C/C++ compilers,
-OpenSSL 3 and zlib development packages. The existing ARM cross sysroot does
-not include OpenSSL; the normal ARM build does not build the extractor.
+Package, PFS and SELF extraction is linked into the launcher. Imports run in a
+background thread, which sends progress and completion through a bounded channel
+to the SDL thread. No separate extractor executable or OpenSSL installation is
+needed at runtime. The ARM32 preset uses the locked sysroot's static libcrypto
+and zlib archives; native ARM64 builds use the development libraries installed
+on the build host.
 
 Select a `.pkg` and its `work.bin`. Imports run in a hidden staging directory
 in the current working directory and only move the completed title there after
 success. Existing title directories are never intentionally replaced. On failure
 or if the destination exists, the staging directory and `import.log` are kept
-for inspection.
+for inspection. Pipeline diagnostics go to `import.log`; the underlying PFS
+engine also writes diagnostics to the application console.
 
 ## Controls
 
@@ -71,7 +79,8 @@ mappings vary; a platform SDL game-controller mapping may be needed.
 - `main.cpp` owns the SDL window, graphics context and event loop.
 - `state.h` and `state.cpp` define navigation, focus and picker state.
 - `input.cpp` maps keyboard, controller and joystick events to navigation actions.
-- `import.cpp` starts and monitors the extractor process.
+- `import.cpp` starts the import thread and receives its channel messages.
+- `../package/` implements the package, PFS and SELF extraction pipeline.
 - `ui.cpp` draws the screens with NanoVG; `library.h` holds the mock games.
 
 The launcher is excluded from the project test suite.

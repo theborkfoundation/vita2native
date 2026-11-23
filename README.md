@@ -15,7 +15,7 @@ cross-compile with `zig cc`, so no system cross toolchain is needed.
 
 ```sh
 tools/zig-toolchain.sh     # once
-tools/debian-sysroot.py    # once: the armhf sysroot
+tools/debian-sysroot.py    # populate or update the locked armhf sysroot
 cmake --preset release
 cmake --build --preset release
 ```
@@ -26,11 +26,15 @@ cmake --build --preset release
 | `debug` | symbols for on-device `gdb` |
 | `minsize` | size experiments only; crash backtraces lose names |
 
+Rerun `tools/debian-sysroot.py` after the sysroot lock changes. These presets
+target the ARM32 runtime. The launcher primarily targets ARM64 Linux and links
+package extraction into its own binary; see [launcher build instructions](src/launcher/README.md).
+
 On a 32-bit ARM host the build also works without a cross toolchain, using the
 distribution's SDL2:
 
 ```sh
-sudo apt install libsdl2-dev
+sudo apt install libsdl2-dev libssl-dev zlib1g-dev
 cmake -S . -B build/native-arm -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build/native-arm
 ```

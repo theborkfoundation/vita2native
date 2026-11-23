@@ -3,7 +3,7 @@
 #include <SDL.h>
 #include <filesystem>
 #include <string>
-#include <sys/types.h>
+#include <memory>
 #include <tuple>
 #include <vector>
 
@@ -53,7 +53,13 @@ struct PickerItem {
 };
 
 // All visible state lives here, so navigation can be exercised without a window.
+class ImportWorker;
+
 struct State {
+    State();
+    ~State();
+    State(const State &) = delete;
+    State &operator=(const State &) = delete;
     bool running = true;
     bool picker = false;
     Screen screen = Screen::Home;
@@ -80,7 +86,7 @@ struct State {
     fs::path stage;
     std::vector<PickerItem> items;
     std::string message;
-    pid_t child = -1;
+    std::unique_ptr<ImportWorker> worker;
     Uint32 start = SDL_GetTicks();
 
     void change_screen(Screen next);
@@ -90,6 +96,7 @@ struct State {
     bool animating() const;
     void scan();
     void browse(PickerKind kind);
+    bool import_running() const { return worker != nullptr; }
     void start_import();
     void poll();
     void action(Action action);
@@ -99,7 +106,7 @@ struct State {
     auto visible_state() const
     {
         return std::make_tuple(screen, home_focus, all_focus, import_focus, selected, picker,
-                               pick_index, scroll, dir, pkg, license, message, child);
+                               pick_index, scroll, dir, pkg, license, message, import_running());
     }
 
   private:
