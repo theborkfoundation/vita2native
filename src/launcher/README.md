@@ -1,7 +1,7 @@
 # V2N Launcher
 
 A 640×480 SDL2 and NanoVG launcher with a mock library and a working package import flow.
-The library and Play action are placeholders; games are not scanned or started.
+The Recent Games and All Games views use placeholder entries; games are not scanned or started.
 The startup progress is simulated.
 
 ## Build
@@ -21,6 +21,7 @@ For a native build, install SDL2 development files, pkg-config, CMake and Python
 ```sh
 cmake -S src/launcher -B build/launcher-host
 cmake --build build/launcher-host
+ctest --test-dir build/launcher-host --output-on-failure
 ```
 
 Inter and the sample cover artwork are embedded in the executable. The font
@@ -58,7 +59,8 @@ for inspection.
 
 - D-pad or arrow keys: navigate. Analog sticks are also supported.
 - A / Enter / Space: select. B / Escape / Backspace: back; on Games, exit.
-- L or R shoulder / Tab / Q / E: switch tabs.
+- On the home screen, left/right cycle through recent games. Down moves to the two action cards; left/right select a card and up returns to recent games.
+- In All Games, navigate the grid with the D-pad or arrows; B or Escape returns to the home screen.
 - The picker shows directories and matching files; select `..` to go up.
 
 SDL game controllers are supported, including hot-plugging. Unmapped joysticks
