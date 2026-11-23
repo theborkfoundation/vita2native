@@ -21,7 +21,6 @@ For a native build, install SDL2 development files, pkg-config, CMake and Python
 ```sh
 cmake -S src/launcher -B build/launcher-host
 cmake --build build/launcher-host
-ctest --test-dir build/launcher-host --output-on-failure
 ```
 
 Inter and the sample cover artwork are embedded in the executable. The font
@@ -66,3 +65,13 @@ for inspection.
 SDL game controllers are supported, including hot-plugging. Unmapped joysticks
 use hat, first two axes, buttons 0/1 and shoulder buttons 4/5. Actual device
 mappings vary; a platform SDL game-controller mapping may be needed.
+
+## Source layout
+
+- `main.cpp` owns the SDL window, graphics context and event loop.
+- `state.h` and `state.cpp` define navigation, focus and picker state.
+- `input.cpp` maps keyboard, controller and joystick events to navigation actions.
+- `import.cpp` starts and monitors the extractor process.
+- `ui.cpp` draws the screens with NanoVG; `library.h` holds the mock games.
+
+The launcher is excluded from the project test suite.

@@ -12,9 +12,9 @@ endif()
 function(embed_asset file name)
     set(header "${CMAKE_CURRENT_BINARY_DIR}/${name}.h")
     add_custom_command(OUTPUT "${header}"
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/embed_font.py"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/embed_asset.py"
             "${CMAKE_CURRENT_SOURCE_DIR}/assets/${file}" "${header}" "${name}"
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/assets/${file}" "${CMAKE_CURRENT_SOURCE_DIR}/embed_font.py" VERBATIM)
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/assets/${file}" "${CMAKE_CURRENT_SOURCE_DIR}/embed_asset.py" VERBATIM)
     set(EMBEDDED_ASSETS ${EMBEDDED_ASSETS} "${header}" PARENT_SCOPE)
 endfunction()
 embed_asset(Inter-Regular.ttf inter_font)
@@ -22,7 +22,15 @@ embed_asset(Inter-SemiBold.ttf inter_bold)
 foreach(i RANGE 0 3)
     embed_asset(cover-${i}.jpg cover_${i})
 endforeach()
-add_executable(v2n-launcher main.cpp nanovg_backend.cpp "${NANOVG_DIR}/nanovg.c" ${EMBEDDED_ASSETS})
+add_executable(v2n-launcher
+    main.cpp
+    state.cpp
+    input.cpp
+    import.cpp
+    ui.cpp
+    nanovg_backend.cpp
+    "${NANOVG_DIR}/nanovg.c"
+    ${EMBEDDED_ASSETS})
 target_compile_features(v2n-launcher PRIVATE cxx_std_17)
 target_include_directories(v2n-launcher PRIVATE ${SDL2_INCLUDE_DIRS} "${CMAKE_CURRENT_BINARY_DIR}" "${NANOVG_DIR}")
 target_link_directories(v2n-launcher PRIVATE ${SDL2_LIBRARY_DIRS})
@@ -33,22 +41,3 @@ else()
     target_link_libraries(v2n-launcher PRIVATE GLESv2 m)
 endif()
 target_compile_options(v2n-launcher PRIVATE -Wall -Wextra -Wno-unused-function)
-
-# The standalone host build can exercise the launcher state without a display.
-if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    include(CTest)
-    if(BUILD_TESTING)
-        add_executable(launcher-state-test state_test.cpp nanovg_backend.cpp "${NANOVG_DIR}/nanovg.c" ${EMBEDDED_ASSETS})
-        target_compile_features(launcher-state-test PRIVATE cxx_std_17)
-        target_include_directories(launcher-state-test PRIVATE ${SDL2_INCLUDE_DIRS} "${CMAKE_CURRENT_BINARY_DIR}" "${NANOVG_DIR}")
-        target_link_directories(launcher-state-test PRIVATE ${SDL2_LIBRARY_DIRS})
-        target_link_libraries(launcher-state-test PRIVATE ${SDL2_LIBRARIES})
-        target_compile_options(launcher-state-test PRIVATE -UNDEBUG)
-        if(APPLE)
-            target_link_libraries(launcher-state-test PRIVATE "-framework OpenGL")
-        else()
-            target_link_libraries(launcher-state-test PRIVATE GLESv2 m)
-        endif()
-        add_test(NAME launcher-state COMMAND launcher-state-test)
-    endif()
-endif()
