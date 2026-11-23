@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title id="title">V2N Launcher mark</title>
+  <rect x="5" y="5" width="118" height="118" rx="11" fill="#080808" stroke="#fff" stroke-width="3"/>
+  <path d="M25 35 49 91 64 56 79 91 103 35" fill="none" stroke="#fff" stroke-width="8" stroke-linecap="square" stroke-linejoin="miter"/>
+  <path d="M53 35h22" fill="none" stroke="#fff" stroke-width="8"/>
+</svg>

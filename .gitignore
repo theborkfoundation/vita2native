@@ -69,3 +69,7 @@ ISSUES.md
 
 # VSCode
 .vscode/
+
+# Launcher assets are embedded at build time.
+!src/launcher/assets/*.jpg
+!src/launcher/assets/INTER-LICENSE.txt
