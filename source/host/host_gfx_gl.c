@@ -22,6 +22,7 @@
 #include "host_gfx_gl.h"
 #include "host_gfx_internal.h"
 #include "host_kms_present.h"
+#include "host_overlay_image.h"
 #include "host_present_layout.h"
 #include "settings.h"
 
@@ -720,33 +721,67 @@ static bool gles_create_present_program(HostGles *g)
     return true;
 }
 
-/* A small generated placeholder texture, uploaded once per device. A finished
- * design can replace it later without changing frame presentation. */
+/* Decode the embedded artwork once. Without one, generate a placeholder. */
 static bool gles_create_border_texture(HostGles *g)
 {
     enum { BORDER_WIDTH = 128, BORDER_HEIGHT = 32 };
-    unsigned char pixels[BORDER_WIDTH * BORDER_HEIGHT * 4];
+    unsigned char fallback[BORDER_WIDTH * BORDER_HEIGHT * 4];
+    int width = 0, height = 0;
+    unsigned char *image = host_overlay_image_load(&width, &height);
+    const unsigned char *pixels;
 
-    for (int y = 0; y < BORDER_HEIGHT; ++y) {
-        for (int x = 0; x < BORDER_WIDTH; ++x) {
-            unsigned char *p = &pixels[(y * BORDER_WIDTH + x) * 4];
-            int stripe = ((x + 2 * y) % 32) < 2 ? 11 : 0;
-            int glow = (x < 64 ? x : 127 - x) / 5;
-            p[0] = (unsigned char)(21 + glow + stripe);
-            p[1] = (unsigned char)(33 + glow + stripe);
-            p[2] = (unsigned char)(48 + glow + stripe);
+    if (image) {
+        GLint max_size = 0;
+        g->glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_size);
+        if (max_size <= 0 || width > max_size || height > max_size) {
+            fprintf(stderr, "vita2native: embedded overlay %dx%d exceeds GPU texture limit %d\n",
+                    width, height, max_size);
+            host_overlay_image_free(image);
+            image = NULL;
+        }
+    }
+    pixels = image;
+    if (image) {
+        /* The presenter outputs opaque pixels: composite transparent PNG pixels
+           against the same blue-gray base used by the default border. */
+        for (size_t i = 0; i < (size_t)width * height; ++i) {
+            unsigned char *p = &image[i * 4];
+            unsigned int alpha = p[3];
+            p[0] = (unsigned char)((p[0] * alpha + 21 * (255 - alpha) + 127) / 255);
+            p[1] = (unsigned char)((p[1] * alpha + 33 * (255 - alpha) + 127) / 255);
+            p[2] = (unsigned char)((p[2] * alpha + 48 * (255 - alpha) + 127) / 255);
             p[3] = 255;
+        }
+        /* PNG rows start at the top; GLES texture coordinates start below. */
+        g->border_flip = true;
+    } else {
+        width = BORDER_WIDTH;
+        height = BORDER_HEIGHT;
+        pixels = fallback;
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                unsigned char *p = &fallback[(y * width + x) * 4];
+                int stripe = ((x + 2 * y) % 32) < 2 ? 11 : 0;
+                int glow = (x < 64 ? x : 127 - x) / 5;
+                p[0] = (unsigned char)(21 + glow + stripe);
+                p[1] = (unsigned char)(33 + glow + stripe);
+                p[2] = (unsigned char)(48 + glow + stripe);
+                p[3] = 255;
+            }
         }
     }
     g->glGenTextures(1, &g->border_texture);
-    if (!g->border_texture)
+    if (!g->border_texture) {
+        host_overlay_image_free(image);
         return false;
+    }
     g->glActiveTexture(GL_TEXTURE0);
     g->glBindTexture(GL_TEXTURE_2D, g->border_texture);
     g->glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     g->glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-    g->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, BORDER_WIDTH, BORDER_HEIGHT, 0, GL_RGBA,
+    g->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA,
                     GL_UNSIGNED_BYTE, pixels);
+    host_overlay_image_free(image);
     g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     g->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -780,7 +815,7 @@ static void gles_draw_border(HostGles *g, int window_width, int window_height,
     if (!g->border_texture && !gles_create_border_texture(g))
         return;
     g->glUseProgram(g->present_program);
-    g->glUniform1f(g->present_flip_uniform, 0.0f);
+    g->glUniform1f(g->present_flip_uniform, g->border_flip ? 1.0f : 0.0f);
     g->glActiveTexture(GL_TEXTURE0);
     g->glBindTexture(GL_TEXTURE_2D, g->border_texture);
     g->glBindVertexArray(g->present_vao);

@@ -114,10 +114,33 @@ set(VITA2NATIVE_GXM_TEXTURE_SOURCES
     external/Vita3K/vita3k/renderer/src/texture/pvrt-dec.cpp
 )
 
+# Embed optional presentation artwork in every target using the GL presenter.
+set(VITA2NATIVE_OVERLAY_PNG "" CACHE FILEPATH "PNG to embed in the presentation border")
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(VITA2NATIVE_OVERLAY_HEADER "${CMAKE_BINARY_DIR}/generated/v2n_overlay_png.h")
+set(_v2n_overlay_args "")
+set(_v2n_overlay_deps "${CMAKE_SOURCE_DIR}/tools/embed-overlay.py")
+if(VITA2NATIVE_OVERLAY_PNG)
+    get_filename_component(_v2n_overlay_png "${VITA2NATIVE_OVERLAY_PNG}" ABSOLUTE
+                           BASE_DIR "${CMAKE_SOURCE_DIR}")
+    if(NOT EXISTS "${_v2n_overlay_png}")
+        message(FATAL_ERROR "Overlay PNG not found: ${_v2n_overlay_png}")
+    endif()
+    list(APPEND _v2n_overlay_args --png "${_v2n_overlay_png}")
+    list(APPEND _v2n_overlay_deps "${_v2n_overlay_png}")
+endif()
+add_custom_command(OUTPUT "${VITA2NATIVE_OVERLAY_HEADER}"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/embed-overlay.py"
+            "${VITA2NATIVE_OVERLAY_HEADER}" ${_v2n_overlay_args}
+    DEPENDS ${_v2n_overlay_deps}
+    VERBATIM)
+
 set(VITA2NATIVE_HOST_GFX_SOURCES
     source/frame_profile.c
     source/host/host_gfx.c
     source/host/host_gfx_gl.c
+    source/host/host_overlay_image.c
+    "${VITA2NATIVE_OVERLAY_HEADER}"
     source/host/host_kms_present.c
     source/host/host_gfx_null.c
 )

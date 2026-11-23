@@ -33,6 +33,8 @@ function(vita2native_add_smoke name)
     target_include_directories(${name} PRIVATE
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/external/vita-headers/include
+        ${CMAKE_SOURCE_DIR}/external/Vita3K/external/stb
+        "${CMAKE_BINARY_DIR}/generated"
         ${SMOKE_INCLUDES}
     )
     target_compile_definitions(${name} PRIVATE _GNU_SOURCE=1 ${SMOKE_DEFINES})
@@ -348,6 +350,9 @@ vita2native_add_smoke(egl_window_smoke
     SOURCES tests/egl_window_smoke.c ${VITA2NATIVE_HOST_GFX_SOURCES}
     INCLUDES source/host external/khronos/include
     LIBS ${CMAKE_DL_LIBS} m)
+if(VITA2NATIVE_OVERLAY_PNG)
+    target_compile_definitions(egl_window_smoke PRIVATE V2N_TEST_CUSTOM_OVERLAY=1)
+endif()
 
 vita2native_add_smoke(display_egl_smoke
     SOURCES

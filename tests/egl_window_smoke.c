@@ -123,6 +123,47 @@ static uint32_t x11_pixel(const XImagePrefix *image, int x, int y)
     return 0;
 }
 
+/* V2N_TEST_OVERLAY_FIXTURE is used with the build-time 8x4 fixture; otherwise
+ * the default generated blue-gray border is expected. */
+static bool border_matches(const XImagePrefix *image)
+{
+    if (getenv("V2N_TEST_OVERLAY_FIXTURE")) {
+        const int samples[][5] = {
+            {160, 392, 255, 0, 0}, {480, 392, 0, 255, 0},
+            {160, 450, 0, 0, 255}, {480, 450, 21, 33, 48},
+        };
+        for (size_t i = 0; i < sizeof(samples) / sizeof(samples[0]); ++i) {
+            uint32_t pixel = x11_pixel(image, samples[i][0], samples[i][1]);
+            unsigned r = extract_component(pixel, image->red_mask);
+            unsigned g = extract_component(pixel, image->green_mask);
+            unsigned b = extract_component(pixel, image->blue_mask);
+            if (abs((int)r - samples[i][2]) > 2 || abs((int)g - samples[i][3]) > 2 ||
+                abs((int)b - samples[i][4]) > 2) {
+                fprintf(stderr, "egl_window_smoke: custom border at %d,%d is %u,%u,%u\n",
+                        samples[i][0], samples[i][1], r, g, b);
+                return false;
+            }
+        }
+    } else {
+#ifdef V2N_TEST_CUSTOM_OVERLAY
+        /* Arbitrary custom artwork has no predetermined pixel colours. */
+        return true;
+#else
+        for (int y = 363; y <= 460; y += 97) {
+            uint32_t pixel = x11_pixel(image, 320, y);
+            unsigned r = extract_component(pixel, image->red_mask);
+            unsigned g = extract_component(pixel, image->green_mask);
+            unsigned b = extract_component(pixel, image->blue_mask);
+            if (!(r > 0 && g > r && b > g)) {
+                fprintf(stderr, "egl_window_smoke: border at y=%d is %u,%u,%u\n", y, r, g, b);
+                return false;
+            }
+        }
+#endif
+    }
+    return true;
+}
+
 static void put_u16(unsigned char *p, unsigned value)
 {
     p[0] = (unsigned char)value;
@@ -297,17 +338,10 @@ int main(int argc, char **argv)
         }
     }
 
-    /* The unused space begins immediately below the game and is textured. */
-    for (int y = 363; y <= 460; y += 97) {
-        red = extract_component(x11_pixel(image, 320, y), image->red_mask);
-        green = extract_component(x11_pixel(image, 320, y), image->green_mask);
-        blue = extract_component(x11_pixel(image, 320, y), image->blue_mask);
-        if (!(red > 0 && green > red && blue > green)) {
-            fprintf(stderr, "egl_window_smoke: border at y=%d is %u,%u,%u\n", y, red, green, blue);
-            x11.free_memory(image);
-            host_gpu_destroy(device);
-            goto done;
-        }
+    if (!border_matches(image)) {
+        x11.free_memory(image);
+        host_gpu_destroy(device);
+        goto done;
     }
     x11.free_memory(image);
 
@@ -381,18 +415,12 @@ int main(int argc, char **argv)
                 goto done;
             }
         }
-        for (int y = 363; y <= 460; y += 97) {
-            red = extract_component(x11_pixel(image, 320, y), image->red_mask);
-            green = extract_component(x11_pixel(image, 320, y), image->green_mask);
-            blue = extract_component(x11_pixel(image, 320, y), image->blue_mask);
-            if (!(red > 0 && green > red && blue > green)) {
-                fprintf(stderr, "egl_window_smoke: direct border at y=%d is %u,%u,%u\n", y, red, green, blue);
-                x11.free_memory(image);
-                del(1, &texture);
-                dlclose(gles);
-                host_gpu_destroy(device);
-                goto done;
-            }
+        if (!border_matches(image)) {
+            x11.free_memory(image);
+            del(1, &texture);
+            dlclose(gles);
+            host_gpu_destroy(device);
+            goto done;
         }
         x11.free_memory(image);
         del(1, &texture);

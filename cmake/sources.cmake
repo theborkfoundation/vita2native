@@ -103,6 +103,7 @@ target_include_directories(vita2native PRIVATE
     external/vita-headers/include
     external/faad2/include
     external/Vita3K/external/stb
+    "${CMAKE_BINARY_DIR}/generated"
     external/Vita3K/vita3k/renderer/include
     ${SDL2_INCLUDE_DIRS}
 )
