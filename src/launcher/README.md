@@ -6,7 +6,7 @@ The startup progress is simulated.
 
 ## Build
 
-Initialize the NanoVG submodule with `git submodule update --init --recursive`.
+Initialize the submodules with `git submodule update --init --recursive`.
 The launcher needs an OpenGL ES 2.0 context on Linux (OpenGL 3 on macOS).
 
 The primary target is 64-bit ARM Linux (aarch64). On the target, install SDL2,
@@ -41,12 +41,34 @@ were generated with OpenAI image generation for this launcher:
 
 ## Run and import
 
-Run the launcher from the directory where you want imported title folders:
+Run the launcher from the directory containing `launcher.toml`:
 
 ```sh
 cd ~/v2n
 ./v2n-launcher
 ```
+
+A configuration file is optional. Copy `launcher.toml.example` to
+`launcher.toml` and edit it to change the defaults:
+
+```toml
+[paths]
+extract = "./games"
+loader = "./v2n"
+
+[appearance]
+# logo = "./assets/logo.svg" # PNG and SVG are supported
+```
+
+Relative paths are resolved against the directory containing `launcher.toml`,
+or against the startup working directory when it is absent. `extract` is the
+directory for imported title-ID folders. It is created when an import begins.
+`loader` is retained for a future game-launching feature; the current mock games
+cannot be started. The optional logo replaces the built-in mark on the splash and
+header, retaining its aspect ratio. If it cannot be loaded, the launcher shows a
+warning and uses the built-in mark. LunaSVG supports many SVG features, though
+complex SVGs may not render identically to a browser. An invalid or unreadable
+configuration displays an error; correct the file and restart.
 
 Package, PFS and SELF extraction is linked into the launcher. Imports run in a
 background thread, which sends progress and completion through a bounded channel
@@ -55,12 +77,12 @@ needed at runtime. The ARM32 preset uses the locked sysroot's static libcrypto
 and zlib archives; native ARM64 builds use the development libraries installed
 on the build host.
 
-Select a `.pkg` and its `work.bin`. Imports run in a hidden staging directory
-in the current working directory and only move the completed title there after
-success. Existing title directories are never intentionally replaced. On failure
-or if the destination exists, the staging directory and `import.log` are kept
-for inspection. Pipeline diagnostics go to `import.log`; the underlying PFS
-engine also writes diagnostics to the application console.
+Select a `.pkg` and its `work.bin`. Imports use a hidden staging directory
+inside `extract` and move the completed title there only after success. Existing
+title directories are never intentionally replaced. On failure or if the
+destination exists, the staging directory and `import.log` are kept for
+inspection. Pipeline diagnostics go to `import.log`; the underlying PFS engine
+also writes diagnostics to the application console.
 
 ## Controls
 
@@ -77,6 +99,7 @@ mappings vary; a platform SDL game-controller mapping may be needed.
 ## Source layout
 
 - `main.cpp` owns the SDL window, graphics context and event loop.
+- `config.cpp` loads and validates `launcher.toml`; `logo.cpp` loads PNG and SVG artwork.
 - `state.h` and `state.cpp` define navigation, focus and picker state.
 - `input.cpp` maps keyboard, controller and joystick events to navigation actions.
 - `import.cpp` starts the import thread and receives its channel messages.

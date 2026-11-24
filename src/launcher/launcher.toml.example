@@ -1,0 +1,9 @@
+[paths]
+# Imported titles are saved as <extract>/<TITLE_ID>/.
+extract = "./games"
+# Reserved for future game launching.
+loader = "./v2n"
+
+[appearance]
+# Optional PNG or SVG, used in the splash screen and header.
+# logo = "./assets/logo.svg"

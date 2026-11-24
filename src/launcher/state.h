@@ -7,6 +7,7 @@
 #include <tuple>
 #include <vector>
 
+#include "config.h"
 #include "library.h"
 
 namespace launcher
@@ -56,10 +57,12 @@ struct PickerItem {
 class ImportWorker;
 
 struct State {
-    State();
+    State(Config config, std::string error);
     ~State();
     State(const State &) = delete;
     State &operator=(const State &) = delete;
+    Config config;
+    std::string config_error;
     bool running = true;
     bool picker = false;
     Screen screen = Screen::Home;

@@ -75,9 +75,10 @@ void save_snapshot(const char *path, int width, int height)
     fclose(file);
 }
 
-void run(SDL_Window *window)
+void run(SDL_Window *window, const ConfigResult &settings, const std::string &warning)
 {
-    State state;
+    State state(settings.config, settings.error);
+    state.message = warning;
     const char *capture = getenv("V2N_LAUNCHER_SCREENSHOT");
     if (capture)
         configure_snapshot(state);
@@ -133,6 +134,9 @@ void run(SDL_Window *window)
 
 int main(int, char **)
 {
+    const launcher::ConfigResult settings = launcher::load_config();
+    if (!settings.error.empty())
+        fprintf(stderr, "%s\n", settings.error.c_str());
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK | SDL_INIT_TIMER) <
         0) {
         fprintf(stderr, "SDL: %s\n", SDL_GetError());
@@ -156,11 +160,13 @@ int main(int, char **)
     }
     SDL_GL_SetSwapInterval(1);
     int result = 0;
-    if (!launcher::ui::initialize()) {
+    std::string logo_warning;
+    if (!launcher::ui::initialize(settings.error.empty() ? settings.config.logo_path :
+                                                          std::filesystem::path{}, logo_warning)) {
         fprintf(stderr, "Failed to initialize NanoVG or font\n");
         result = 1;
     } else {
-        run(window);
+        run(window, settings, logo_warning);
         launcher::ui::shutdown();
     }
     SDL_GL_DeleteContext(context);

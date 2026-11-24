@@ -1,20 +1,48 @@
 #include "state.h"
 #include "extract.h"
 
+#include <cerrno>
 #include <condition_variable>
+#include <fcntl.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <exception>
 #include <mutex>
 #include <thread>
 #include <utility>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#ifndef RENAME_NOREPLACE
+#define RENAME_NOREPLACE (1 << 0)
+#endif
+#elif defined(__APPLE__)
+#include <sys/stdio.h>
+#endif
 
 namespace launcher
 {
 namespace
 {
+// Staging and the destination share a directory/filesystem. Never replace an
+// existing title, even if it appears after the import begins.
+int move_title_no_replace(const fs::path &from, const fs::path &to)
+{
+#ifdef __linux__
+    return static_cast<int>(syscall(SYS_renameat2, AT_FDCWD, from.c_str(), AT_FDCWD,
+                                    to.c_str(), RENAME_NOREPLACE));
+#elif defined(__APPLE__)
+    return renamex_np(from.c_str(), to.c_str(), RENAME_EXCL);
+#else
+    (void)from;
+    (void)to;
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
+
 struct ImportEvent {
     enum class Kind { Progress, Finished } kind;
     std::string text;
@@ -110,7 +138,10 @@ class ImportWorker {
     std::thread thread_;
 };
 
-State::State() = default;
+State::State(Config settings, std::string error)
+    : config(std::move(settings)), config_error(std::move(error))
+{
+}
 State::~State() = default;
 
 void State::start_import()
@@ -121,7 +152,13 @@ void State::start_import()
         message = "Select a package and work.bin first.";
         return;
     }
-    std::string temp = (fs::current_path() / ".v2n-import-XXXXXX").string();
+    std::error_code ec;
+    fs::create_directories(config.extract_path, ec);
+    if (ec) {
+        message = "Could not create games directory.";
+        return;
+    }
+    std::string temp = (config.extract_path / ".v2n-import-XXXXXX").string();
     std::vector<char> buf(temp.begin(), temp.end());
     buf.push_back(0);
     char *p = mkdtemp(buf.data());
@@ -153,7 +190,7 @@ void State::poll()
         worker.reset(); // Joins the finished thread before its channel is destroyed.
         if (event.result != 0) {
             message = event.result < 0 ? "Could not create import log."
-                                       : "Import failed. Log: " + stage.filename().string() + "/import.log";
+                                       : "Import failed. Log: " + (stage / "import.log").string();
             return;
         }
         std::error_code ec;
@@ -168,14 +205,15 @@ void State::poll()
             message = "Import output invalid. See staging folder.";
             return;
         }
-        fs::path dest = fs::current_path() / outputs[0].filename();
-        if (fs::exists(dest, ec) || ec) {
-            message = "Title exists. Saved in " + stage.filename().string();
-            return;
-        }
-        fs::rename(outputs[0], dest, ec);
-        if (ec) {
-            message = "Could not move title. See staging folder.";
+        fs::path dest = config.extract_path / outputs[0].filename();
+        if (move_title_no_replace(outputs[0], dest) != 0) {
+            if (errno == EEXIST || errno == ENOTEMPTY)
+                message = "Title exists. Saved in " + stage.string();
+            else {
+                fprintf(stderr, "Could not move title from %s to %s: %s\n", stage.string().c_str(),
+                        dest.string().c_str(), std::strerror(errno));
+                message = "Could not move title. Saved in " + stage.string();
+            }
             return;
         }
         fs::remove_all(stage, ec);

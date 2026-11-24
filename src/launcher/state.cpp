@@ -194,6 +194,11 @@ void State::handle_import(Action action)
 
 void State::action(Action action)
 {
+    if (!config_error.empty()) {
+        if (action == Action::Back || action == Action::Select)
+            running = false;
+        return;
+    }
     if (import_running()) {
         if (action == Action::Back)
             message = "Import is running; please wait.";

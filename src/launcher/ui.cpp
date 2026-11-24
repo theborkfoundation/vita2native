@@ -1,6 +1,7 @@
 #define GL_SILENCE_DEPRECATION
 #include "ui.h"
 #include "nanovg.h"
+#include "logo.h"
 #include "state.h"
 #ifdef __APPLE__
 #include <OpenGL/gl3.h>
@@ -24,8 +25,10 @@ namespace launcher::ui
 {
 static NVGcontext *vg;
 static int artwork[game_count] = {};
+static int logo_image;
 
-bool initialize()
+
+bool initialize(const std::filesystem::path &logo_path, std::string &warning)
 {
 #ifdef __APPLE__
     vg = nvgCreateGL3(NVG_ANTIALIAS | NVG_STENCIL_STROKES);
@@ -38,6 +41,17 @@ bool initialize()
         nvgCreateFontMem(vg, "inter-bold", inter_bold, sizeof(inter_bold), 0) < 0) {
         shutdown();
         return false;
+    }
+    if (!logo_path.empty()) {
+        try {
+            logo_image = load_logo(vg, logo_path);
+        } catch (const std::exception &error) {
+            fprintf(stderr, "Could not load logo %s: %s\n", logo_path.string().c_str(), error.what());
+        }
+        if (!logo_image) {
+            fprintf(stderr, "Could not load PNG or SVG logo: %s\n", logo_path.string().c_str());
+            warning = "Could not load logo; using the built-in logo.";
+        }
     }
     unsigned char *covers[] = { cover_0, cover_1, cover_2, cover_3 };
     int sizes[] = { sizeof(cover_0), sizeof(cover_1), sizeof(cover_2), sizeof(cover_3) };
@@ -52,6 +66,10 @@ void shutdown()
 {
     if (!vg)
         return;
+    if (logo_image) {
+        nvgDeleteImage(vg, logo_image);
+        logo_image = 0;
+    }
 #ifdef __APPLE__
     nvgDeleteGL3(vg);
 #else
@@ -115,6 +133,20 @@ static void centered(float x, float y, const char *s, float size, NVGcolor c, bo
 }
 static void brand(float x, float y, float size)
 {
+    if (logo_image) {
+        int width = 0, height = 0;
+        nvgImageSize(vg, logo_image, &width, &height);
+        if (width > 0 && height > 0) {
+            float scale = std::min(size / width, size / height);
+            float w = width * scale, h = height * scale;
+            float left = x + (size - w) / 2, top = y + (size - h) / 2;
+            nvgBeginPath(vg);
+            nvgRect(vg, left, top, w, h);
+            nvgFillPaint(vg, nvgImagePattern(vg, left, top, w, h, 0, logo_image, 1));
+            nvgFill(vg);
+            return;
+        }
+    }
     outline(x, y, size, size, 5, rgba(238, 246, 250, 220), 1.2);
     nvgBeginPath(vg);
     nvgMoveTo(vg, x + size * .20f, y + size * .27f);
@@ -434,7 +466,7 @@ static void draw_import(const State &a)
     nvgGlobalAlpha(vg, details);
     nvgTranslate(vg, 0, 10 * (1 - details));
     label(26, 297, "IMPORT LOCATION", 10, rgba(155, 179, 188), true);
-    label(26, 315, fs::current_path().string(), 11, rgba(224, 235, 237), false, 395);
+    label(26, 315, a.config.extract_path.string(), 11, rgba(224, 235, 237), false, 395);
     rect(453, 304, 162, 40,
          a.import_focus == ImportFocus::Start ? rgba(225, 237, 239) : rgba(92, 115, 124), 5);
     centered(534, 324, a.import_running() ? "IMPORTING..." : "IMPORT GAME", 11,
@@ -443,7 +475,7 @@ static void draw_import(const State &a)
     label(39, 373, a.message.empty() ? "Your files will be prepared for vita2native." : a.message,
           11, rgba(199, 218, 224), false, 560);
     if (a.message.empty())
-        label(39, 391, "Your title is saved in the current directory.", 10, rgba(143, 168, 178));
+        label(39, 391, "Your title is saved in the import location above.", 10, rgba(143, 168, 178));
     nvgRestore(vg);
 }
 static void draw_picker(const State &a)
@@ -478,6 +510,22 @@ static void draw_picker(const State &a)
 }
 void draw(const State &a)
 {
+    if (!a.config_error.empty()) {
+        rect(0, 0, 640, 480, rgba(10, 19, 27));
+        gradient(0, 0, 640, 480, rgba(43, 64, 73), rgba(7, 13, 20));
+        label(32, 72, "Configuration error", 22, rgba(248, 251, 253), true);
+        nvgFontFace(vg, "inter");
+        nvgFontSize(vg, 14);
+        nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+        nvgFillColor(vg, rgba(220, 231, 235));
+        nvgSave(vg);
+        nvgIntersectScissor(vg, 32, 120, 576, 250);
+        nvgTextBox(vg, 32, 120, 576, a.config_error.c_str(), nullptr);
+        nvgRestore(vg);
+        label(32, 404, "Fix launcher.toml and restart.", 12, rgba(174, 193, 201));
+        label(32, 446, "A / B  EXIT", 11, rgba(229, 243, 245), true);
+        return;
+    }
     Uint32 elapsed = SDL_GetTicks() - a.start;
     if (elapsed < splash_duration) {
         splash(elapsed);
