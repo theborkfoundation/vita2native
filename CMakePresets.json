@@ -13,7 +13,7 @@
             "hidden": false,
             "generator": "Ninja",
             "binaryDir": "${sourceDir}/build/release",
-            "toolchainFile": "${sourceDir}/cmake/toolchains/zig-arm.cmake",
+            "toolchainFile": "${sourceDir}/cmake/toolchains/zig-armhf.cmake",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "RelWithDebInfo",
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
@@ -27,7 +27,7 @@
             "hidden": false,
             "generator": "Ninja",
             "binaryDir": "${sourceDir}/build/debug",
-            "toolchainFile": "${sourceDir}/cmake/toolchains/zig-arm.cmake",
+            "toolchainFile": "${sourceDir}/cmake/toolchains/zig-armhf.cmake",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
@@ -41,7 +41,7 @@
             "hidden": false,
             "generator": "Ninja",
             "binaryDir": "${sourceDir}/build/minsize",
-            "toolchainFile": "${sourceDir}/cmake/toolchains/zig-arm.cmake",
+            "toolchainFile": "${sourceDir}/cmake/toolchains/zig-armhf.cmake",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "MinSizeRel",
                 "VITA2NATIVE_NO_BACKTRACE_SYMBOLS": "ON",

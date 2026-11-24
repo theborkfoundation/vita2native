@@ -11,7 +11,7 @@ working tree. What the emulator supports today is in `README.md`.
 ## Build
 
 ```sh
-tools/zig-toolchain.sh     # once; writes wrappers into build/toolchain/
+git submodule update --init --recursive   # once: zig-cross and the vendored libs
 tools/debian-sysroot.py    # once: the armhf sysroot
 cmake --preset release
 cmake --build --preset release
@@ -23,6 +23,15 @@ The artifact is `build/release/vita2native`. For on-device debugging use
 Cross builds link the target's SDL2 from `build/sysroot-armhf`, pinned by
 `tools/sysroots/armhf.lock`. `tools/debian-sysroot.py --verify` checks the tree
 against its lock.
+
+Both targets share one toolchain mechanism: `cmake/toolchains/zig-armhf.cmake`
+and `zig-arm64.cmake` include `external/zig-cross/cmake/zig-toolchain.cmake`,
+which sets the Zig wrappers and `CMAKE_SYSTEM_*`. Only `ZIG_TARGET`, the sysroot
+and the multiarch triplet differ. Note that Zig resolves `-L` relative to
+`--sysroot` but `-I` absolutely, so the two files differ on `CMAKE_SYSROOT_LINK`:
+the arm64 build clears it because its pkg-config paths are absolute, while the
+armhf build keeps it because `cmake/deps.cmake` leaves `PKG_CONFIG_SYSROOT_DIR`
+unset and passes sysroot-relative `-L`.
 
 The launcher under `src/launcher` is its own ARM64 project. It cross-builds from
 macOS with the `external/zig-cross` submodule and a separate bookworm/arm64

@@ -10,11 +10,12 @@ CPU, which is why an ARMv7-A armhf userland is required.
 
 ## Building
 
-Needs CMake, Ninja, pkg-config and [Zig](https://ziglang.org). The presets
-cross-compile with `zig cc`, so no system cross toolchain is needed.
+Needs CMake, Ninja, pkg-config, [Zig](https://ziglang.org) and the submodules.
+The presets cross-compile through [zig-cross](external/zig-cross) and `zig cc`,
+so no system cross toolchain is needed.
 
 ```sh
-tools/zig-toolchain.sh     # once
+git submodule update --init --recursive
 tools/debian-sysroot.py    # populate or update the locked armhf sysroot
 cmake --preset release
 cmake --build --preset release
@@ -164,8 +165,6 @@ way, as `<frame>:<x>/<y>`.
 
 In `tools/`:
 
-- `zig-toolchain.sh` — writes the `zig-arm-*` compiler wrappers into
-  `build/toolchain/`.
 - `debian-sysroot.py` — populates `build/sysroot-armhf` from Debian, pinned by
   `sysroots/armhf.lock` so a point release cannot change what gets linked.
 - `v2n-extract` — turns a `.pkg` plus its `work.bin` license into a runnable
