@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """Populate a cross-compilation sysroot from Debian .deb packages.
 
-The devices run Debian trixie/armhf, so most system libraries the cross build
-links against come from that suite. Static OpenSSL comes from bookworm for
-compatibility with the launcher’s older ARM libc target. This tool resolves a dependency
+The runtime uses Debian trixie/armhf. The ARM64 launcher uses a separate
+bookworm/arm64 sysroot for compatibility with Linux glibc 2.36 and newer.
+Static OpenSSL for the armhf build comes from bookworm. This tool resolves a dependency
 closure from the archive index, downloads the .debs into a cache, and unpacks
 their payloads into a sysroot. Nothing runs package maintainer scripts: a
 sysroot only needs headers, static archives and shared objects.
 
-    tools/debian-sysroot.py            # armhf, the only target
-    tools/debian-sysroot.py --verify   # compare the tree with its lock
-    tools/debian-sysroot.py --update-lock   # move to current versions
+    tools/debian-sysroot.py                    # armhf runtime sysroot
+    tools/debian-sysroot.py --arch arm64       # arm64 launcher sysroot
+    tools/debian-sysroot.py --verify           # compare the tree with its lock
+    tools/debian-sysroot.py --arch arm64 --update-lock
 
-The target gets build/sysroot-armhf, and the resolved package list is recorded in
-tools/sysroots/armhf.lock. Later runs resolve against that lock, so a Debian
+Each target gets build/sysroot-<arch>, with its packages pinned in
+tools/sysroots/<arch>.lock. Later runs resolve against that lock, so a Debian
 point release cannot silently change what the build links; --update-lock is the
 deliberate way to move. The CMake preset finds the tree by default and refuses to
 configure without one.
@@ -36,11 +37,7 @@ import urllib.request
 
 MIRROR = "https://deb.debian.org/debian"
 
-# The only architecture this project builds for. Kept as a name rather than a
-# flag: a sysroot for anything else would be a tree no preset consumes, and the
-# layout below (build/sysroot-<arch>, tools/sysroots/<arch>.lock) still reads
-# cleanly against it.
-ARCH = "armhf"
+DEFAULT_ARCH = "armhf"
 
 # SDL2 and the libraries its headers reference. libsdl2-dev's own Depends pull
 # in the rest (asound, dbus, drm, egl, gbm, gl, gles, ibus, pulse, samplerate),
@@ -286,7 +283,7 @@ def pkgconfig_paths(dest, arch):
 
 
 def populate(args, root):
-    arch = ARCH
+    arch = args.arch
     dest = os.path.abspath(args.dest or os.path.join(root, "build", "sysroot-" + arch))
     cache = os.path.abspath(args.cache or os.path.join(root, "build", "debs-" + arch))
     seeds = [name.strip() for name in args.packages.split(",") if name.strip()]
@@ -366,7 +363,10 @@ def populate(args, root):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--suite", default="trixie", help="Debian suite (default: trixie)")
+    parser.add_argument("--arch", choices=("armhf", "arm64"), default=DEFAULT_ARCH,
+                        help="Debian architecture (default: armhf)")
+    parser.add_argument("--suite", default=None,
+                        help="Debian suite (default: trixie for armhf, bookworm for arm64)")
     parser.add_argument("--components", default="main", help="comma-separated archive components")
     parser.add_argument(
         "--dest", default=None, help="sysroot directory (default: build/sysroot-<arch>)"
@@ -395,9 +395,11 @@ def main():
         "--print-pkgconfig", action="store_true", help="print the pkg-config environment and exit"
     )
     args = parser.parse_args()
+    if args.suite is None:
+        args.suite = "bookworm" if args.arch == "arm64" else "trixie"
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    arch = ARCH
+    arch = args.arch
     dest = os.path.abspath(args.dest or os.path.join(root, "build", "sysroot-" + arch))
 
     if args.print_pkgconfig:
@@ -412,7 +414,10 @@ def main():
         return 0
 
     print()
-    print("configure against it with `cmake --preset release`.")
+    if arch == "armhf":
+        print("configure against it with `cmake --preset release`.")
+    else:
+        print("configure with `cmake -S src/launcher --preset arm64-cross`.")
     return 0
 
 

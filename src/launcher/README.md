@@ -21,6 +21,26 @@ cmake --build build/launcher-arm64
 The resulting executable is `build/launcher-arm64/v2n-launcher`. The same
 standalone build also works natively on macOS, using a separate build directory.
 
+## Cross-build from macOS
+
+`CMakePresets.json` here has an `arm64-cross` preset that needs no ARM host and
+no system cross toolchain. It uses the `external/zig-cross` submodule and a
+bookworm/arm64 Debian sysroot:
+
+```sh
+tools/debian-sysroot.py --arch arm64   # populate build/sysroot-arm64; --verify checks it
+cmake -S src/launcher --preset arm64-cross
+cmake --build build/launcher-arm64-cross
+```
+
+The result is `build/launcher-arm64-cross/v2n-launcher`, an aarch64 ELF targeting
+glibc 2.36. The preset links with `-s`, because `zig cc` emits DWARF even at
+`-O3`; stripping takes the binary from ~26 MB to ~6 MB. The ARM32 runtime sysroot
+is separate and untouched.
+
+For a symbolized build to debug on a target, configure with
+`-DCMAKE_EXE_LINKER_FLAGS=` and a separate build directory.
+
 The repository's `release` preset targets 32-bit ARM for the vita2native
 runtime. It can also build a 32-bit launcher for compatible systems, but it is
 not the launcher's primary target:

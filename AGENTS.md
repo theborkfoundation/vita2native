@@ -24,6 +24,23 @@ Cross builds link the target's SDL2 from `build/sysroot-armhf`, pinned by
 `tools/sysroots/armhf.lock`. `tools/debian-sysroot.py --verify` checks the tree
 against its lock.
 
+The launcher under `src/launcher` is its own ARM64 project. It cross-builds from
+macOS with the `external/zig-cross` submodule and a separate bookworm/arm64
+sysroot, leaving the armhf one alone:
+
+```sh
+tools/debian-sysroot.py --arch arm64      # once: build/sysroot-arm64
+cmake -S src/launcher --preset arm64-cross
+cmake --build build/launcher-arm64-cross
+```
+
+The artifact is `build/launcher-arm64-cross/v2n-launcher`, an aarch64 ELF for
+glibc 2.36. The preset links with `-s`: `zig cc` emits DWARF even at `-O3`, and
+stripping takes it from ~26 MB to ~6 MB, so a symbolized build needs a separate
+directory and an empty `CMAKE_EXE_LINKER_FLAGS`. The `vm` bed runs aarch64
+natively; it has no display, so use `SDL_VIDEODRIVER=offscreen` for a load check
+and a display-backed bed for GL.
+
 ## Staging the binary
 
 **Copy it as `v2n-arm`, into `~/v2n/` on the test bed:**
