@@ -53,7 +53,7 @@ A configuration file is optional. Copy `launcher.toml.example` to
 
 ```toml
 [paths]
-extract = "./games"
+games = "./games"
 loader = "./v2n"
 
 [appearance]
@@ -61,8 +61,10 @@ loader = "./v2n"
 ```
 
 Relative paths are resolved against the directory containing `launcher.toml`,
-or against the startup working directory when it is absent. `extract` is the
-directory for imported title-ID folders. It is created when an import begins.
+or against the startup working directory when it is absent. `games` is the
+directory for imported title-ID folders and will also be used for game scanning.
+It is created when an import begins. If you used the earlier `paths.extract`
+key, rename it to `paths.games`.
 `loader` is retained for a future game-launching feature; the current mock games
 cannot be started. The optional logo replaces the built-in mark on the splash and
 header, retaining its aspect ratio. If it cannot be loaded, the launcher shows a
@@ -78,7 +80,7 @@ and zlib archives; native ARM64 builds use the development libraries installed
 on the build host.
 
 Select a `.pkg` and its `work.bin`. Imports use a hidden staging directory
-inside `extract` and move the completed title there only after success. Existing
+inside `games` and move the completed title there only after success. Existing
 title directories are never intentionally replaced. On failure or if the
 destination exists, the staging directory and `import.log` are kept for
 inspection. Pipeline diagnostics go to `import.log`; the underlying PFS engine

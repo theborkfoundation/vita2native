@@ -153,12 +153,12 @@ void State::start_import()
         return;
     }
     std::error_code ec;
-    fs::create_directories(config.extract_path, ec);
+    fs::create_directories(config.games_path, ec);
     if (ec) {
         message = "Could not create games directory.";
         return;
     }
-    std::string temp = (config.extract_path / ".v2n-import-XXXXXX").string();
+    std::string temp = (config.games_path / ".v2n-import-XXXXXX").string();
     std::vector<char> buf(temp.begin(), temp.end());
     buf.push_back(0);
     char *p = mkdtemp(buf.data());
@@ -205,7 +205,7 @@ void State::poll()
             message = "Import output invalid. See staging folder.";
             return;
         }
-        fs::path dest = config.extract_path / outputs[0].filename();
+        fs::path dest = config.games_path / outputs[0].filename();
         if (move_title_no_replace(outputs[0], dest) != 0) {
             if (errno == EEXIST || errno == ENOTEMPTY)
                 message = "Title exists. Saved in " + stage.string();

@@ -466,7 +466,7 @@ static void draw_import(const State &a)
     nvgGlobalAlpha(vg, details);
     nvgTranslate(vg, 0, 10 * (1 - details));
     label(26, 297, "IMPORT LOCATION", 10, rgba(155, 179, 188), true);
-    label(26, 315, a.config.extract_path.string(), 11, rgba(224, 235, 237), false, 395);
+    label(26, 315, a.config.games_path.string(), 11, rgba(224, 235, 237), false, 395);
     rect(453, 304, 162, 40,
          a.import_focus == ImportFocus::Start ? rgba(225, 237, 239) : rgba(92, 115, 124), 5);
     centered(534, 324, a.import_running() ? "IMPORTING..." : "IMPORT GAME", 11,

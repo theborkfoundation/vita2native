@@ -16,7 +16,7 @@ ConfigResult load_config()
         result.error = "Cannot determine the launcher directory: " + ec.message();
         return result;
     }
-    result.config.extract_path = (base / "games").lexically_normal();
+    result.config.games_path = (base / "games").lexically_normal();
     result.config.loader_path = (base / "v2n").lexically_normal();
     const fs::path path = base / "launcher.toml";
     const fs::file_status status = fs::symlink_status(path, ec);
@@ -56,7 +56,11 @@ ConfigResult load_config()
             dest = (base / fs::path(*value)).lexically_normal();
         };
         const auto *paths = section("paths");
-        read_path(paths, "paths", "extract", result.config.extract_path);
+        if (paths && paths->contains("extract")) {
+            result.error = "launcher.toml: paths.extract was renamed to paths.games.";
+            return result;
+        }
+        read_path(paths, "paths", "games", result.config.games_path);
         read_path(paths, "paths", "loader", result.config.loader_path);
         if (!result.error.empty())
             return result;

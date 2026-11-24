@@ -6,7 +6,7 @@
 namespace launcher
 {
 struct Config {
-    std::filesystem::path extract_path;
+    std::filesystem::path games_path;
     std::filesystem::path loader_path;
     std::filesystem::path logo_path;
 };

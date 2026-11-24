@@ -1,6 +1,6 @@
 [paths]
-# Imported titles are saved as <extract>/<TITLE_ID>/.
-extract = "./games"
+# Imported titles are saved as <games>/<TITLE_ID>/.
+games = "./games"
 # Reserved for future game launching.
 loader = "./v2n"
 
