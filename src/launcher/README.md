@@ -18,8 +18,21 @@ cmake -S src/launcher -B build/launcher-arm64 -DCMAKE_BUILD_TYPE=Release
 cmake --build build/launcher-arm64
 ```
 
-The resulting executable is `build/launcher-arm64/v2n-launcher`. The same
-standalone build also works natively on macOS, using a separate build directory.
+The resulting executable is `build/launcher-arm64/v2n-launcher`.
+
+## Native macOS build
+
+`CMakePresets.json` also has a `macos` preset, handy for working on the UI
+because it renders with real GL instead of the test beds' software rasteriser.
+SDL2 and OpenSSL 3 must be installed (`brew install sdl2 openssl@3`):
+
+```sh
+cmake -S src/launcher --preset macos
+cmake --build build/launcher-macos
+```
+
+The result is `build/launcher-macos/v2n-launcher`. Run it from a directory of its
+own: the launcher creates a `vita2native/` guest filesystem tree on startup.
 
 ## Cross-build from macOS
 

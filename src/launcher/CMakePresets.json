@@ -13,9 +13,20 @@
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "CMAKE_EXE_LINKER_FLAGS": "-s"
             }
+        },
+        {
+            "name": "macos",
+            "displayName": "macOS launcher (native)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../../build/launcher-macos",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            }
         }
     ],
     "buildPresets": [
-        { "name": "arm64-cross", "configurePreset": "arm64-cross" }
+        { "name": "arm64-cross", "configurePreset": "arm64-cross" },
+        { "name": "macos", "configurePreset": "macos" }
     ]
 }
