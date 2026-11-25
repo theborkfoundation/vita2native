@@ -119,16 +119,27 @@ struct ActionCard {
     lv_obj_t *border = nullptr;
 };
 
-struct ImportRow {
+struct ImportCard {
     lv_obj_t *root = nullptr;
     lv_obj_t *icon_box = nullptr;
     lv_obj_t *icon_label = nullptr;
     lv_obj_t *title = nullptr;
-    lv_obj_t *value = nullptr;
-    lv_obj_t *browse_btn = nullptr;
-    lv_obj_t *browse_label = nullptr;
+    lv_obj_t *subtitle = nullptr;
+    lv_obj_t *detail = nullptr;
+    lv_obj_t *badge = nullptr;
+    lv_obj_t *badge_label = nullptr;
     lv_obj_t *border = nullptr;
 };
+
+struct ImportHistoryRow {
+    lv_obj_t *root = nullptr;
+    lv_obj_t *channel_box = nullptr;
+    lv_obj_t *channel_label = nullptr;
+    lv_obj_t *title = nullptr;
+    lv_obj_t *status = nullptr;
+};
+
+constexpr int import_history_visible = 4;
 
 struct PickerRow {
     lv_obj_t *root = nullptr;
@@ -200,12 +211,12 @@ struct Widgets {
     lv_obj_t *import_layer = nullptr;
     lv_obj_t *import_heading = nullptr;
     lv_obj_t *import_subtitle = nullptr;
-    std::array<ImportRow, 2> import_rows;
+    std::array<ImportCard, 2> import_cards;
     lv_obj_t *import_details = nullptr;
-    lv_obj_t *import_btn = nullptr;
-    lv_obj_t *import_btn_label = nullptr;
-    lv_obj_t *import_status_primary = nullptr;
-    lv_obj_t *import_status_secondary = nullptr;
+    lv_obj_t *import_history_heading = nullptr;
+    lv_obj_t *import_history_count = nullptr;
+    lv_obj_t *import_history_empty = nullptr;
+    std::array<ImportHistoryRow, import_history_visible> import_history_rows;
 
     lv_obj_t *picker_layer = nullptr;
     lv_obj_t *picker_heading = nullptr;
@@ -255,11 +266,11 @@ std::string last_config_error;
 std::string last_header_text;
 int last_all_focus = -1;
 int all_scroll_row = 0;
-ImportFocus last_import_focus = ImportFocus::Package;
-std::string last_import_pkg;
-std::string last_import_lic;
-std::string last_import_msg;
+ImportFocus last_import_focus = ImportFocus::Local;
+bool last_web_running = false;
+std::string last_web_url;
 bool last_import_running = false;
+int last_import_history_rev = -1;
 PickerKind last_pick_kind = PickerKind::Package;
 std::string last_picker_dir;
 int last_picker_scroll = -1;
@@ -895,41 +906,65 @@ void create_ui_tree()
         make_label(ui_objs.import_layer, 25, 68, "Import a game", fonts.bold_24, rgb(248, 251, 253));
     ui_objs.import_subtitle =
         make_label(ui_objs.import_layer, 25, 99,
-                   "Select your package and its license to add a game.", fonts.reg_16,
+                   "Choose local files or start the web upload server.", fonts.reg_16,
                    rgb(174, 193, 201));
     for (int i = 0; i < 2; ++i) {
-        auto &row = ui_objs.import_rows[i];
-        const float y = 132 + i * 78;
-        row.root = make_box(ui_objs.import_layer, 25, y, 590, 68, rgb(24, 40, 51), 225, 5);
-        row.icon_box = make_box(row.root, 14, 15, 38, 38, rgb(255, 255, 255), 20, 4);
-        row.icon_label =
-            make_centered_label(row.icon_box, i == 0 ? "P" : "L", fonts.bold_20, rgb(226, 238, 240));
-        row.title = make_label(row.root, 66, 11, i == 0 ? "Game package" : "License file",
-                               fonts.bold_18, rgb(244, 249, 251));
-        row.value = make_label(row.root, 66, 37,
-                               i == 0 ? "Choose a .pkg file" : "Choose a work.bin file",
-                               fonts.reg_16, rgb(173, 194, 202), 390);
-        lv_obj_set_height(row.value, lv_font_get_line_height(fonts.reg_16));
-        lv_label_set_long_mode(row.value, LV_LABEL_LONG_MODE_DOTS);
-        row.browse_btn = make_box(row.root, 476, 17, 98, 34, rgb(255, 255, 255), 24, 4);
-        row.browse_label =
-            make_centered_label(row.browse_btn, "BROWSE", fonts.bold_14, rgb(240, 247, 249));
-        row.border = make_box(row.root, 0, 0, 590, 68, rgb(0, 0, 0), LV_OPA_TRANSP, 5);
-        lv_obj_set_style_border_width(row.border, sc_border(1), 0);
+        auto &card = ui_objs.import_cards[i];
+        const float x = 25 + i * 301;
+        card.root = make_box(ui_objs.import_layer, x, 132, 289, 112, rgb(24, 40, 51), 225, 7);
+        card.icon_box = make_box(card.root, 16, 18, 36, 36, rgb(255, 255, 255), 22, 6);
+        card.icon_label =
+            make_centered_label(card.icon_box, i == 0 ? "L" : "W", fonts.bold_18, rgb(226, 238, 240));
+        card.title = make_label(card.root, 64, 16, i == 0 ? "Local import" : "Web import",
+                                fonts.bold_18, rgb(244, 249, 251), 160);
+        card.subtitle = make_label(card.root, 64, 40,
+                                   i == 0 ? "Select .pkg and work.bin" : "Browser upload server",
+                                   fonts.reg_14, rgb(164, 188, 196), 210);
+        card.detail = make_label(card.root, 16, 76,
+                                 i == 0 ? "Browse local storage" : "Press Select to start",
+                                 fonts.reg_14, rgb(173, 194, 202), 257);
+        lv_obj_set_height(card.detail, lv_font_get_line_height(fonts.reg_14));
+        lv_label_set_long_mode(card.detail, LV_LABEL_LONG_MODE_DOTS);
+        if (i == 1) {
+            card.badge = make_box(card.root, 227, 18, 46, 22, rgb(255, 255, 255), 24, 11);
+            card.badge_label =
+                make_centered_label(card.badge, "OFF", fonts.bold_14, rgb(199, 218, 224));
+        }
+        card.border = make_box(card.root, 0, 0, 289, 112, rgb(0, 0, 0), LV_OPA_TRANSP, 7);
+        lv_obj_set_style_border_width(card.border, sc_border(1), 0);
     }
+
     ui_objs.import_details = lv_obj_create(ui_objs.import_layer);
-    init_clean_obj(ui_objs.import_details, 0, 294, 640, 144);
-    ui_objs.import_btn =
-        make_box(ui_objs.import_details, 25, 0, 590, 44, rgb(92, 115, 124), 255, 5);
-    ui_objs.import_btn_label =
-        make_centered_label(ui_objs.import_btn, "IMPORT GAME", fonts.bold_16, rgb(225, 236, 239));
-    lv_obj_t *status_box =
-        make_box(ui_objs.import_details, 25, 56, 590, 68, rgb(255, 255, 255), 12, 5);
-    ui_objs.import_status_primary =
-        make_label(status_box, 14, 9, "", fonts.reg_16, rgb(199, 218, 224), 562);
-    ui_objs.import_status_secondary =
-        make_label(status_box, 14, 38, "Your title will be added to your games library.",
-                   fonts.reg_14, rgb(143, 168, 178));
+    init_clean_obj(ui_objs.import_details, 0, 262, 640, 170);
+    ui_objs.import_history_heading = make_label(ui_objs.import_details, 25, 0, "IMPORT HISTORY",
+                                                fonts.bold_14, rgb(174, 192, 200));
+    ui_objs.import_history_count =
+        make_label(ui_objs.import_details, 0, 0, "0 ITEMS", fonts.bold_14, rgb(143, 168, 178));
+    lv_obj_align(ui_objs.import_history_count, LV_ALIGN_TOP_RIGHT, -sc(25), 0);
+
+    ui_objs.import_history_empty =
+        make_box(ui_objs.import_details, 25, 24, 590, 132, rgb(255, 255, 255), 12, 6);
+    make_label(ui_objs.import_history_empty, 16, 40, "No imports in this session yet.",
+               fonts.reg_16, rgb(199, 218, 224), 558);
+    make_label(ui_objs.import_history_empty, 16, 68,
+               "Use Local import or Web import above to add a game.", fonts.reg_14,
+               rgb(143, 168, 178), 558);
+
+    for (int i = 0; i < import_history_visible; ++i) {
+        auto &r = ui_objs.import_history_rows[i];
+        r.root = make_box(ui_objs.import_details, 25, 24 + i * 35, 590, 31, rgb(24, 40, 51), 190, 5);
+        r.channel_box = make_box(r.root, 10, 6, 50, 19, rgb(255, 255, 255), 24, 4);
+        r.channel_label =
+            make_centered_label(r.channel_box, "LOCAL", fonts.bold_14, rgb(225, 236, 239));
+        r.title = make_label(r.root, 70, 7, "", fonts.reg_14, rgb(238, 247, 249), 330);
+        lv_obj_set_height(r.title, lv_font_get_line_height(fonts.reg_14));
+        lv_label_set_long_mode(r.title, LV_LABEL_LONG_MODE_DOTS);
+        r.status = make_label(r.root, 408, 7, "", fonts.bold_14, rgb(174, 193, 201), 170);
+        lv_obj_set_height(r.status, lv_font_get_line_height(fonts.bold_14));
+        lv_label_set_long_mode(r.status, LV_LABEL_LONG_MODE_DOTS);
+        lv_obj_set_style_text_align(r.status, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_add_flag(r.root, LV_OBJ_FLAG_HIDDEN);
+    }
     lv_obj_add_flag(ui_objs.import_layer, LV_OBJ_FLAG_HIDDEN);
 
     // Picker screen
@@ -1297,56 +1332,91 @@ void sync_import(const State &a, Uint32 now)
     set_opa_if_changed(ui_objs.import_subtitle, opa_from_float(heading));
     set_pos_if_changed(ui_objs.import_subtitle, sc(25), sc(99.0f + head_off));
 
-    const std::string pkg_name = a.pkg.filename().string();
-    const std::string lic_name = a.license.filename().string();
     const bool running = a.import_running();
+    const bool web_on = a.web_server_running();
+    const std::string web_url = a.web_server_url();
+    const bool mode_entered = (last_mode != ViewMode::Import);
 
     for (int i = 0; i < 2; ++i) {
         const float show = entrance(a, now, 80 + i * 90);
-        const float y = 132 + i * 78 + 12.0f * (1.0f - show);
-        auto &row = ui_objs.import_rows[i];
-        set_pos_if_changed(row.root, sc(25), sc(y));
-        set_opa_if_changed(row.root, opa_from_float(show));
-        if (last_import_focus != a.import_focus || last_mode != ViewMode::Import) {
-            const bool focused =
-                (a.import_focus == (i == 0 ? ImportFocus::Package : ImportFocus::License));
-            lv_obj_set_style_border_color(row.border,
-                                          focused ? rgb(241, 248, 250) : rgb(119, 150, 162), 0);
-            lv_obj_set_style_border_opa(row.border, focused ? 255 : 90, 0);
-            lv_obj_set_style_border_width(row.border, sc_border(focused ? 2 : 1), 0);
+        const float x = 25 + i * 301;
+        const float y = 132 + 12.0f * (1.0f - show);
+        auto &card = ui_objs.import_cards[i];
+        set_pos_if_changed(card.root, sc(x), sc(y));
+        set_opa_if_changed(card.root, opa_from_float(show));
+
+        const bool focused = (a.import_focus == (i == 0 ? ImportFocus::Local : ImportFocus::Web));
+        const bool turned_on = (i == 1 && web_on);
+
+        if (last_import_focus != a.import_focus || last_web_running != web_on || mode_entered) {
+            lv_obj_set_style_bg_color(card.root,
+                                      turned_on ? rgb(20, 62, 72) : rgb(24, 40, 51), 0);
+            lv_obj_set_style_border_color(
+                card.border,
+                focused ? rgb(241, 248, 250)
+                        : (turned_on ? rgb(45, 212, 191) : rgb(119, 150, 162)),
+                0);
+            lv_obj_set_style_border_opa(card.border, focused ? 255 : (turned_on ? 200 : 90), 0);
+            lv_obj_set_style_border_width(card.border, sc_border(focused ? 2 : 1), 0);
         }
     }
-    if (last_import_pkg != pkg_name || last_mode != ViewMode::Import) {
-        lv_label_set_text(ui_objs.import_rows[0].value,
-                          pkg_name.empty() ? "Choose a .pkg file" : pkg_name.c_str());
-        last_import_pkg = pkg_name;
+
+    if (last_import_running != running || mode_entered) {
+        lv_label_set_text(ui_objs.import_cards[0].detail,
+                          running ? "Import in progress..." : "Browse local storage");
+        last_import_running = running;
     }
-    if (last_import_lic != lic_name || last_mode != ViewMode::Import) {
-        lv_label_set_text(ui_objs.import_rows[1].value,
-                          lic_name.empty() ? "Choose a work.bin file" : lic_name.c_str());
-        last_import_lic = lic_name;
+
+    if (last_web_running != web_on || last_web_url != web_url || mode_entered) {
+        auto &web_card = ui_objs.import_cards[1];
+        lv_label_set_text(web_card.subtitle,
+                          web_on ? "Server listening" : "Browser upload server");
+        lv_label_set_text(web_card.detail,
+                          web_on && !web_url.empty() ? web_url.c_str() : "Press Select to start");
+        lv_obj_set_style_text_color(web_card.detail,
+                                    web_on ? rgb(94, 234, 212) : rgb(173, 194, 202), 0);
+        lv_obj_set_style_bg_color(web_card.badge,
+                                  web_on ? rgb(45, 212, 191) : rgb(255, 255, 255), 0);
+        lv_obj_set_style_bg_opa(web_card.badge, web_on ? 255 : 24, 0);
+        lv_label_set_text(web_card.badge_label, web_on ? "ON" : "OFF");
+        lv_obj_set_style_text_color(web_card.badge_label,
+                                    web_on ? rgb(7, 34, 31) : rgb(199, 218, 224), 0);
+        last_web_running = web_on;
+        last_web_url = web_url;
     }
 
     const float details = entrance(a, now, 260);
     set_opa_if_changed(ui_objs.import_details, opa_from_float(details));
-    set_pos_if_changed(ui_objs.import_details, 0, sc(294.0f + 10.0f * (1.0f - details)));
+    set_pos_if_changed(ui_objs.import_details, 0, sc(262.0f + 10.0f * (1.0f - details)));
 
-    if (last_import_focus != a.import_focus || last_import_running != running ||
-        last_mode != ViewMode::Import) {
-        const bool btn_focused = (a.import_focus == ImportFocus::Start);
-        lv_obj_set_style_bg_color(ui_objs.import_btn,
-                                  btn_focused ? rgb(225, 237, 239) : rgb(92, 115, 124), 0);
-        lv_obj_set_style_text_color(ui_objs.import_btn_label,
-                                    btn_focused ? rgb(14, 28, 35) : rgb(225, 236, 239), 0);
-        lv_label_set_text(ui_objs.import_btn_label, running ? "IMPORTING..." : "IMPORT GAME");
-        last_import_running = running;
-    }
-    if (last_import_msg != a.message || last_mode != ViewMode::Import) {
-        lv_label_set_text(ui_objs.import_status_primary,
-                          a.message.empty() ? "Your files will be prepared for vita2native."
-                                            : a.message.c_str());
-        set_visible(ui_objs.import_status_secondary, a.message.empty());
-        last_import_msg = a.message;
+    if (last_import_history_rev != a.import_history_revision || mode_entered) {
+        const size_t total = a.import_history.size();
+        char count_buf[32];
+        std::snprintf(count_buf, sizeof(count_buf), "%zu %s", total,
+                      total == 1 ? "ITEM" : "ITEMS");
+        lv_label_set_text(ui_objs.import_history_count, count_buf);
+        set_visible(ui_objs.import_history_empty, total == 0);
+
+        for (int i = 0; i < import_history_visible; ++i) {
+            auto &r = ui_objs.import_history_rows[i];
+            if (static_cast<size_t>(i) >= total) {
+                set_visible(r.root, false);
+                continue;
+            }
+            set_visible(r.root, true);
+            const auto &entry = a.import_history[i];
+            lv_label_set_text(r.channel_label,
+                              entry.channel == ImportChannel::Local ? "LOCAL" : "WEB");
+            lv_label_set_text(r.title, entry.title.c_str());
+            lv_label_set_text(r.status, entry.status_text.c_str());
+            lv_color_t st_color = rgb(251, 191, 36);
+            if (entry.status == ImportStatus::Success)
+                st_color = rgb(74, 222, 128);
+            else if (entry.status == ImportStatus::Failed)
+                st_color = rgb(248, 113, 113);
+            lv_obj_set_style_text_color(r.status, st_color, 0);
+        }
+        last_import_history_rev = a.import_history_revision;
     }
     last_import_focus = a.import_focus;
 }

@@ -40,8 +40,10 @@ void State::refresh_games()
 
 void State::change_screen(Screen next)
 {
+    if (next != Screen::Import)
+        stop_web_server();
     screen = next;
-    import_focus = ImportFocus::Package;
+    import_focus = ImportFocus::Local;
     message.clear();
     screen_start = SDL_GetTicks();
 }
@@ -205,11 +207,15 @@ void State::handle_picker(Action action)
         if (item.dir) {
             dir = item.path;
             scan();
+        } else if (pick_kind == PickerKind::Package) {
+            pkg = item.path;
+            browse(PickerKind::License);
         } else {
-            (pick_kind == PickerKind::Package ? pkg : license) = item.path;
+            license = item.path;
             picker = false;
             screen_start = SDL_GetTicks();
             message.clear();
+            start_import();
         }
     }
     if (pick_index < scroll)
@@ -274,23 +280,22 @@ void State::handle_all_games(Action action)
 
 void State::handle_import(Action action)
 {
-    if (action == Action::Up) {
-        if (import_focus == ImportFocus::Start)
-            import_focus = ImportFocus::License;
-        else if (import_focus == ImportFocus::License)
-            import_focus = ImportFocus::Package;
-    } else if (action == Action::Down) {
-        if (import_focus == ImportFocus::Package)
-            import_focus = ImportFocus::License;
-        else if (import_focus == ImportFocus::License)
-            import_focus = ImportFocus::Start;
+    if (action == Action::Left) {
+        import_focus = ImportFocus::Local;
+    } else if (action == Action::Right) {
+        import_focus = ImportFocus::Web;
     } else if (action == Action::Select) {
-        if (import_focus == ImportFocus::Package)
+        if (import_focus == ImportFocus::Local) {
+            if (import_running()) {
+                show_toast("Import is running; please wait.", ToastKind::Warning);
+                return;
+            }
+            pkg.clear();
+            license.clear();
             browse(PickerKind::Package);
-        else if (import_focus == ImportFocus::License)
-            browse(PickerKind::License);
-        else
-            start_import();
+        } else {
+            toggle_web_server();
+        }
     }
 }
 

@@ -1,9 +1,12 @@
 #pragma once
 
 #include <SDL.h>
+#include <cstdint>
 #include <filesystem>
-#include <string>
 #include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -30,9 +33,24 @@ enum class PickerKind {
     License
 };
 enum class ImportFocus {
-    Package,
-    License,
-    Start
+    Local,
+    Web
+};
+enum class ImportChannel {
+    Local,
+    Web
+};
+enum class ImportStatus {
+    Running,
+    Success,
+    Failed
+};
+struct ImportHistoryEntry {
+    uint64_t id = 0;
+    ImportChannel channel = ImportChannel::Local;
+    std::string title;
+    std::string status_text;
+    ImportStatus status = ImportStatus::Running;
 };
 enum class GameInfoFocus {
     Play,
@@ -70,6 +88,14 @@ struct PickerItem {
 
 // All visible state lives here, so navigation can be exercised without a window.
 class ImportWorker;
+class WebServer;
+
+struct PendingWebImport {
+    fs::path pkg;
+    fs::path license;
+    fs::path upload_dir;
+    std::string display_name;
+};
 
 struct State {
     State(Config config, std::string error);
@@ -89,7 +115,7 @@ struct State {
     HomeFocus home_focus = HomeFocus::RecentGames;
     HomeFocus previous_home_focus = HomeFocus::RecentGames;
     PickerKind pick_kind = PickerKind::Package;
-    ImportFocus import_focus = ImportFocus::Package;
+    ImportFocus import_focus = ImportFocus::Local;
     GameInfoFocus info_focus = GameInfoFocus::Play;
     int selected = 0;
     int pick_index = 0;
@@ -114,13 +140,21 @@ struct State {
     fs::path license;
     fs::path dir = fs::current_path();
     fs::path stage;
+    fs::path upload_cleanup_dir;
     std::vector<PickerItem> items;
+    std::vector<ImportHistoryEntry> import_history;
+    int import_history_revision = 0;
+    uint64_t next_import_id = 1;
+    uint64_t active_import_id = 0;
     std::string message;
     std::string toast;
     ToastKind toast_kind = ToastKind::Info;
     Uint32 toast_start = 0;
     Uint32 toast_hide_start = 0;
     std::unique_ptr<ImportWorker> worker;
+    std::unique_ptr<WebServer> web_server;
+    mutable std::mutex web_mutex;
+    std::optional<PendingWebImport> pending_web_import;
     Uint32 start = SDL_GetTicks();
 
     int recent_count() const;
@@ -138,6 +172,10 @@ struct State {
     void scan();
     void browse(PickerKind kind);
     bool import_running() const { return worker != nullptr; }
+    bool web_server_running() const;
+    std::string web_server_url() const;
+    void toggle_web_server();
+    void stop_web_server();
     void start_import();
     void poll();
     void action(Action action);
@@ -149,10 +187,14 @@ struct State {
         return std::make_tuple(games_revision, screen, home_focus, all_focus, import_focus,
                                info_focus, info_game, screenshot_index, selected, picker,
                                confirm, pick_index, scroll, dir, pkg, license, message, toast,
-                               toast_kind, toast_hide_start != 0, import_running());
+                               toast_kind, toast_hide_start != 0, import_running(),
+                               import_history_revision, web_server_running(), web_server_url());
     }
 
   private:
+    void begin_import(const fs::path &pkg_path, const fs::path &lic_path, ImportChannel channel,
+                      std::string display_name, fs::path cleanup_dir = {});
+    std::string web_status_json() const;
     void handle_picker(Action action);
     void handle_home(Action action);
     void handle_all_games(Action action);

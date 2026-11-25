@@ -43,6 +43,9 @@ endfunction()
 embed_asset(Inter-Regular.ttf inter_font)
 embed_asset(Inter-SemiBold.ttf inter_bold)
 embed_asset(lucide.ttf lucide_font)
+embed_asset(web/index.html web_index_html)
+embed_asset(web/style.css web_style_css)
+embed_asset(web/app.js web_app_js)
 if(APPLE)
     enable_language(OBJCXX)
 endif()
@@ -54,6 +57,7 @@ add_executable(v2n-launcher
     state.cpp
     input.cpp
     import.cpp
+    web_server.cpp
     ui.cpp
     stb_impl.c
     ${EMBEDDED_ASSETS})

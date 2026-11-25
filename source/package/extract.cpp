@@ -70,23 +70,35 @@ static void decrypt_self_tree(const fs::path &root, const uint8_t klic[16], unsi
     std::error_code ec;
 
     for (const auto &item : fs::recursive_directory_iterator(root, ec)) {
-        std::vector<uint8_t> input;
-        std::ifstream file(item.path(), std::ios::binary);
-        std::vector<uint8_t> output;
-
-        if (!item.is_regular_file() || !file)
-            continue;
-        input.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
-        if (input.size() < 4 || memcmp(input.data(), kSelfMagic, 4) != 0)
+        if (!item.is_regular_file(ec))
             continue;
 
-        output = decrypt_fself(input, klic);
+        std::ifstream file(item.path(), std::ios::binary | std::ios::ate);
+        if (!file)
+            continue;
+        const std::streamoff size = file.tellg();
+        if (size < 4)
+            continue;
+
+        char magic[4];
+        file.seekg(0);
+        if (!file.read(magic, sizeof(magic)) || memcmp(magic, kSelfMagic, sizeof(magic)) != 0)
+            continue;
+
+        std::vector<uint8_t> input(static_cast<size_t>(size));
+        std::memcpy(input.data(), magic, sizeof(magic));
+        if (size > 4 &&
+            !file.read(reinterpret_cast<char *>(input.data() + 4), size - 4))
+            continue;
+
+        std::vector<uint8_t> output = decrypt_fself(input, klic);
         if (output.empty()) {
             fprintf(err, "package: could not decrypt %s\n",
                     item.path().lexically_relative(root).string().c_str());
             failed++;
             continue;
         }
+        file.close();
         std::ofstream out(item.path(), std::ios::binary | std::ios::trunc);
         out.write(reinterpret_cast<const char *>(output.data()), (std::streamsize)output.size());
         count++;

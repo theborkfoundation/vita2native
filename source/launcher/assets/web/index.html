@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>vita2native &mdash; Web Import</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="container">
+    <header class="header">
+      <div class="brand">
+        <span class="badge">vita2native</span>
+        <h1>Web Game Import</h1>
+      </div>
+      <p class="subtitle">Upload a PlayStation Vita <code>.pkg</code> package and its <code>work.bin</code> license directly to your device.</p>
+    </header>
+
+    <section class="card upload-card">
+      <form id="import-form">
+        <div class="drop-grid">
+          <label class="file-drop" id="pkg-drop" for="pkg-input">
+            <input type="file" id="pkg-input" name="pkg" accept=".pkg" required>
+            <span class="file-kind">PKG</span>
+            <span class="file-title">Game package</span>
+            <span class="file-meta" id="pkg-meta">Choose or drop a .pkg file</span>
+          </label>
+
+          <label class="file-drop" id="lic-drop" for="lic-input">
+            <input type="file" id="lic-input" name="license" accept=".bin" required>
+            <span class="file-kind">BIN</span>
+            <span class="file-title">License file</span>
+            <span class="file-meta" id="lic-meta">Choose or drop work.bin</span>
+          </label>
+        </div>
+
+        <div class="progress-wrap hidden" id="progress-wrap">
+          <div class="progress-head">
+            <span id="progress-label">Uploading...</span>
+            <span id="progress-pct">0%</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" id="progress-fill"></div>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button type="submit" id="submit-btn" disabled>Upload &amp; Import</button>
+          <span class="form-note" id="form-note">Select both files to begin.</span>
+        </div>
+      </form>
+    </section>
+
+    <section class="card history-card">
+      <div class="section-head">
+        <h2>Import History</h2>
+        <span class="pill" id="server-state">Ready</span>
+      </div>
+      <div id="history-list" class="history-list">
+        <div class="history-empty">No imports in this session yet.</div>
+      </div>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
