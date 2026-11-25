@@ -42,15 +42,13 @@ function(embed_asset file name)
 endfunction()
 embed_asset(Inter-Regular.ttf inter_font)
 embed_asset(Inter-SemiBold.ttf inter_bold)
-foreach(i RANGE 0 3)
-    embed_asset(cover-${i}.jpg cover_${i})
-endforeach()
 if(APPLE)
     enable_language(OBJCXX)
 endif()
 add_executable(v2n-launcher
     main.cpp
     config.cpp
+    library.cpp
     logo.cpp
     state.cpp
     input.cpp

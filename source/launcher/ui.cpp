@@ -11,12 +11,11 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <list>
+#include <memory>
+#include <unordered_map>
 #include <vector>
 
-#include "cover_0.h"
-#include "cover_1.h"
-#include "cover_2.h"
-#include "cover_3.h"
 #include "inter_bold.h"
 #include "inter_font.h"
 
@@ -50,7 +49,6 @@ struct Fonts {
     lv_font_t *reg_11 = nullptr;
     lv_font_t *reg_12 = nullptr;
     lv_font_t *reg_14 = nullptr;
-    lv_font_t *bold_8 = nullptr;
     lv_font_t *bold_10 = nullptr;
     lv_font_t *bold_11 = nullptr;
     lv_font_t *bold_13 = nullptr;
@@ -63,12 +61,30 @@ struct Fonts {
 };
 Fonts fonts;
 
-struct CoverSet {
-    ImageBuffer bg;
-    ImageBuffer recent;
-    ImageBuffer grid;
+struct CacheKey {
+    std::string path;
+    int w = 0;
+    int h = 0;
+    bool operator==(const CacheKey &other) const
+    {
+        return w == other.w && h == other.h && path == other.path;
+    }
 };
-std::array<CoverSet, game_count> covers;
+
+struct CacheKeyHash {
+    size_t operator()(const CacheKey &k) const
+    {
+        const size_t h1 = std::hash<std::string>{}(k.path);
+        const size_t h2 = std::hash<int>{}(k.w) ^ (std::hash<int>{}(k.h) << 1);
+        return h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2));
+    }
+};
+
+constexpr size_t image_cache_limit = 48;
+std::list<CacheKey> image_lru;
+std::unordered_map<CacheKey, std::pair<std::shared_ptr<ImageBuffer>, std::list<CacheKey>::iterator>,
+                   CacheKeyHash>
+    image_cache;
 
 ImageBuffer custom_logo_header;
 ImageBuffer custom_logo_splash;
@@ -84,12 +100,14 @@ struct BrandWidgets {
     std::array<lv_point_precise_t, 5> points{};
 };
 
-struct RecentCard {
+struct GameCardWidgets {
     lv_obj_t *root = nullptr;
     lv_obj_t *img = nullptr;
+    lv_obj_t *fallback_id = nullptr;
     lv_obj_t *grad = nullptr;
     lv_obj_t *title = nullptr;
     lv_obj_t *border = nullptr;
+    std::shared_ptr<ImageBuffer> art_ref;
 };
 
 struct ActionCard {
@@ -98,14 +116,6 @@ struct ActionCard {
     lv_obj_t *title = nullptr;
     lv_obj_t *subtitle = nullptr;
     lv_obj_t *arrow = nullptr;
-    lv_obj_t *border = nullptr;
-};
-
-struct AllCard {
-    lv_obj_t *root = nullptr;
-    lv_obj_t *img = nullptr;
-    lv_obj_t *grad = nullptr;
-    lv_obj_t *title = nullptr;
     lv_obj_t *border = nullptr;
 };
 
@@ -125,6 +135,13 @@ struct PickerRow {
     lv_obj_t *kind = nullptr;
     lv_obj_t *name = nullptr;
     lv_obj_t *border = nullptr;
+};
+
+struct ScreenshotCard {
+    lv_obj_t *root = nullptr;
+    lv_obj_t *img = nullptr;
+    lv_obj_t *border = nullptr;
+    std::shared_ptr<ImageBuffer> art_ref;
 };
 
 struct ConfirmModal {
@@ -154,6 +171,8 @@ struct Widgets {
     lv_obj_t *main_layer = nullptr;
     lv_obj_t *bg_prev = nullptr;
     lv_obj_t *bg_curr = nullptr;
+    std::shared_ptr<ImageBuffer> bg_prev_ref;
+    std::shared_ptr<ImageBuffer> bg_curr_ref;
     lv_obj_t *bg_tint = nullptr;
     lv_obj_t *bg_grad = nullptr;
 
@@ -164,7 +183,8 @@ struct Widgets {
     lv_obj_t *home_layer = nullptr;
     lv_obj_t *home_heading = nullptr;
     lv_obj_t *home_carousel = nullptr;
-    std::array<RecentCard, game_count> recent_cards;
+    lv_obj_t *home_empty = nullptr;
+    std::vector<GameCardWidgets> recent_cards;
     lv_obj_t *home_toast = nullptr;
     lv_obj_t *home_toast_label = nullptr;
     std::array<ActionCard, 2> action_cards;
@@ -172,7 +192,11 @@ struct Widgets {
     lv_obj_t *all_layer = nullptr;
     lv_obj_t *all_heading = nullptr;
     lv_obj_t *all_count = nullptr;
-    std::array<AllCard, game_count> all_cards;
+    lv_obj_t *all_viewport = nullptr;
+    lv_obj_t *all_empty = nullptr;
+    lv_obj_t *all_scrollbar_track = nullptr;
+    lv_obj_t *all_scrollbar_thumb = nullptr;
+    std::vector<GameCardWidgets> all_cards;
     lv_obj_t *all_toast = nullptr;
     lv_obj_t *all_toast_label = nullptr;
 
@@ -192,6 +216,29 @@ struct Widgets {
     lv_obj_t *picker_empty = nullptr;
     std::array<PickerRow, picker_page_size> picker_rows;
 
+    lv_obj_t *info_layer = nullptr;
+    lv_obj_t *info_boxart_card = nullptr;
+    lv_obj_t *info_boxart_img = nullptr;
+    lv_obj_t *info_boxart_fallback = nullptr;
+    std::shared_ptr<ImageBuffer> info_boxart_ref;
+    lv_obj_t *info_badges = nullptr;
+    lv_obj_t *info_badge_id = nullptr;
+    lv_obj_t *info_badge_id_label = nullptr;
+    lv_obj_t *info_badge_cat = nullptr;
+    lv_obj_t *info_badge_cat_label = nullptr;
+    lv_obj_t *info_badge_rating = nullptr;
+    lv_obj_t *info_badge_rating_label = nullptr;
+    lv_obj_t *info_desc = nullptr;
+    lv_obj_t *info_play_btn = nullptr;
+    lv_obj_t *info_play_label = nullptr;
+    lv_obj_t *info_toast = nullptr;
+    lv_obj_t *info_toast_label = nullptr;
+    lv_obj_t *info_shot_heading = nullptr;
+    lv_obj_t *info_shot_count = nullptr;
+    lv_obj_t *info_shot_empty = nullptr;
+    lv_obj_t *info_shot_strip = nullptr;
+    std::vector<ScreenshotCard> info_shots;
+
     lv_obj_t *footer_layer = nullptr;
     lv_obj_t *footer_select_icon = nullptr;
     lv_obj_t *footer_select_label = nullptr;
@@ -204,17 +251,19 @@ struct Widgets {
 };
 Widgets ui_objs;
 
-enum class ViewMode { None, Error, Splash, Home, AllGames, Import, Picker };
+enum class ViewMode { None, Error, Splash, Home, AllGames, Import, Picker, GameInfo };
 ViewMode last_mode = ViewMode::None;
 ConfirmKind last_confirm = ConfirmKind::None;
+int last_games_revision = -1;
 std::string last_config_error;
 int last_bg_selected = -1;
 int last_bg_previous = -1;
 bool last_bg_moving = false;
-Screen last_header_screen = Screen::Home;
-bool last_header_picker = false;
+int last_bg_revision = -1;
+std::string last_header_text;
 std::string last_home_msg;
 int last_all_focus = -1;
+int all_scroll_row = 0;
 std::string last_all_msg;
 ImportFocus last_import_focus = ImportFocus::Package;
 std::string last_import_pkg;
@@ -226,6 +275,12 @@ std::string last_picker_dir;
 int last_picker_scroll = -1;
 int last_picker_index = -1;
 size_t last_picker_count = SIZE_MAX;
+int last_info_game = -1;
+int last_info_revision = -1;
+GameInfoFocus last_info_focus = GameInfoFocus::Play;
+int last_info_shot_idx = -1;
+int info_shot_scroll = 0;
+std::string last_info_msg;
 std::string last_footer_back;
 
 lv_color_t rgb(int r, int g, int b)
@@ -402,6 +457,51 @@ bool make_cover_variant(const uint8_t *rgba, int iw, int ih, int tw, int th, Ima
     return true;
 }
 
+std::shared_ptr<ImageBuffer> get_cached_image(const fs::path &path, int target_w, int target_h)
+{
+    if (path.empty())
+        return nullptr;
+    const CacheKey key{ path.string(), target_w, target_h };
+    auto it = image_cache.find(key);
+    if (it != image_cache.end()) {
+        image_lru.splice(image_lru.begin(), image_lru, it->second.second);
+        return it->second.first;
+    }
+
+    int iw = 0, ih = 0, ch = 0;
+    stbi_uc *rgba = stbi_load(key.path.c_str(), &iw, &ih, &ch, 4);
+    if (!rgba || iw <= 0 || ih <= 0) {
+        if (rgba)
+            stbi_image_free(rgba);
+        return nullptr;
+    }
+
+    auto buf = std::make_shared<ImageBuffer>();
+    const bool ok = make_cover_variant(rgba, iw, ih, target_w, target_h, *buf);
+    stbi_image_free(rgba);
+    if (!ok)
+        return nullptr;
+
+    image_lru.push_front(key);
+    image_cache[key] = { buf, image_lru.begin() };
+    while (image_lru.size() > image_cache_limit) {
+        const CacheKey &oldest = image_lru.back();
+        image_cache.erase(oldest);
+        image_lru.pop_back();
+    }
+    return buf;
+}
+
+std::filesystem::path game_card_art(const GameEntry &g)
+{
+    return !g.boxart.empty() ? g.boxart : g.art;
+}
+
+std::filesystem::path game_hero_art(const GameEntry &g)
+{
+    return !g.art.empty() ? g.art : g.boxart;
+}
+
 float dist_segment(float px, float py, float ax, float ay, float bx, float by)
 {
     const float vx = bx - ax, vy = by - ay;
@@ -532,36 +632,108 @@ void build_brand(BrandWidgets &b, lv_obj_t *parent, float x, float y, float size
     lv_obj_set_style_line_rounded(b.line, false, 0);
 }
 
-void build_cover_card_common(lv_obj_t *parent, lv_obj_t *&root, lv_obj_t *&img, lv_obj_t *&grad,
-                             lv_obj_t *&title, lv_obj_t *&border, float x, float y, float w,
-                             float h, const ImageBuffer &cover_img, const char *name,
-                             const lv_font_t *font, float label_x, float label_y,
-                             float label_max_w, lv_opa_t grad_end_opa)
+GameCardWidgets build_game_card(lv_obj_t *parent, float x, float y, float w, float h,
+                                const GameEntry &game, const lv_font_t *font, float label_x,
+                                float label_y, float label_max_w, lv_opa_t grad_end_opa)
 {
-    root = make_box(parent, x, y, w, h, rgb(51, 68, 76), LV_OPA_COVER, 5);
-    lv_obj_set_style_clip_corner(root, true, 0);
+    GameCardWidgets c;
+    c.root = make_gradient(parent, x, y, w, h, rgb(32, 54, 68), 255, rgb(14, 26, 36), 255);
+    lv_obj_set_style_radius(c.root, sc(5), 0);
+    lv_obj_set_style_clip_corner(c.root, true, 0);
 
-    img = lv_image_create(root);
-    init_clean_obj(img, 0, 0, w, h);
-    if (cover_img.valid())
-        lv_image_set_src(img, &cover_img.dsc);
-
-    if (h == 136) {
-        grad = make_gradient(root, 0, 65, w, 71, rgb(8, 15, 21), 0, rgb(8, 15, 21), grad_end_opa);
+    c.art_ref = get_cached_image(game_card_art(game), sc(w), sc(h));
+    c.img = lv_image_create(c.root);
+    init_clean_obj(c.img, 0, 0, w, h);
+    if (c.art_ref && c.art_ref->valid()) {
+        lv_image_set_src(c.img, &c.art_ref->dsc);
     } else {
-        grad = make_gradient(root, 0, h - 75, w, 75, rgb(8, 15, 21), 0, rgb(8, 15, 21),
-                             grad_end_opa);
+        lv_obj_add_flag(c.img, LV_OBJ_FLAG_HIDDEN);
+        c.fallback_id = make_label(c.root, 0, 0, game.title_id.c_str(), fonts.bold_16,
+                                   rgb(159, 190, 201));
+        lv_obj_set_style_text_opa(c.fallback_id, 65, 0);
+        lv_obj_align(c.fallback_id, LV_ALIGN_CENTER, 0, -sc(10));
     }
 
-    title = make_label(root, label_x, label_y, name, font, rgb(255, 255, 255), label_max_w);
+    if (h == 136) {
+        c.grad = make_gradient(c.root, 0, 65, w, 71, rgb(8, 15, 21), 0, rgb(8, 15, 21),
+                               grad_end_opa);
+    } else {
+        c.grad = make_gradient(c.root, 0, h - 75, w, 75, rgb(8, 15, 21), 0, rgb(8, 15, 21),
+                               grad_end_opa);
+    }
 
-    border = make_box(root, 0, 0, w, h, rgb(0, 0, 0), LV_OPA_TRANSP, 5);
-    lv_obj_set_style_border_color(border, rgb(255, 255, 255), 0);
-    lv_obj_set_style_border_opa(border, 60, 0);
-    lv_obj_set_style_border_width(border, sc_border(1), 0);
+    c.title = make_label(c.root, label_x, label_y, game.name.c_str(), font, rgb(255, 255, 255),
+                         label_max_w);
+    lv_obj_set_height(c.title, lv_font_get_line_height(font));
+    lv_label_set_long_mode(c.title, LV_LABEL_LONG_MODE_DOTS);
+
+    c.border = make_box(c.root, 0, 0, w, h, rgb(0, 0, 0), LV_OPA_TRANSP, 5);
+    lv_obj_set_style_border_color(c.border, rgb(255, 255, 255), 0);
+    lv_obj_set_style_border_opa(c.border, 60, 0);
+    lv_obj_set_style_border_width(c.border, sc_border(1), 0);
+    return c;
 }
 
-void create_confirm_modal(ConfirmModal &m, lv_obj_t *parent);
+void create_confirm_modal(ConfirmModal &m, lv_obj_t *parent)
+{
+    m.backdrop = make_box(parent, 0, 0, screen_width, screen_height, rgb(6, 13, 19), 185);
+    m.card = make_box(m.backdrop, 130, 152, 380, 176, rgb(20, 35, 45), 250, 8);
+    lv_obj_set_style_border_color(m.card, rgb(195, 222, 230), 0);
+    lv_obj_set_style_border_opa(m.card, 110, 0);
+    lv_obj_set_style_border_width(m.card, sc_border(1), 0);
+
+    m.title = make_label(m.card, 24, 22, "", fonts.bold_19, rgb(248, 251, 253), 332);
+    m.message = make_label(m.card, 24, 54, "", fonts.reg_12, rgb(174, 193, 201), 332);
+    lv_label_set_long_mode(m.message, LV_LABEL_LONG_MODE_WRAP);
+    make_box(m.card, 24, 108, 332, 1, rgb(159, 190, 201), 35);
+
+    m.confirm_pill = make_box(m.card, 24, 122, 158, 34, rgb(32, 52, 64), 255, 5);
+    lv_obj_set_style_border_color(m.confirm_pill, rgb(140, 173, 184), 0);
+    lv_obj_set_style_border_opa(m.confirm_pill, 90, 0);
+    lv_obj_set_style_border_width(m.confirm_pill, sc_border(1), 0);
+    m.confirm_icon = lv_image_create(m.confirm_pill);
+    init_clean_obj(m.confirm_icon, 0, 6, 22, 22);
+    lv_image_set_src(m.confirm_icon, &icon_key_a.dsc);
+    m.confirm_label = make_label(m.confirm_pill, 0, 10, "", fonts.bold_11, rgb(225, 237, 240));
+
+    m.cancel_pill = make_box(m.card, 198, 122, 158, 34, rgb(32, 52, 64), 255, 5);
+    lv_obj_set_style_border_color(m.cancel_pill, rgb(140, 173, 184), 0);
+    lv_obj_set_style_border_opa(m.cancel_pill, 90, 0);
+    lv_obj_set_style_border_width(m.cancel_pill, sc_border(1), 0);
+    m.cancel_icon = lv_image_create(m.cancel_pill);
+    init_clean_obj(m.cancel_icon, 0, 6, 22, 22);
+    lv_image_set_src(m.cancel_icon, &icon_key_b.dsc);
+    m.cancel_label = make_label(m.cancel_pill, 0, 10, "", fonts.bold_11, rgb(225, 237, 240));
+
+    lv_obj_add_flag(m.backdrop, LV_OBJ_FLAG_HIDDEN);
+}
+
+void layout_modal_pill(lv_obj_t *icon, lv_obj_t *label, const char *text)
+{
+    lv_label_set_text(label, text);
+    lv_point_t sz{};
+    lv_text_get_size(&sz, text, fonts.bold_11, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    const int32_t pill_w = sc(158);
+    const int32_t icon_w = sc(22);
+    const int32_t gap = sc(8);
+    const int32_t start_x = std::max<int32_t>(sc(12), (pill_w - (icon_w + gap + sz.x)) / 2);
+    lv_obj_set_pos(icon, start_x, sc(6));
+    lv_obj_set_pos(label, start_x + icon_w + gap, sc(11));
+}
+
+void set_confirm_modal(ConfirmModal &m, bool visible, const char *title, const char *message,
+                       const char *confirm_text, const char *cancel_text)
+{
+    if (!visible) {
+        lv_obj_add_flag(m.backdrop, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_label_set_text(m.title, title);
+    lv_label_set_text(m.message, message);
+    layout_modal_pill(m.confirm_icon, m.confirm_label, confirm_text);
+    layout_modal_pill(m.cancel_icon, m.cancel_label, cancel_text);
+    lv_obj_clear_flag(m.backdrop, LV_OBJ_FLAG_HIDDEN);
+}
 
 void create_ui_tree()
 {
@@ -604,6 +776,7 @@ void create_ui_tree()
     ui_objs.bg_prev = lv_image_create(ui_objs.main_layer);
     init_clean_obj(ui_objs.bg_prev, 0, 0, 640, 440);
     lv_obj_set_style_image_opa(ui_objs.bg_prev, 122, 0);
+    lv_obj_add_flag(ui_objs.bg_prev, LV_OBJ_FLAG_HIDDEN);
 
     ui_objs.bg_curr = lv_image_create(ui_objs.main_layer);
     init_clean_obj(ui_objs.bg_curr, 0, 0, 640, 440);
@@ -618,9 +791,10 @@ void create_ui_tree()
     ui_objs.header_layer = lv_obj_create(ui_objs.main_layer);
     init_clean_obj(ui_objs.header_layer, 0, 0, 640, 64);
     build_brand(ui_objs.header_brand, ui_objs.header_layer, 25, 17, 26, custom_logo_header);
-    ui_objs.header_screen =
-        make_label(ui_objs.header_layer, 63, 16, "", fonts.bold_24, rgb(248, 251, 253));
-    lv_obj_add_flag(ui_objs.header_screen, LV_OBJ_FLAG_HIDDEN);
+    ui_objs.header_screen = make_label(ui_objs.header_layer, 63, 16, "Vita2Native",
+                                       fonts.bold_24, rgb(248, 251, 253), 552);
+    lv_obj_set_height(ui_objs.header_screen, lv_font_get_line_height(fonts.bold_24));
+    lv_label_set_long_mode(ui_objs.header_screen, LV_LABEL_LONG_MODE_DOTS);
 
     // Home screen
     ui_objs.home_layer = lv_obj_create(ui_objs.main_layer);
@@ -630,12 +804,17 @@ void create_ui_tree()
 
     ui_objs.home_carousel = lv_obj_create(ui_objs.home_layer);
     init_clean_obj(ui_objs.home_carousel, 0, 103, 640, 165);
-    for (int i = 0; i < game_count; ++i) {
-        auto &c = ui_objs.recent_cards[i];
-        build_cover_card_common(ui_objs.home_carousel, c.root, c.img, c.grad, c.title, c.border,
-                                25 + i * 320, 4, 310, 154, covers[i].recent, game_names[i],
-                                fonts.bold_19, 16, 154 - 32, 310 - 32, 220);
-    }
+
+    ui_objs.home_empty =
+        make_box(ui_objs.home_layer, 25, 107, 590, 154, rgb(24, 40, 51), 200, 6);
+    lv_obj_set_style_border_color(ui_objs.home_empty, rgb(119, 150, 162), 0);
+    lv_obj_set_style_border_opa(ui_objs.home_empty, 75, 0);
+    lv_obj_set_style_border_width(ui_objs.home_empty, sc_border(1), 0);
+    make_label(ui_objs.home_empty, 24, 52, "No games found", fonts.bold_16, rgb(238, 247, 249));
+    make_label(ui_objs.home_empty, 24, 80,
+               "Import a .pkg or place title folders (*/eboot.bin) in your games directory.",
+               fonts.reg_11, rgb(164, 188, 196), 542);
+    lv_obj_add_flag(ui_objs.home_empty, LV_OBJ_FLAG_HIDDEN);
 
     ui_objs.home_toast = make_box(ui_objs.home_layer, 25, 282, 430, 23, rgb(16, 27, 34), 245, 4);
     ui_objs.home_toast_label =
@@ -658,9 +837,9 @@ void create_ui_tree()
         }
         card.title = make_label(card.root, 68, 22, i == 0 ? "View all games" : "Import game",
                                 fonts.bold_15, rgb(245, 250, 251), 190);
-        card.subtitle =
-            make_label(card.root, 68, 48, i == 0 ? "Browse your library" : "Add a package and license",
-                       fonts.reg_10, rgb(164, 188, 196), 203);
+        card.subtitle = make_label(card.root, 68, 48,
+                                   i == 0 ? "Browse your library" : "Add a package and license",
+                                   fonts.reg_10, rgb(164, 188, 196), 203);
         card.arrow = make_label(card.root, 258, 25, "→", fonts.bold_16, rgb(195, 218, 223), 24);
         card.border = make_box(card.root, 0, 0, 289, 92, rgb(0, 0, 0), LV_OPA_TRANSP, 7);
         lv_obj_set_style_border_width(card.border, sc_border(1), 0);
@@ -672,16 +851,32 @@ void create_ui_tree()
     init_clean_obj(ui_objs.all_layer, 0, 0, 640, 438);
     ui_objs.all_heading =
         make_label(ui_objs.all_layer, 25, 72, "All games", fonts.bold_20, rgb(248, 251, 253));
-    const std::string count_text = std::to_string(game_count) + " GAMES";
     ui_objs.all_count =
-        make_label(ui_objs.all_layer, 0, 79, count_text.c_str(), fonts.bold_10, rgb(174, 192, 200));
+        make_label(ui_objs.all_layer, 0, 79, "0 GAMES", fonts.bold_10, rgb(174, 192, 200));
     lv_obj_align(ui_objs.all_count, LV_ALIGN_TOP_RIGHT, -sc(25), sc(79));
-    for (int i = 0; i < game_count; ++i) {
-        auto &c = ui_objs.all_cards[i];
-        build_cover_card_common(ui_objs.all_layer, c.root, c.img, c.grad, c.title, c.border,
-                                25 + (i % 2) * 301, 111 + (i / 2) * 150, 289, 136, covers[i].grid,
-                                game_names[i], fonts.bold_16, 14, 104, 260, 225);
-    }
+
+    ui_objs.all_viewport = lv_obj_create(ui_objs.all_layer);
+    init_clean_obj(ui_objs.all_viewport, 0, 107, 640, 326);
+
+    ui_objs.all_empty =
+        make_box(ui_objs.all_layer, 25, 111, 590, 136, rgb(24, 40, 51), 200, 6);
+    lv_obj_set_style_border_color(ui_objs.all_empty, rgb(119, 150, 162), 0);
+    lv_obj_set_style_border_opa(ui_objs.all_empty, 75, 0);
+    lv_obj_set_style_border_width(ui_objs.all_empty, sc_border(1), 0);
+    make_label(ui_objs.all_empty, 24, 42, "No games in your library yet", fonts.bold_16,
+               rgb(238, 247, 249));
+    make_label(ui_objs.all_empty, 24, 70,
+               "Use Import game on the home screen or add title folders containing eboot.bin.",
+               fonts.reg_11, rgb(164, 188, 196), 542);
+    lv_obj_add_flag(ui_objs.all_empty, LV_OBJ_FLAG_HIDDEN);
+
+    ui_objs.all_scrollbar_track =
+        make_box(ui_objs.all_layer, 626, 111, 3, 286, rgb(255, 255, 255), 25, 2);
+    ui_objs.all_scrollbar_thumb =
+        make_box(ui_objs.all_layer, 626, 111, 3, 80, rgb(225, 237, 239), 180, 2);
+    lv_obj_add_flag(ui_objs.all_scrollbar_track, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui_objs.all_scrollbar_thumb, LV_OBJ_FLAG_HIDDEN);
+
     ui_objs.all_toast = make_box(ui_objs.all_layer, 25, 411, 480, 21, rgb(16, 27, 34), 245, 4);
     ui_objs.all_toast_label =
         make_label(ui_objs.all_toast, 8, 5, "", fonts.reg_10, rgb(232, 239, 241), 460);
@@ -755,6 +950,89 @@ void create_ui_tree()
     }
     lv_obj_add_flag(ui_objs.picker_layer, LV_OBJ_FLAG_HIDDEN);
 
+    // Game Info screen
+    ui_objs.info_layer = lv_obj_create(ui_objs.main_layer);
+    init_clean_obj(ui_objs.info_layer, 0, 0, 640, 438);
+
+    ui_objs.info_boxart_card =
+        make_gradient(ui_objs.info_layer, 25, 70, 120, 152, rgb(32, 54, 68), 255, rgb(14, 26, 36),
+                      255);
+    lv_obj_set_style_radius(ui_objs.info_boxart_card, sc(6), 0);
+    lv_obj_set_style_clip_corner(ui_objs.info_boxart_card, true, 0);
+    ui_objs.info_boxart_img = lv_image_create(ui_objs.info_boxart_card);
+    init_clean_obj(ui_objs.info_boxart_img, 0, 0, 120, 152);
+    ui_objs.info_boxart_fallback =
+        make_label(ui_objs.info_boxart_card, 0, 0, "", fonts.bold_15, rgb(159, 190, 201));
+    lv_obj_set_style_text_opa(ui_objs.info_boxart_fallback, 140, 0);
+    lv_obj_align(ui_objs.info_boxart_fallback, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_t *boxart_border =
+        make_box(ui_objs.info_boxart_card, 0, 0, 120, 152, rgb(0, 0, 0), LV_OPA_TRANSP, 6);
+    lv_obj_set_style_border_color(boxart_border, rgb(255, 255, 255), 0);
+    lv_obj_set_style_border_opa(boxart_border, 70, 0);
+    lv_obj_set_style_border_width(boxart_border, sc_border(1), 0);
+
+    ui_objs.info_badges = lv_obj_create(ui_objs.info_layer);
+    init_clean_obj(ui_objs.info_badges, 162, 72, 453, 24);
+    lv_obj_set_flex_flow(ui_objs.info_badges, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(ui_objs.info_badges, sc(8), 0);
+
+    auto make_badge = [&](lv_obj_t *&pill, lv_obj_t *&lbl, lv_color_t bg, lv_opa_t bg_opa,
+                          lv_color_t fg, bool bordered) {
+        pill = make_box(ui_objs.info_badges, 0, 0, 0, 22, bg, bg_opa, 11);
+        lv_obj_set_width(pill, LV_SIZE_CONTENT);
+        lv_obj_set_style_pad_hor(pill, sc(10), 0);
+        if (bordered) {
+            lv_obj_set_style_border_color(pill, rgb(162, 197, 205), 0);
+            lv_obj_set_style_border_opa(pill, 75, 0);
+            lv_obj_set_style_border_width(pill, sc_border(1), 0);
+        }
+        lbl = make_centered_label(pill, "", fonts.bold_10, fg);
+    };
+    make_badge(ui_objs.info_badge_id, ui_objs.info_badge_id_label, rgb(135, 174, 185), 35,
+               rgb(229, 243, 245), true);
+    make_badge(ui_objs.info_badge_cat, ui_objs.info_badge_cat_label, rgb(255, 255, 255), 18,
+               rgb(199, 218, 224), false);
+    make_badge(ui_objs.info_badge_rating, ui_objs.info_badge_rating_label, rgb(255, 255, 255), 18,
+               rgb(245, 215, 130), false);
+
+    ui_objs.info_desc =
+        make_label(ui_objs.info_layer, 162, 104, "", fonts.reg_11, rgb(184, 203, 211), 453);
+    lv_obj_set_height(ui_objs.info_desc, sc(72));
+    lv_label_set_long_mode(ui_objs.info_desc, LV_LABEL_LONG_MODE_DOTS);
+
+    ui_objs.info_play_btn =
+        make_box(ui_objs.info_layer, 162, 186, 170, 36, rgb(225, 237, 239), 255, 5);
+    lv_obj_set_style_border_color(ui_objs.info_play_btn, rgb(248, 252, 255), 0);
+    lv_obj_set_style_border_opa(ui_objs.info_play_btn, 0, 0);
+    lv_obj_set_style_border_width(ui_objs.info_play_btn, sc_border(1), 0);
+    ui_objs.info_play_label =
+        make_centered_label(ui_objs.info_play_btn, "PLAY", fonts.bold_11, rgb(14, 28, 35));
+
+    ui_objs.info_toast =
+        make_box(ui_objs.info_layer, 344, 192, 271, 24, rgb(16, 27, 34), 245, 4);
+    ui_objs.info_toast_label =
+        make_label(ui_objs.info_toast, 10, 6, "", fonts.reg_10, rgb(232, 239, 241), 251);
+    lv_obj_add_flag(ui_objs.info_toast, LV_OBJ_FLAG_HIDDEN);
+
+    ui_objs.info_shot_heading =
+        make_label(ui_objs.info_layer, 25, 240, "Screenshots", fonts.bold_15, rgb(248, 251, 253));
+    ui_objs.info_shot_count =
+        make_label(ui_objs.info_layer, 0, 243, "", fonts.bold_10, rgb(174, 192, 200));
+    lv_obj_align(ui_objs.info_shot_count, LV_ALIGN_TOP_RIGHT, -sc(25), sc(243));
+
+    ui_objs.info_shot_empty =
+        make_box(ui_objs.info_layer, 25, 266, 590, 148, rgb(24, 40, 51), 150, 6);
+    lv_obj_set_style_border_color(ui_objs.info_shot_empty, rgb(119, 150, 162), 0);
+    lv_obj_set_style_border_opa(ui_objs.info_shot_empty, 60, 0);
+    lv_obj_set_style_border_width(ui_objs.info_shot_empty, sc_border(1), 0);
+    make_centered_label(ui_objs.info_shot_empty, "No screenshots available.", fonts.reg_11,
+                        rgb(155, 179, 188));
+    lv_obj_add_flag(ui_objs.info_shot_empty, LV_OBJ_FLAG_HIDDEN);
+
+    ui_objs.info_shot_strip = lv_obj_create(ui_objs.info_layer);
+    init_clean_obj(ui_objs.info_shot_strip, 25, 266, 590, 152);
+    lv_obj_add_flag(ui_objs.info_layer, LV_OBJ_FLAG_HIDDEN);
+
     // Footer
     ui_objs.footer_layer = make_box(ui_objs.main_layer, 0, 438, 640, 42, rgb(12, 26, 35), 250);
     make_box(ui_objs.footer_layer, 0, 0, 640, 1, rgb(159, 190, 201), 40);
@@ -779,69 +1057,6 @@ void create_ui_tree()
     create_confirm_modal(ui_objs.confirm_modal, ui_objs.main_layer);
 }
 
-void create_confirm_modal(ConfirmModal &m, lv_obj_t *parent)
-{
-    m.backdrop = make_box(parent, 0, 0, screen_width, screen_height, rgb(6, 13, 19), 185);
-    m.card = make_box(m.backdrop, 130, 152, 380, 176, rgb(20, 35, 45), 250, 8);
-    lv_obj_set_style_border_color(m.card, rgb(195, 222, 230), 0);
-    lv_obj_set_style_border_opa(m.card, 110, 0);
-    lv_obj_set_style_border_width(m.card, sc_border(1), 0);
-
-    m.title = make_label(m.card, 24, 22, "", fonts.bold_19, rgb(248, 251, 253), 332);
-    m.message = make_label(m.card, 24, 54, "", fonts.reg_12, rgb(174, 193, 201), 332);
-    lv_label_set_long_mode(m.message, LV_LABEL_LONG_MODE_WRAP);
-    make_box(m.card, 24, 108, 332, 1, rgb(159, 190, 201), 35);
-
-    m.confirm_pill = make_box(m.card, 24, 122, 158, 34, rgb(32, 52, 64), 255, 5);
-    lv_obj_set_style_border_color(m.confirm_pill, rgb(140, 173, 184), 0);
-    lv_obj_set_style_border_opa(m.confirm_pill, 90, 0);
-    lv_obj_set_style_border_width(m.confirm_pill, sc_border(1), 0);
-    m.confirm_icon = lv_image_create(m.confirm_pill);
-    init_clean_obj(m.confirm_icon, 0, 6, 22, 22);
-    lv_image_set_src(m.confirm_icon, &icon_key_a.dsc);
-    m.confirm_label =
-        make_label(m.confirm_pill, 0, 10, "", fonts.bold_11, rgb(225, 237, 240));
-
-    m.cancel_pill = make_box(m.card, 198, 122, 158, 34, rgb(32, 52, 64), 255, 5);
-    lv_obj_set_style_border_color(m.cancel_pill, rgb(140, 173, 184), 0);
-    lv_obj_set_style_border_opa(m.cancel_pill, 90, 0);
-    lv_obj_set_style_border_width(m.cancel_pill, sc_border(1), 0);
-    m.cancel_icon = lv_image_create(m.cancel_pill);
-    init_clean_obj(m.cancel_icon, 0, 6, 22, 22);
-    lv_image_set_src(m.cancel_icon, &icon_key_b.dsc);
-    m.cancel_label =
-        make_label(m.cancel_pill, 0, 10, "", fonts.bold_11, rgb(225, 237, 240));
-
-    lv_obj_add_flag(m.backdrop, LV_OBJ_FLAG_HIDDEN);
-}
-
-void layout_modal_pill(lv_obj_t *icon, lv_obj_t *label, const char *text)
-{
-    lv_label_set_text(label, text);
-    lv_point_t sz{};
-    lv_text_get_size(&sz, text, fonts.bold_11, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-    const int32_t pill_w = sc(158);
-    const int32_t icon_w = sc(22);
-    const int32_t gap = sc(8);
-    const int32_t start_x = std::max<int32_t>(sc(12), (pill_w - (icon_w + gap + sz.x)) / 2);
-    lv_obj_set_pos(icon, start_x, sc(6));
-    lv_obj_set_pos(label, start_x + icon_w + gap, sc(11));
-}
-
-void set_confirm_modal(ConfirmModal &m, bool visible, const char *title, const char *message,
-                       const char *confirm_text, const char *cancel_text)
-{
-    if (!visible) {
-        lv_obj_add_flag(m.backdrop, LV_OBJ_FLAG_HIDDEN);
-        return;
-    }
-    lv_label_set_text(m.title, title);
-    lv_label_set_text(m.message, message);
-    layout_modal_pill(m.confirm_icon, m.confirm_label, confirm_text);
-    layout_modal_pill(m.cancel_icon, m.cancel_label, cancel_text);
-    lv_obj_clear_flag(m.backdrop, LV_OBJ_FLAG_HIDDEN);
-}
-
 void set_visible(lv_obj_t *obj, bool show)
 {
     if (show)
@@ -862,47 +1077,118 @@ void set_pos_if_changed(lv_obj_t *obj, int32_t x, int32_t y)
         lv_obj_set_pos(obj, x, y);
 }
 
+void rebuild_game_lists(const State &a)
+{
+    ui_objs.recent_cards.clear();
+    lv_obj_clean(ui_objs.home_carousel);
+
+    const int rc = a.recent_count();
+    for (int i = 0; i < rc; ++i) {
+        ui_objs.recent_cards.push_back(build_game_card(
+            ui_objs.home_carousel, 25 + i * 320, 4, 310, 154, a.games[i], fonts.bold_19, 16,
+            154 - 32, 310 - 32, 220));
+    }
+    set_visible(ui_objs.home_carousel, rc > 0);
+    set_visible(ui_objs.home_empty, rc == 0);
+
+    ui_objs.all_cards.clear();
+    lv_obj_clean(ui_objs.all_viewport);
+
+    const int total = static_cast<int>(a.games.size());
+    for (int i = 0; i < total; ++i) {
+        ui_objs.all_cards.push_back(build_game_card(
+            ui_objs.all_viewport, 25 + (i % 2) * 301, 4 + (i / 2) * 150, 289, 136, a.games[i],
+            fonts.bold_16, 14, 104, 260, 225));
+    }
+    set_visible(ui_objs.all_viewport, total > 0);
+    set_visible(ui_objs.all_empty, total == 0);
+    const std::string count_text =
+        std::to_string(total) + (total == 1 ? " GAME" : " GAMES");
+    lv_label_set_text(ui_objs.all_count, count_text.c_str());
+    lv_obj_align(ui_objs.all_count, LV_ALIGN_TOP_RIGHT, -sc(25), sc(79));
+
+    all_scroll_row = 0;
+    last_all_focus = -1;
+    last_info_game = -1;
+    last_bg_selected = -1;
+    last_bg_previous = -1;
+    last_games_revision = a.games_revision;
+}
+
+void set_bg_image(lv_obj_t *img, std::shared_ptr<ImageBuffer> &ref, const State &a, int idx)
+{
+    if (idx >= 0 && idx < static_cast<int>(a.games.size()))
+        ref = get_cached_image(game_hero_art(a.games[idx]), sc(640), sc(440));
+    else
+        ref.reset();
+
+    if (ref && ref->valid()) {
+        lv_image_set_src(img, &ref->dsc);
+        set_visible(img, true);
+    } else {
+        set_visible(img, false);
+    }
+}
+
 void update_background(const State &a, Uint32 now)
 {
-    if (a.moving) {
-        const float t =
-            ease_out(static_cast<float>(now - a.motion_start) / static_cast<float>(State::motion_duration));
-        if (last_bg_previous != a.previous || !last_bg_moving) {
-            lv_image_set_src(ui_objs.bg_prev, &covers[a.previous].bg.dsc);
+    int curr_idx = -1;
+    if (!a.games.empty()) {
+        if (a.screen == Screen::GameInfo)
+            curr_idx = a.info_game;
+        else if (a.screen == Screen::AllGames)
+            curr_idx = a.all_focus;
+        else
+            curr_idx = a.selected;
+    }
+
+    if (a.screen == Screen::Home && !a.picker && a.moving && a.recent_count() > 1) {
+        const float t = ease_out(static_cast<float>(now - a.motion_start) /
+                                 static_cast<float>(State::motion_duration));
+        if (last_bg_previous != a.previous || last_bg_revision != a.games_revision ||
+            !last_bg_moving) {
+            set_bg_image(ui_objs.bg_prev, ui_objs.bg_prev_ref, a, a.previous);
             last_bg_previous = a.previous;
         }
-        if (last_bg_selected != a.selected || !last_bg_moving) {
-            lv_image_set_src(ui_objs.bg_curr, &covers[a.selected].bg.dsc);
-            last_bg_selected = a.selected;
+        if (last_bg_selected != curr_idx || last_bg_revision != a.games_revision ||
+            !last_bg_moving) {
+            set_bg_image(ui_objs.bg_curr, ui_objs.bg_curr_ref, a, curr_idx);
+            last_bg_selected = curr_idx;
         }
-        set_visible(ui_objs.bg_curr, true);
-        lv_obj_set_style_image_opa(ui_objs.bg_curr, opa_from_float(0.48f * t), 0);
+        if (ui_objs.bg_curr_ref && ui_objs.bg_curr_ref->valid())
+            lv_obj_set_style_image_opa(ui_objs.bg_curr, opa_from_float(0.48f * t), 0);
         last_bg_moving = true;
     } else {
-        if (last_bg_selected != a.selected || last_bg_moving) {
-            lv_image_set_src(ui_objs.bg_prev, &covers[a.selected].bg.dsc);
+        if (last_bg_selected != curr_idx || last_bg_revision != a.games_revision || last_bg_moving) {
+            set_bg_image(ui_objs.bg_prev, ui_objs.bg_prev_ref, a, curr_idx);
             set_visible(ui_objs.bg_curr, false);
-            last_bg_selected = a.selected;
-            last_bg_previous = a.selected;
+            ui_objs.bg_curr_ref.reset();
+            last_bg_selected = curr_idx;
+            last_bg_previous = curr_idx;
             last_bg_moving = false;
         }
     }
+    last_bg_revision = a.games_revision;
 }
 
 void update_header_and_footer(const State &a)
 {
-    if (last_header_screen != a.screen || last_header_picker != a.picker ||
-        last_mode == ViewMode::None) {
-        const bool show_screen = (a.screen != Screen::Home || a.picker);
-        set_visible(ui_objs.header_screen, show_screen);
-        if (show_screen) {
-            const char *name = a.picker                       ? "Choose File"
-                               : a.screen == Screen::AllGames ? "All Games"
-                                                              : "Import Game";
-            lv_label_set_text(ui_objs.header_screen, name);
-        }
-        last_header_screen = a.screen;
-        last_header_picker = a.picker;
+    std::string name = "Vita2Native";
+    if (a.picker)
+        name = "Choose File";
+    else if (a.screen == Screen::AllGames)
+        name = "All Games";
+    else if (a.screen == Screen::Import)
+        name = "Import Game";
+    else if (a.screen == Screen::GameInfo) {
+        if (a.info_game >= 0 && a.info_game < static_cast<int>(a.games.size()))
+            name = a.games[a.info_game].name;
+        else
+            name = "Game Info";
+    }
+    if (last_header_text != name || last_mode == ViewMode::None) {
+        lv_label_set_text(ui_objs.header_screen, name.c_str());
+        last_header_text = std::move(name);
     }
 
     const char *back = a.picker || a.screen != Screen::Home ? "BACK" : "EXIT";
@@ -928,52 +1214,58 @@ void sync_home(const State &a, Uint32 now)
     set_opa_if_changed(ui_objs.home_heading, opa_from_float(heading));
     set_pos_if_changed(ui_objs.home_heading, sc(25), sc(72.0f + 8.0f * (1.0f - heading)));
 
-    const float t =
-        a.moving ? ease_out(static_cast<float>(now - a.motion_start) / static_cast<float>(State::motion_duration))
-                 : 1.0f;
-    constexpr float pitch = 320.0f;
-    // Always keep the left neighbor rendered at x = 25 - pitch so cards leaving left never vanish
-    // at the end of a slide and cards entering from the left never pop in at the start.
-    int base = a.selected;
-    float base_x = 25.0f;
-    int active_slot_0 = 0;
-    float w0 = 1.0f, w1 = 0.0f;
-    if (a.moving) {
-        if (a.direction > 0) {
-            base = a.previous;
-            base_x = 25.0f - pitch * t;
-            active_slot_0 = 0;
-            w0 = 1.0f - t;
-            w1 = t;
-        } else {
-            base = a.selected;
-            base_x = 25.0f - pitch * (1.0f - t);
-            active_slot_0 = 0;
-            w0 = t;
-            w1 = 1.0f - t;
+    const int rc = static_cast<int>(ui_objs.recent_cards.size());
+    if (rc == 0) {
+        const float entry = entrance(a, now, 65);
+        set_pos_if_changed(ui_objs.home_empty, sc(25), sc(107.0f + 12.0f * (1.0f - entry)));
+        set_opa_if_changed(ui_objs.home_empty, opa_from_float(entry));
+    } else {
+        const float t = a.moving ? ease_out(static_cast<float>(now - a.motion_start) /
+                                            static_cast<float>(State::motion_duration))
+                                 : 1.0f;
+        constexpr float pitch = 320.0f;
+        int base = a.selected;
+        float base_x = 25.0f;
+        float w0 = 1.0f, w1 = 0.0f;
+        if (a.moving) {
+            if (a.direction > 0) {
+                base = a.previous;
+                base_x = 25.0f - pitch * t;
+                w0 = 1.0f - t;
+                w1 = t;
+            } else {
+                base = a.selected;
+                base_x = 25.0f - pitch * (1.0f - t);
+                w0 = t;
+                w1 = 1.0f - t;
+            }
         }
-    }
 
-    const bool recent_focused = (a.home_focus == HomeFocus::RecentGames);
-    for (int slot = -1; slot < game_count - 1; ++slot) {
-        const int id = (base + slot + game_count) % game_count;
-        const float active = (slot == active_slot_0) ? w0 : (slot == active_slot_0 + 1) ? w1 : 0.0f;
-        const float entry = entrance(a, now, 65 + std::max(0, slot) * 50);
-        auto &card = ui_objs.recent_cards[id];
-        set_pos_if_changed(card.root, sc(base_x + slot * pitch), sc(4.0f + 12.0f * (1.0f - entry)));
-        set_opa_if_changed(card.root, opa_from_float(entry));
+        const bool recent_focused = (a.home_focus == HomeFocus::RecentGames);
+        const int start_slot = (rc >= 3) ? -1 : 0;
+        const int end_slot = (rc >= 3) ? rc - 1 : rc;
+        for (int slot = start_slot; slot < end_slot; ++slot) {
+            const int id = (base + slot + rc) % rc;
+            const float active = (slot == 0) ? w0 : (slot == 1) ? w1 : 0.0f;
+            const float entry = entrance(a, now, 65 + std::max(0, slot) * 50);
+            auto &card = ui_objs.recent_cards[id];
+            set_pos_if_changed(card.root, sc(base_x + slot * pitch),
+                               sc(4.0f + 12.0f * (1.0f - entry)));
+            set_opa_if_changed(card.root, opa_from_float(entry));
 
-        const lv_color_t edge_c = recent_focused ? rgb(248, 252, 255) : rgb(255, 255, 255);
-        const lv_opa_t edge_opa = static_cast<lv_opa_t>(
-            recent_focused ? std::lround(55.0f + 200.0f * active) : std::lround(45.0f + 55.0f * active));
-        const int32_t edge_w = sc_border(1.0f + active);
-        if (lv_obj_get_style_border_opa(card.border, LV_PART_MAIN) != edge_opa ||
-            lv_obj_get_style_border_width(card.border, LV_PART_MAIN) != edge_w ||
-            lv_color_to_u32(lv_obj_get_style_border_color(card.border, LV_PART_MAIN)) !=
-                lv_color_to_u32(edge_c)) {
-            lv_obj_set_style_border_color(card.border, edge_c, 0);
-            lv_obj_set_style_border_opa(card.border, edge_opa, 0);
-            lv_obj_set_style_border_width(card.border, edge_w, 0);
+            const lv_color_t edge_c = recent_focused ? rgb(248, 252, 255) : rgb(255, 255, 255);
+            const lv_opa_t edge_opa = static_cast<lv_opa_t>(
+                recent_focused ? std::lround(55.0f + 200.0f * active)
+                               : std::lround(45.0f + 55.0f * active));
+            const int32_t edge_w = sc_border(1.0f + active);
+            if (lv_obj_get_style_border_opa(card.border, LV_PART_MAIN) != edge_opa ||
+                lv_obj_get_style_border_width(card.border, LV_PART_MAIN) != edge_w ||
+                lv_color_to_u32(lv_obj_get_style_border_color(card.border, LV_PART_MAIN)) !=
+                    lv_color_to_u32(edge_c)) {
+                lv_obj_set_style_border_color(card.border, edge_c, 0);
+                lv_obj_set_style_border_opa(card.border, edge_opa, 0);
+                lv_obj_set_style_border_width(card.border, edge_w, 0);
+            }
         }
     }
 
@@ -1020,18 +1312,51 @@ void sync_all_games(const State &a, Uint32 now)
     set_opa_if_changed(ui_objs.all_count, opa_from_float(heading));
     lv_obj_align(ui_objs.all_count, LV_ALIGN_TOP_RIGHT, -sc(25), sc(79.0f + head_off));
 
-    for (int i = 0; i < game_count; ++i) {
-        const float show = entrance(a, now, 60 + i * 60);
-        const float x = 25 + (i % 2) * 301;
-        const float y = 111 + (i / 2) * 150 + 10.0f * (1.0f - show);
-        auto &card = ui_objs.all_cards[i];
-        set_pos_if_changed(card.root, sc(x), sc(y));
-        set_opa_if_changed(card.root, opa_from_float(show));
-        if (last_all_focus != a.all_focus || last_mode != ViewMode::AllGames) {
-            const bool focused = (a.all_focus == i);
-            lv_obj_set_style_border_color(card.border, focused ? rgb(248, 252, 255) : rgb(255, 255, 255), 0);
-            lv_obj_set_style_border_opa(card.border, focused ? 255 : 60, 0);
-            lv_obj_set_style_border_width(card.border, sc_border(focused ? 2 : 1), 0);
+    const int count = static_cast<int>(ui_objs.all_cards.size());
+    if (count == 0) {
+        const float show = entrance(a, now, 60);
+        set_pos_if_changed(ui_objs.all_empty, sc(25), sc(111.0f + 10.0f * (1.0f - show)));
+        set_opa_if_changed(ui_objs.all_empty, opa_from_float(show));
+        set_visible(ui_objs.all_scrollbar_track, false);
+        set_visible(ui_objs.all_scrollbar_thumb, false);
+    } else {
+        const int focus_row = a.all_focus / 2;
+        if (focus_row < all_scroll_row)
+            all_scroll_row = focus_row;
+        if (focus_row >= all_scroll_row + 2)
+            all_scroll_row = focus_row - 1;
+        const int total_rows = (count + 1) / 2;
+        all_scroll_row = std::clamp(all_scroll_row, 0, std::max(0, total_rows - 2));
+
+        const float scroll_y = static_cast<float>(all_scroll_row * 150);
+        for (int i = 0; i < count; ++i) {
+            const int row = i / 2;
+            const int vis_idx = std::max(0, (row - all_scroll_row) * 2 + (i % 2));
+            const float show = entrance(a, now, 60 + std::min(vis_idx, 3) * 60);
+            const float x = 25 + (i % 2) * 301;
+            const float y = 4 + row * 150 - scroll_y + 10.0f * (1.0f - show);
+            auto &card = ui_objs.all_cards[i];
+            set_pos_if_changed(card.root, sc(x), sc(y));
+            set_opa_if_changed(card.root, opa_from_float(show));
+            if (last_all_focus != a.all_focus || last_mode != ViewMode::AllGames) {
+                const bool focused = (a.all_focus == i);
+                lv_obj_set_style_border_color(
+                    card.border, focused ? rgb(248, 252, 255) : rgb(255, 255, 255), 0);
+                lv_obj_set_style_border_opa(card.border, focused ? 255 : 60, 0);
+                lv_obj_set_style_border_width(card.border, sc_border(focused ? 2 : 1), 0);
+            }
+        }
+
+        const bool need_scroll = total_rows > 2;
+        set_visible(ui_objs.all_scrollbar_track, need_scroll);
+        set_visible(ui_objs.all_scrollbar_thumb, need_scroll);
+        if (need_scroll) {
+            constexpr float track_h = 286.0f;
+            const float thumb_h = std::max(36.0f, track_h * 2.0f / total_rows);
+            const float max_scroll = static_cast<float>(total_rows - 2);
+            const float thumb_y = 111.0f + (track_h - thumb_h) * (all_scroll_row / max_scroll);
+            lv_obj_set_height(ui_objs.all_scrollbar_thumb, sc(thumb_h));
+            set_pos_if_changed(ui_objs.all_scrollbar_thumb, sc(626), sc(thumb_y));
         }
     }
     last_all_focus = a.all_focus;
@@ -1160,6 +1485,128 @@ void sync_picker(const State &a, Uint32 now)
     last_picker_count = a.items.size();
 }
 
+void sync_game_info(const State &a, Uint32 now)
+{
+    if (a.info_game < 0 || a.info_game >= static_cast<int>(a.games.size()))
+        return;
+    const auto &game = a.games[a.info_game];
+
+    const bool rebuilt = (last_info_game != a.info_game || last_info_revision != a.games_revision ||
+                          last_mode != ViewMode::GameInfo);
+    if (rebuilt) {
+        ui_objs.info_boxart_ref = get_cached_image(game_card_art(game), sc(120), sc(152));
+        if (ui_objs.info_boxart_ref && ui_objs.info_boxart_ref->valid()) {
+            lv_image_set_src(ui_objs.info_boxart_img, &ui_objs.info_boxart_ref->dsc);
+            set_visible(ui_objs.info_boxart_img, true);
+            set_visible(ui_objs.info_boxart_fallback, false);
+        } else {
+            set_visible(ui_objs.info_boxart_img, false);
+            lv_label_set_text(ui_objs.info_boxart_fallback, game.title_id.c_str());
+            set_visible(ui_objs.info_boxart_fallback, true);
+        }
+
+        lv_label_set_text(ui_objs.info_badge_id_label, game.title_id.c_str());
+
+        set_visible(ui_objs.info_badge_cat, !game.category.empty());
+        if (!game.category.empty())
+            lv_label_set_text(ui_objs.info_badge_cat_label, game.category.c_str());
+
+        set_visible(ui_objs.info_badge_rating, !game.rating.empty());
+        if (!game.rating.empty())
+            lv_label_set_text(ui_objs.info_badge_rating_label, game.rating.c_str());
+
+        lv_label_set_text(ui_objs.info_desc,
+                          game.description.empty() ? "No description available."
+                                                   : game.description.c_str());
+
+        ui_objs.info_shots.clear();
+        lv_obj_clean(ui_objs.info_shot_strip);
+        const int shot_count = static_cast<int>(game.screenshots.size());
+        for (int i = 0; i < shot_count; ++i) {
+            ScreenshotCard scard;
+            scard.root = make_box(ui_objs.info_shot_strip, i * 276, 0, 264, 148, rgb(24, 40, 51),
+                                  255, 6);
+            lv_obj_set_style_clip_corner(scard.root, true, 0);
+            scard.art_ref = get_cached_image(game.screenshots[i], sc(264), sc(148));
+            scard.img = lv_image_create(scard.root);
+            init_clean_obj(scard.img, 0, 0, 264, 148);
+            if (scard.art_ref && scard.art_ref->valid())
+                lv_image_set_src(scard.img, &scard.art_ref->dsc);
+            scard.border = make_box(scard.root, 0, 0, 264, 148, rgb(0, 0, 0), LV_OPA_TRANSP, 6);
+            lv_obj_set_style_border_color(scard.border, rgb(255, 255, 255), 0);
+            lv_obj_set_style_border_opa(scard.border, 55, 0);
+            lv_obj_set_style_border_width(scard.border, sc_border(1), 0);
+            ui_objs.info_shots.push_back(std::move(scard));
+        }
+
+        set_visible(ui_objs.info_shot_empty, shot_count == 0);
+        set_visible(ui_objs.info_shot_strip, shot_count > 0);
+        set_visible(ui_objs.info_shot_count, shot_count > 0);
+        info_shot_scroll = 0;
+        last_info_game = a.info_game;
+        last_info_revision = a.games_revision;
+    }
+
+    const float top_ent = entrance(a, now);
+    set_opa_if_changed(ui_objs.info_boxart_card, opa_from_float(top_ent));
+    set_pos_if_changed(ui_objs.info_boxart_card, sc(25), sc(70.0f + 8.0f * (1.0f - top_ent)));
+
+    if (rebuilt || last_info_focus != a.info_focus) {
+        const bool play_focused = (a.info_focus == GameInfoFocus::Play);
+        lv_obj_set_style_bg_color(ui_objs.info_play_btn,
+                                  play_focused ? rgb(225, 237, 239) : rgb(40, 62, 74), 0);
+        lv_obj_set_style_text_color(ui_objs.info_play_label,
+                                    play_focused ? rgb(14, 28, 35) : rgb(225, 236, 239), 0);
+        lv_obj_set_style_border_color(ui_objs.info_play_btn,
+                                      play_focused ? rgb(248, 252, 255) : rgb(140, 173, 184), 0);
+        lv_obj_set_style_border_opa(ui_objs.info_play_btn, play_focused ? 255 : 90, 0);
+        lv_obj_set_style_border_width(ui_objs.info_play_btn, sc_border(play_focused ? 2 : 1), 0);
+    }
+
+    const int shot_count = static_cast<int>(ui_objs.info_shots.size());
+    if (shot_count > 0) {
+        if (a.screenshot_index < info_shot_scroll)
+            info_shot_scroll = a.screenshot_index;
+        if (a.screenshot_index >= info_shot_scroll + 2)
+            info_shot_scroll = a.screenshot_index - 1;
+        info_shot_scroll = std::clamp(info_shot_scroll, 0, std::max(0, shot_count - 2));
+
+        const float shot_ent = entrance(a, now, 120);
+        set_opa_if_changed(ui_objs.info_shot_strip, opa_from_float(shot_ent));
+        set_pos_if_changed(ui_objs.info_shot_strip, sc(25), sc(266.0f + 8.0f * (1.0f - shot_ent)));
+
+        for (int i = 0; i < shot_count; ++i) {
+            auto &scard = ui_objs.info_shots[i];
+            set_pos_if_changed(scard.root, sc((i - info_shot_scroll) * 276), 0);
+            if (rebuilt || last_info_focus != a.info_focus ||
+                last_info_shot_idx != a.screenshot_index) {
+                const bool active =
+                    (a.info_focus == GameInfoFocus::Screenshots && i == a.screenshot_index);
+                lv_obj_set_style_border_color(scard.border,
+                                              active ? rgb(248, 252, 255) : rgb(255, 255, 255), 0);
+                lv_obj_set_style_border_opa(scard.border, active ? 255 : 55, 0);
+                lv_obj_set_style_border_width(scard.border, sc_border(active ? 2 : 1), 0);
+            }
+        }
+        if (rebuilt || last_info_shot_idx != a.screenshot_index) {
+            const std::string ratio =
+                std::to_string(a.screenshot_index + 1) + " / " + std::to_string(shot_count);
+            lv_label_set_text(ui_objs.info_shot_count, ratio.c_str());
+            lv_obj_align(ui_objs.info_shot_count, LV_ALIGN_TOP_RIGHT, -sc(25), sc(243));
+        }
+    }
+
+    if (last_info_msg != a.message || rebuilt) {
+        set_visible(ui_objs.info_toast, !a.message.empty());
+        if (!a.message.empty())
+            lv_label_set_text(ui_objs.info_toast_label, a.message.c_str());
+        last_info_msg = a.message;
+    }
+
+    last_info_focus = a.info_focus;
+    last_info_shot_idx = a.screenshot_index;
+}
+
 void flush_cb(lv_display_t *disp, const lv_area_t *, uint8_t *)
 {
     if (lv_display_flush_is_last(disp))
@@ -1179,7 +1626,6 @@ void destroy_fonts()
     drop(fonts.reg_11);
     drop(fonts.reg_12);
     drop(fonts.reg_14);
-    drop(fonts.bold_8);
     drop(fonts.bold_10);
     drop(fonts.bold_11);
     drop(fonts.bold_13);
@@ -1200,7 +1646,6 @@ bool init_fonts()
     fonts.reg_11 = mk(inter_font, sizeof(inter_font), 11);
     fonts.reg_12 = mk(inter_font, sizeof(inter_font), 12);
     fonts.reg_14 = mk(inter_font, sizeof(inter_font), 14);
-    fonts.bold_8 = mk(inter_bold, sizeof(inter_bold), 8);
     fonts.bold_10 = mk(inter_bold, sizeof(inter_bold), 10);
     fonts.bold_11 = mk(inter_bold, sizeof(inter_bold), 11);
     fonts.bold_13 = mk(inter_bold, sizeof(inter_bold), 13);
@@ -1210,9 +1655,9 @@ bool init_fonts()
     fonts.bold_20 = mk(inter_bold, sizeof(inter_bold), 20);
     fonts.bold_22 = mk(inter_bold, sizeof(inter_bold), 22);
     fonts.bold_24 = mk(inter_bold, sizeof(inter_bold), 24);
-    return fonts.reg_10 && fonts.reg_11 && fonts.reg_12 && fonts.reg_14 && fonts.bold_8 &&
-           fonts.bold_10 && fonts.bold_11 && fonts.bold_13 && fonts.bold_15 && fonts.bold_16 &&
-           fonts.bold_19 && fonts.bold_20 && fonts.bold_22 && fonts.bold_24;
+    return fonts.reg_10 && fonts.reg_11 && fonts.reg_12 && fonts.reg_14 && fonts.bold_10 &&
+           fonts.bold_11 && fonts.bold_13 && fonts.bold_15 && fonts.bold_16 && fonts.bold_19 &&
+           fonts.bold_20 && fonts.bold_22 && fonts.bold_24;
 }
 } // namespace
 
@@ -1262,21 +1707,6 @@ bool initialize(const std::filesystem::path &logo_path, int drawable_width, int 
         }
     }
 
-    unsigned char *raw_covers[] = { cover_0, cover_1, cover_2, cover_3 };
-    int raw_sizes[] = { sizeof(cover_0), sizeof(cover_1), sizeof(cover_2), sizeof(cover_3) };
-    for (int i = 0; i < game_count; ++i) {
-        int iw = 0, ih = 0, ch = 0;
-        stbi_uc *rgba = stbi_load_from_memory(raw_covers[i], raw_sizes[i], &iw, &ih, &ch, 4);
-        if (!rgba) {
-            fprintf(stderr, "Could not load cover %d\n", i);
-            continue;
-        }
-        make_cover_variant(rgba, iw, ih, sc(640), sc(440), covers[i].bg);
-        make_cover_variant(rgba, iw, ih, sc(310), sc(154), covers[i].recent);
-        make_cover_variant(rgba, iw, ih, sc(289), sc(136), covers[i].grid);
-        stbi_image_free(rgba);
-    }
-
     const int icon_size = sc(22);
     build_footer_icon(icon_dpad, 'D', icon_size);
     build_footer_icon(icon_key_a, 'A', icon_size);
@@ -1294,11 +1724,14 @@ void shutdown()
         display = nullptr;
     }
     framebuffer_data.clear();
-    for (auto &c : covers) {
-        c.bg.reset();
-        c.recent.reset();
-        c.grid.reset();
-    }
+    ui_objs.recent_cards.clear();
+    ui_objs.all_cards.clear();
+    ui_objs.info_shots.clear();
+    ui_objs.bg_prev_ref.reset();
+    ui_objs.bg_curr_ref.reset();
+    ui_objs.info_boxart_ref.reset();
+    image_cache.clear();
+    image_lru.clear();
     custom_logo_header.reset();
     custom_logo_splash.reset();
     icon_dpad.reset();
@@ -1307,6 +1740,7 @@ void shutdown()
     ui_objs = {};
     last_mode = ViewMode::None;
     last_confirm = ConfirmKind::None;
+    last_games_revision = -1;
 }
 
 void sync(const State &a)
@@ -1323,6 +1757,8 @@ void sync(const State &a)
         mode = ViewMode::AllGames;
     else if (a.screen == Screen::Import)
         mode = ViewMode::Import;
+    else if (a.screen == Screen::GameInfo)
+        mode = ViewMode::GameInfo;
 
     if (mode != last_mode) {
         set_visible(ui_objs.error_layer, mode == ViewMode::Error);
@@ -1333,6 +1769,7 @@ void sync(const State &a)
         set_visible(ui_objs.all_layer, mode == ViewMode::AllGames);
         set_visible(ui_objs.import_layer, mode == ViewMode::Import);
         set_visible(ui_objs.picker_layer, mode == ViewMode::Picker);
+        set_visible(ui_objs.info_layer, mode == ViewMode::GameInfo);
     }
 
     if (mode == ViewMode::Error) {
@@ -1357,6 +1794,9 @@ void sync(const State &a)
         return;
     }
 
+    if (last_games_revision != a.games_revision)
+        rebuild_game_lists(a);
+
     update_background(a, now);
     update_header_and_footer(a);
 
@@ -1368,6 +1808,8 @@ void sync(const State &a)
         sync_import(a, now);
     else if (mode == ViewMode::Picker)
         sync_picker(a, now);
+    else if (mode == ViewMode::GameInfo)
+        sync_game_info(a, now);
 
     float confirm_p = 0.0f;
     if (a.confirm != ConfirmKind::None) {
@@ -1388,7 +1830,8 @@ void sync(const State &a)
     } else {
         const ConfirmKind kind =
             a.confirm != ConfirmKind::None ? a.confirm : a.previous_confirm;
-        if (kind != last_confirm || lv_obj_has_flag(ui_objs.confirm_modal.backdrop, LV_OBJ_FLAG_HIDDEN)) {
+        if (kind != last_confirm ||
+            lv_obj_has_flag(ui_objs.confirm_modal.backdrop, LV_OBJ_FLAG_HIDDEN)) {
             if (kind == ConfirmKind::Quit) {
                 set_confirm_modal(ui_objs.confirm_modal, true, "Quit V2N Launcher?",
                                   "Are you sure you want to exit the launcher?", "QUIT", "CANCEL");

@@ -1,8 +1,7 @@
 # V2N Launcher
 
-A 640×480 SDL2 and LVGL launcher with a mock library and a working package import flow.
-The Recent Games and All Games views use placeholder entries; games are not scanned or started.
-The startup progress is simulated.
+A 640×480 SDL2 and LVGL launcher with directory scanning (`*/eboot.bin`), optional `v2n.toml` game metadata, a Game Info screen, and a working package import flow.
+Launching games from `PLAY` is still a placeholder; startup progress is simulated.
 
 ## Build
 
@@ -62,9 +61,7 @@ cmake --preset release
 cmake --build --preset release --target v2n-launcher
 ```
 
-Inter and the sample cover artwork are embedded in the executable. The font
-license is in `assets/INTER-LICENSE.txt`. The four original placeholder images
-were generated with OpenAI image generation for this launcher:
+Inter is embedded in the executable; its license is in `assets/INTER-LICENSE.txt`. The four sample images in `assets/` were generated with OpenAI image generation:
 
 - `cover-0.jpg`: cloaked explorer, twilight valley and luminous arch.
 - `cover-1.jpg`: silver-armored explorer and floating ruins in space.
@@ -94,11 +91,15 @@ loader = "./v2n"
 
 Relative paths are resolved against the directory containing `launcher.toml`,
 or against the startup working directory when it is absent. `games` is the
-directory for imported title-ID folders and will also be used for game scanning.
-It is created when an import begins. If you used the earlier `paths.extract`
-key, rename it to `paths.games`.
-`loader` is retained for a future game-launching feature; the current mock games
-cannot be started. The optional logo replaces the built-in mark on the splash and
+directory for imported and scanned title-ID folders: any subdirectory matching
+`*/eboot.bin` is added to the library with its folder name as the Title ID and
+default display name.
+If a title folder contains an optional `v2n.toml`, the launcher reads `name`,
+`description`, `category`, `rating`, `art` (or `hero`), `boxart` (or `cover`),
+and `screenshots` (string or array of strings), either as top-level keys or
+under `[meta]` / `[game]` and `[media]`. Image fields accept glob patterns
+(`*`, `?`, `**`) relative to the title directory.
+`loader` is retained for launching titles from Game Info (currently a placeholder). The optional logo replaces the built-in mark on the splash and
 header, retaining its aspect ratio. If it cannot be loaded, the launcher shows a
 warning and uses the built-in mark. LunaSVG supports many SVG features, though
 complex SVGs may not render identically to a browser. An invalid or unreadable
@@ -122,8 +123,9 @@ also writes diagnostics to the application console.
 
 - D-pad or arrow keys: navigate. Analog sticks are also supported.
 - A / Enter / Space: select. B / Escape / Backspace: back; on Games, exit.
-- On the home screen, left/right cycle through recent games. Down moves to the two action cards; left/right select a card and up returns to recent games.
-- In All Games, navigate the grid with the D-pad or arrows; B or Escape returns to the home screen.
+- On the home screen, left/right cycle through recent games (up to 8 titles). Down moves to the two action cards; left/right select a card and up returns to recent games. Selecting a game opens Game Info.
+- In All Games, navigate the 2-column scrollable grid with the D-pad or arrows; A opens Game Info and B or Escape returns to the home screen.
+- In Game Info, Up/Down move focus between `PLAY` and the `Screenshots` strip, Left/Right cycle screenshots, A triggers `PLAY` (currently a placeholder notification), and B or Escape returns to the previous screen.
 - The picker shows directories and matching files; select `..` to go up.
 
 SDL game controllers are supported, including hot-plugging. Unmapped joysticks
@@ -137,7 +139,8 @@ mappings vary; a platform SDL game-controller mapping may be needed.
 - `state.h` and `state.cpp` define navigation, focus and picker state.
 - `input.cpp` maps keyboard, controller and joystick events to navigation actions.
 - `import.cpp` starts the import thread and receives its channel messages.
-- `../../src/package/` implements the package, PFS and SELF extraction pipeline.
-- `ui.cpp` builds and updates the screens with LVGL; `library.h` holds the mock games.
+- `../package/` implements the package, PFS and SELF extraction pipeline.
+- `library.h` and `library.cpp` scan `*/eboot.bin`, parse `v2n.toml`, and expand media globs.
+- `ui.cpp` builds and updates the screens with LVGL.
 
 The launcher is excluded from the project test suite.

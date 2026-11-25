@@ -17,7 +17,8 @@ namespace fs = std::filesystem;
 enum class Screen {
     Home,
     Import,
-    AllGames
+    AllGames,
+    GameInfo
 };
 enum class HomeFocus {
     RecentGames,
@@ -32,6 +33,10 @@ enum class ImportFocus {
     Package,
     License,
     Start
+};
+enum class GameInfoFocus {
+    Play,
+    Screenshots
 };
 enum class ConfirmKind {
     None,
@@ -67,19 +72,25 @@ struct State {
     State &operator=(const State &) = delete;
     Config config;
     std::string config_error;
+    std::vector<GameEntry> games;
+    int games_revision = 0;
     bool running = true;
     bool picker = false;
     ConfirmKind confirm = ConfirmKind::None;
     ConfirmKind previous_confirm = ConfirmKind::None;
     Screen screen = Screen::Home;
+    Screen info_return_screen = Screen::Home;
     HomeFocus home_focus = HomeFocus::RecentGames;
     HomeFocus previous_home_focus = HomeFocus::RecentGames;
     PickerKind pick_kind = PickerKind::Package;
     ImportFocus import_focus = ImportFocus::Package;
+    GameInfoFocus info_focus = GameInfoFocus::Play;
     int selected = 0;
     int pick_index = 0;
     int scroll = 0;
     int all_focus = 0;
+    int info_game = 0;
+    int screenshot_index = 0;
     int previous = 0;
     int direction = 0;
     int queued = 0;
@@ -100,7 +111,10 @@ struct State {
     std::unique_ptr<ImportWorker> worker;
     Uint32 start = SDL_GetTicks();
 
+    int recent_count() const;
+    void refresh_games();
     void change_screen(Screen next);
+    void open_game_info(int index, Screen return_to);
     void set_home_focus(HomeFocus next);
     void set_confirm(ConfirmKind next);
     void move_game(int step);
@@ -117,7 +131,8 @@ struct State {
     // between events without repeatedly rendering on software-backed devices.
     auto visible_state() const
     {
-        return std::make_tuple(screen, home_focus, all_focus, import_focus, selected, picker,
+        return std::make_tuple(games_revision, screen, home_focus, all_focus, import_focus,
+                               info_focus, info_game, screenshot_index, selected, picker,
                                confirm, pick_index, scroll, dir, pkg, license, message,
                                import_running());
     }
@@ -127,5 +142,6 @@ struct State {
     void handle_home(Action action);
     void handle_all_games(Action action);
     void handle_import(Action action);
+    void handle_game_info(Action action);
 };
 } // namespace launcher

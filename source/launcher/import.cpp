@@ -141,6 +141,12 @@ class ImportWorker {
 State::State(Config settings, std::string error)
     : config(std::move(settings)), config_error(std::move(error))
 {
+    if (config_error.empty())
+        refresh_games();
+    if (games.empty()) {
+        home_focus = HomeFocus::Import;
+        previous_home_focus = HomeFocus::Import;
+    }
 }
 State::~State() = default;
 
@@ -217,6 +223,7 @@ void State::poll()
             return;
         }
         fs::remove_all(stage, ec);
+        refresh_games();
         message = "Import complete: " + dest.filename().string();
         pkg.clear();
         license.clear();

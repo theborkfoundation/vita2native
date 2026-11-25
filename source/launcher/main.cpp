@@ -23,6 +23,8 @@ void configure_snapshot(State &state)
         state.screen = Screen::Import;
     if (screen && strcmp(screen, "all") == 0)
         state.screen = Screen::AllGames;
+    if (screen && strcmp(screen, "game-info") == 0 && !state.games.empty())
+        state.open_game_info(0, Screen::Home);
     if (screen && strcmp(screen, "home-focus") == 0)
         state.home_focus = state.previous_home_focus = HomeFocus::AllGames;
     if (screen && strcmp(screen, "picker") == 0) {

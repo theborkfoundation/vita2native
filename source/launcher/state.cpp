@@ -5,12 +5,58 @@
 
 namespace launcher
 {
+int State::recent_count() const
+{
+    return std::min<int>(static_cast<int>(games.size()), recent_game_limit);
+}
+
+void State::refresh_games()
+{
+    games = scan_games(config.games_path);
+    ++games_revision;
+    const int n = static_cast<int>(games.size());
+    const int rc = recent_count();
+    if (rc == 0) {
+        selected = 0;
+        previous = 0;
+        moving = false;
+        queued = 0;
+        if (home_focus == HomeFocus::RecentGames) {
+            home_focus = HomeFocus::Import;
+            previous_home_focus = HomeFocus::Import;
+        }
+    } else {
+        selected = std::clamp(selected, 0, rc - 1);
+        previous = std::clamp(previous, 0, rc - 1);
+    }
+    if (n == 0) {
+        all_focus = 0;
+        info_game = 0;
+    } else {
+        all_focus = std::clamp(all_focus, 0, n - 1);
+        info_game = std::clamp(info_game, 0, n - 1);
+    }
+}
+
 void State::change_screen(Screen next)
 {
     screen = next;
     import_focus = ImportFocus::Package;
     message.clear();
     screen_start = SDL_GetTicks();
+}
+
+void State::open_game_info(int index, Screen return_to)
+{
+    if (index < 0 || index >= static_cast<int>(games.size()))
+        return;
+    moving = false;
+    queued = 0;
+    info_game = index;
+    info_return_screen = return_to;
+    info_focus = GameInfoFocus::Play;
+    screenshot_index = 0;
+    change_screen(Screen::GameInfo);
 }
 
 void State::set_home_focus(HomeFocus next)
@@ -33,12 +79,15 @@ void State::set_confirm(ConfirmKind next)
 
 void State::move_game(int step)
 {
+    const int rc = recent_count();
+    if (rc <= 1)
+        return;
     if (moving) {
         queued = std::clamp(queued + step, -8, 8);
         return;
     }
     previous = selected;
-    selected = (selected + step + game_count) % game_count;
+    selected = (selected + step + rc) % rc;
     direction = step;
     motion_start = SDL_GetTicks();
     moving = true;
@@ -136,7 +185,8 @@ void State::handle_picker(Action action)
 
 void State::handle_home(Action action)
 {
-    if (action == Action::Up && home_focus != HomeFocus::RecentGames)
+    const int rc = recent_count();
+    if (action == Action::Up && home_focus != HomeFocus::RecentGames && rc > 0)
         set_home_focus(HomeFocus::RecentGames);
     else if (action == Action::Down && home_focus == HomeFocus::RecentGames)
         set_home_focus(HomeFocus::AllGames);
@@ -151,32 +201,39 @@ void State::handle_home(Action action)
         if (home_focus == HomeFocus::AllGames) {
             moving = false;
             queued = 0;
-            all_focus = selected;
+            all_focus = games.empty() ? 0 : std::clamp(selected, 0, static_cast<int>(games.size()) - 1);
             change_screen(Screen::AllGames);
         } else if (home_focus == HomeFocus::Import) {
             moving = false;
             queued = 0;
             change_screen(Screen::Import);
-        } else {
-            message = "Games are sample entries for now.";
+        } else if (rc > 0) {
+            open_game_info(selected, Screen::Home);
         }
     }
 }
 
 void State::handle_all_games(Action action)
 {
+    const int count = static_cast<int>(games.size());
+    if (count == 0)
+        return;
     constexpr int columns = 2;
     if (action == Action::Left && all_focus % columns == 1)
         --all_focus;
-    else if (action == Action::Right && all_focus % columns == 0)
+    else if (action == Action::Right && all_focus % columns == 0 && all_focus + 1 < count)
         ++all_focus;
     else if (action == Action::Up && all_focus >= columns)
         all_focus -= columns;
-    else if (action == Action::Down && all_focus < columns)
-        all_focus += columns;
-    else if (action == Action::Select) {
-        selected = all_focus;
-        message = "Games are sample entries for now.";
+    else if (action == Action::Down) {
+        if (all_focus + columns < count)
+            all_focus += columns;
+        else if (all_focus / columns < (count - 1) / columns)
+            all_focus = count - 1;
+    } else if (action == Action::Select) {
+        if (all_focus < recent_count())
+            selected = all_focus;
+        open_game_info(all_focus, Screen::AllGames);
     }
 }
 
@@ -199,6 +256,27 @@ void State::handle_import(Action action)
             browse(PickerKind::License);
         else
             start_import();
+    }
+}
+
+void State::handle_game_info(Action action)
+{
+    if (info_game < 0 || info_game >= static_cast<int>(games.size()))
+        return;
+    const auto &game = games[info_game];
+    const int shot_count = static_cast<int>(game.screenshots.size());
+
+    if (action == Action::Up) {
+        info_focus = GameInfoFocus::Play;
+    } else if (action == Action::Down && shot_count > 0) {
+        info_focus = GameInfoFocus::Screenshots;
+    } else if (action == Action::Left && info_focus == GameInfoFocus::Screenshots && shot_count > 0) {
+        screenshot_index = std::max(0, screenshot_index - 1);
+    } else if (action == Action::Right && info_focus == GameInfoFocus::Screenshots &&
+               shot_count > 0) {
+        screenshot_index = std::min(shot_count - 1, screenshot_index + 1);
+    } else if (action == Action::Select && info_focus == GameInfoFocus::Play) {
+        message = "Launching is not implemented yet.";
     }
 }
 
@@ -231,6 +309,13 @@ void State::action(Action action)
     if (action == Action::Back) {
         if (screen == Screen::Home) {
             set_confirm(ConfirmKind::Quit);
+        } else if (screen == Screen::GameInfo) {
+            change_screen(info_return_screen);
+            if (info_return_screen == Screen::Home) {
+                home_focus = recent_count() > 0 ? HomeFocus::RecentGames : HomeFocus::AllGames;
+                previous_home_focus = home_focus;
+                focus_start = 0;
+            }
         } else {
             Screen from = screen;
             change_screen(Screen::Home);
@@ -249,6 +334,9 @@ void State::action(Action action)
         break;
     case Screen::Import:
         handle_import(action);
+        break;
+    case Screen::GameInfo:
+        handle_game_info(action);
         break;
     }
 }
