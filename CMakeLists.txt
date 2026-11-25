@@ -60,7 +60,5 @@ include(cmake/sources.cmake)
 # Smoke tests (skipped when BUILD_TESTING is off).
 include(cmake/tests.cmake)
 
-include(cmake/install.cmake)
-
 # Handheld library and package importer.
 add_subdirectory(source/launcher)
