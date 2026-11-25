@@ -3,7 +3,10 @@
 #include <toml++/toml.hpp>
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <system_error>
@@ -203,10 +206,80 @@ void append_media_field(const fs::path &game_dir, const toml::node *node,
     dest.erase(std::unique(dest.begin(), dest.end()), dest.end());
 }
 
+std::string read_sfo_title(const fs::path &sfo_path)
+{
+    std::ifstream f(sfo_path, std::ios::binary | std::ios::ate);
+    if (!f)
+        return {};
+    const std::streamoff size = f.tellg();
+    if (size < 20 || size > 64 * 1024)
+        return {};
+    std::vector<uint8_t> buf(static_cast<size_t>(size));
+    f.seekg(0);
+    if (!f.read(reinterpret_cast<char *>(buf.data()), size))
+        return {};
+
+    auto u16le = [&](size_t off) -> uint16_t {
+        return static_cast<uint16_t>(buf[off]) | (static_cast<uint16_t>(buf[off + 1]) << 8);
+    };
+    auto u32le = [&](size_t off) -> uint32_t {
+        return static_cast<uint32_t>(buf[off]) | (static_cast<uint32_t>(buf[off + 1]) << 8) |
+               (static_cast<uint32_t>(buf[off + 2]) << 16) |
+               (static_cast<uint32_t>(buf[off + 3]) << 24);
+    };
+    if (u32le(0) != 0x46535000u)
+        return {};
+
+    const uint32_t keys_offset = u32le(8);
+    const uint32_t values_offset = u32le(12);
+    const uint32_t count = u32le(16);
+    std::string title, stitle;
+
+    for (uint32_t i = 0; i < count && 20 + i * 16 + 16 <= static_cast<uint32_t>(size); ++i) {
+        const size_t e = 20 + i * 16;
+        const uint32_t key_off = keys_offset + u16le(e);
+        const uint32_t val_off = values_offset + u32le(e + 12);
+        if (key_off >= static_cast<uint32_t>(size) || val_off >= static_cast<uint32_t>(size))
+            continue;
+        const char *key = reinterpret_cast<const char *>(&buf[key_off]);
+        const size_t key_max = static_cast<size_t>(size) - key_off;
+        const size_t val_max = static_cast<size_t>(size) - val_off;
+        if (!std::memchr(key, '\0', key_max))
+            continue;
+        const char *val = reinterpret_cast<const char *>(&buf[val_off]);
+        const void *val_nul = std::memchr(val, '\0', val_max);
+        const size_t val_len =
+            val_nul ? static_cast<const char *>(val_nul) - val : val_max;
+        if (std::strcmp(key, "TITLE") == 0 && title.empty())
+            title.assign(val, val_len);
+        else if (std::strcmp(key, "STITLE") == 0 && stitle.empty())
+            stitle.assign(val, val_len);
+    }
+
+    std::string chosen = !title.empty() ? std::move(title) : std::move(stitle);
+    for (char &c : chosen) {
+        if (c == '\n' || c == '\r')
+            c = ' ';
+    }
+    return chosen;
+}
+
 void load_metadata(GameEntry &entry)
 {
-    const fs::path toml_path = entry.dir / "v2n.toml";
     std::error_code ec;
+    const fs::path sce_sys = entry.dir / "sce_sys";
+    if (fs::is_directory(sce_sys, ec)) {
+        if (auto sfo_title = read_sfo_title(sce_sys / "param.sfo"); !sfo_title.empty())
+            entry.name = std::move(sfo_title);
+        if (fs::is_regular_file(sce_sys / "icon0.png", ec))
+            entry.icon = sce_sys / "icon0.png";
+        if (fs::is_regular_file(sce_sys / "pic0.png", ec))
+            entry.art = sce_sys / "pic0.png";
+        else if (fs::is_regular_file(sce_sys / "livearea" / "contents" / "bg.png", ec))
+            entry.art = sce_sys / "livearea" / "contents" / "bg.png";
+    }
+
+    const fs::path toml_path = entry.dir / "v2n.toml";
     if (!fs::is_regular_file(toml_path, ec))
         return;
 
@@ -233,8 +306,10 @@ void load_metadata(GameEntry &entry)
             return {};
         };
 
-        entry.art = pick_single("art", "hero");
-        entry.icon = pick_single("icon", "boxart");
+        if (auto art = pick_single("art", "hero"); !art.empty())
+            entry.art = std::move(art);
+        if (auto icon = pick_single("icon", "boxart"); !icon.empty())
+            entry.icon = std::move(icon);
         append_media_field(entry.dir, find_key(root, "media", "game", "screenshots"),
                            entry.screenshots);
     } catch (const std::exception &err) {
@@ -281,5 +356,17 @@ std::vector<GameEntry> scan_games(const fs::path &games_path)
         return a.title_id < b.title_id;
     });
     return games;
+}
+
+std::vector<fs::path> gallery_media(const GameEntry &entry)
+{
+    std::vector<fs::path> out;
+    if (!entry.art.empty())
+        out.push_back(entry.art);
+    for (const auto &shot : entry.screenshots) {
+        if (shot != entry.art)
+            out.push_back(shot);
+    }
+    return out;
 }
 } // namespace launcher

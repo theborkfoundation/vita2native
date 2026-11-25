@@ -216,7 +216,7 @@ void State::handle_game_info(Action action)
     if (info_game < 0 || info_game >= static_cast<int>(games.size()))
         return;
     const auto &game = games[info_game];
-    const int shot_count = static_cast<int>(game.screenshots.size());
+    const int shot_count = static_cast<int>(gallery_media(game).size());
 
     if (action == Action::Up) {
         info_focus = GameInfoFocus::Play;

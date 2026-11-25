@@ -23,4 +23,7 @@ inline constexpr int recent_game_limit = 8;
 
 // Scans <games_path>/*/eboot.bin and loads optional companion v2n.toml metadata.
 std::vector<GameEntry> scan_games(const std::filesystem::path &games_path);
+
+// Returns hero art (when present) followed by screenshots, deduplicated.
+std::vector<std::filesystem::path> gallery_media(const GameEntry &entry);
 } // namespace launcher

@@ -942,7 +942,7 @@ void create_ui_tree()
         make_centered_label(ui_objs.info_play_btn, "PLAY", fonts.bold_16, rgb(14, 28, 35));
 
     ui_objs.info_shot_heading =
-        make_label(ui_objs.info_layer, 25, 238, "Screenshots", fonts.bold_20, rgb(248, 251, 253));
+        make_label(ui_objs.info_layer, 25, 238, "Gallery", fonts.bold_20, rgb(248, 251, 253));
     ui_objs.info_shot_count =
         make_label(ui_objs.info_layer, 0, 242, "", fonts.bold_14, rgb(174, 192, 200));
     lv_obj_align(ui_objs.info_shot_count, LV_ALIGN_TOP_RIGHT, -sc(25), sc(242));
@@ -952,7 +952,7 @@ void create_ui_tree()
     lv_obj_set_style_border_color(ui_objs.info_shot_empty, rgb(119, 150, 162), 0);
     lv_obj_set_style_border_opa(ui_objs.info_shot_empty, 60, 0);
     lv_obj_set_style_border_width(ui_objs.info_shot_empty, sc_border(1), 0);
-    make_centered_label(ui_objs.info_shot_empty, "No screenshots available.", fonts.reg_16,
+    make_centered_label(ui_objs.info_shot_empty, "No media available.", fonts.reg_16,
                         rgb(155, 179, 188));
     lv_obj_add_flag(ui_objs.info_shot_empty, LV_OBJ_FLAG_HIDDEN);
 
@@ -1282,13 +1282,14 @@ void sync_game_info(const State &a, Uint32 now)
 
         ui_objs.info_shots.clear();
         lv_obj_clean(ui_objs.info_shot_strip);
-        const int shot_count = static_cast<int>(game.screenshots.size());
+        const auto media = gallery_media(game);
+        const int shot_count = static_cast<int>(media.size());
         for (int i = 0; i < shot_count; ++i) {
             ScreenshotCard scard;
             scard.root = make_box(ui_objs.info_shot_strip, i * 276, 0, 264, 148, rgb(24, 40, 51),
                                   255, 6);
             lv_obj_set_style_clip_corner(scard.root, true, 0);
-            scard.art_ref = get_cached_image(game.screenshots[i], sc(264), sc(148));
+            scard.art_ref = get_cached_image(media[i], sc(264), sc(148));
             scard.img = lv_image_create(scard.root);
             init_clean_obj(scard.img, 0, 0, 264, 148);
             if (scard.art_ref && scard.art_ref->valid())
