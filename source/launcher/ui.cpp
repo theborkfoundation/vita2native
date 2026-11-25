@@ -200,6 +200,7 @@ struct Widgets {
     lv_obj_t *info_icon_card = nullptr;
     lv_obj_t *info_icon_img = nullptr;
     lv_obj_t *info_icon_fallback = nullptr;
+    lv_obj_t *info_icon_border = nullptr;
     std::shared_ptr<ImageBuffer> info_icon_ref;
     lv_obj_t *info_badges = nullptr;
     lv_obj_t *info_badge_id = nullptr;
@@ -245,6 +246,8 @@ int last_info_revision = -1;
 GameInfoFocus last_info_focus = GameInfoFocus::Play;
 int last_info_shot_idx = -1;
 int info_shot_scroll = 0;
+float info_icon_x = 25.0f;
+float info_icon_y = 70.0f;
 std::string last_toast_text;
 ToastKind last_toast_kind = ToastKind::Info;
 std::string last_footer_back;
@@ -460,7 +463,19 @@ std::shared_ptr<ImageBuffer> get_cached_image(const fs::path &path, int target_w
 
 std::filesystem::path game_card_art(const GameEntry &g)
 {
+    return !g.art.empty() ? g.art : g.icon;
+}
+
+std::filesystem::path game_info_icon(const GameEntry &g)
+{
     return !g.icon.empty() ? g.icon : g.art;
+}
+
+bool probe_image_size(const fs::path &path, int &w, int &h)
+{
+    if (path.empty())
+        return false;
+    return stbi_info(path.string().c_str(), &w, &h, nullptr) != 0 && w > 0 && h > 0;
 }
 
 float dist_segment(float px, float py, float ax, float ay, float bx, float by)
@@ -789,7 +804,7 @@ void create_ui_tree()
         make_label(ui_objs.home_layer, 25, 68, "Recent games", fonts.bold_24, rgb(248, 251, 253));
 
     ui_objs.home_carousel = lv_obj_create(ui_objs.home_layer);
-    init_clean_obj(ui_objs.home_carousel, 0, 102, 640, 166);
+    init_clean_obj(ui_objs.home_carousel, 0, 102, 640, 184);
 
     ui_objs.home_empty =
         make_box(ui_objs.home_layer, 25, 106, 590, 154, rgb(24, 40, 51), 200, 6);
@@ -832,7 +847,7 @@ void create_ui_tree()
     lv_obj_align(ui_objs.all_count, LV_ALIGN_TOP_RIGHT, -sc(25), sc(74));
 
     ui_objs.all_viewport = lv_obj_create(ui_objs.all_layer);
-    init_clean_obj(ui_objs.all_viewport, 0, 104, 640, 328);
+    init_clean_obj(ui_objs.all_viewport, 0, 98, 640, 340);
 
     ui_objs.all_empty =
         make_box(ui_objs.all_layer, 25, 108, 590, 154, rgb(24, 40, 51), 200, 6);
@@ -903,11 +918,11 @@ void create_ui_tree()
         make_label(ui_objs.info_icon_card, 0, 0, "", fonts.bold_20, rgb(159, 190, 201));
     lv_obj_set_style_text_opa(ui_objs.info_icon_fallback, 140, 0);
     lv_obj_align(ui_objs.info_icon_fallback, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_t *icon_border =
+    ui_objs.info_icon_border =
         make_box(ui_objs.info_icon_card, 0, 0, 120, 152, rgb(0, 0, 0), LV_OPA_TRANSP, 6);
-    lv_obj_set_style_border_color(icon_border, rgb(255, 255, 255), 0);
-    lv_obj_set_style_border_opa(icon_border, 70, 0);
-    lv_obj_set_style_border_width(icon_border, sc_border(1), 0);
+    lv_obj_set_style_border_color(ui_objs.info_icon_border, rgb(255, 255, 255), 0);
+    lv_obj_set_style_border_opa(ui_objs.info_icon_border, 70, 0);
+    lv_obj_set_style_border_width(ui_objs.info_icon_border, sc_border(1), 0);
 
     ui_objs.info_badges = lv_obj_create(ui_objs.info_layer);
     init_clean_obj(ui_objs.info_badges, 162, 70, 453, 28);
@@ -1013,8 +1028,8 @@ void rebuild_game_lists(const State &a)
     const int rc = a.recent_count();
     for (int i = 0; i < rc; ++i) {
         ui_objs.recent_cards.push_back(build_game_card(
-            ui_objs.home_carousel, 25 + i * 320, 4, 310, 154, a.games[i], fonts.bold_22, 16,
-            154 - 36, 310 - 32, 220));
+            ui_objs.home_carousel, 25 + i * 320, 4, 310, 176, a.games[i], fonts.bold_22, 16,
+            176 - 36, 310 - 32, 220));
     }
     set_visible(ui_objs.home_carousel, rc > 0);
     set_visible(ui_objs.home_empty, rc == 0);
@@ -1025,8 +1040,8 @@ void rebuild_game_lists(const State &a)
     const int total = static_cast<int>(a.games.size());
     for (int i = 0; i < total; ++i) {
         ui_objs.all_cards.push_back(build_game_card(
-            ui_objs.all_viewport, 25 + (i % 2) * 301, 4 + (i / 2) * 150, 289, 136, a.games[i],
-            fonts.bold_20, 14, 101, 260, 225));
+            ui_objs.all_viewport, 25 + (i % 2) * 301, 2 + (i / 2) * 170, 289, 164, a.games[i],
+            fonts.bold_20, 14, 129, 260, 225));
     }
     set_visible(ui_objs.all_viewport, total > 0);
     set_visible(ui_objs.all_empty, total == 0);
@@ -1179,13 +1194,13 @@ void sync_all_games(const State &a, Uint32 now)
         const int total_rows = (count + 1) / 2;
         all_scroll_row = std::clamp(all_scroll_row, 0, std::max(0, total_rows - 2));
 
-        const float scroll_y = static_cast<float>(all_scroll_row * 150);
+        const float scroll_y = static_cast<float>(all_scroll_row * 170);
         for (int i = 0; i < count; ++i) {
             const int row = i / 2;
             const int vis_idx = std::max(0, (row - all_scroll_row) * 2 + (i % 2));
             const float show = entrance(a, now, 60 + std::min(vis_idx, 3) * 60);
             const float x = 25 + (i % 2) * 301;
-            const float y = 4 + row * 150 - scroll_y + 10.0f * (1.0f - show);
+            const float y = 2 + row * 170 - scroll_y + 10.0f * (1.0f - show);
             auto &card = ui_objs.all_cards[i];
             set_pos_if_changed(card.root, sc(x), sc(y));
             set_opa_if_changed(card.root, opa_from_float(show));
@@ -1255,7 +1270,22 @@ void sync_game_info(const State &a, Uint32 now)
     const bool rebuilt = (last_info_game != a.info_game || last_info_revision != a.games_revision ||
                           last_mode != ViewMode::GameInfo);
     if (rebuilt) {
-        ui_objs.info_icon_ref = get_cached_image(game_card_art(game), sc(120), sc(152));
+        const fs::path icon_path = game_info_icon(game);
+        int iw = 0, ih = 0;
+        int disp_w = 120, disp_h = 152;
+        if (probe_image_size(icon_path, iw, ih)) {
+            const float scale = std::min(120.0f / static_cast<float>(iw),
+                                         152.0f / static_cast<float>(ih));
+            disp_w = std::max(1, static_cast<int>(std::lround(iw * scale)));
+            disp_h = std::max(1, static_cast<int>(std::lround(ih * scale)));
+        }
+        info_icon_x = 25.0f + (120.0f - static_cast<float>(disp_w)) * 0.5f;
+        info_icon_y = 70.0f + (152.0f - static_cast<float>(disp_h)) * 0.5f;
+        lv_obj_set_size(ui_objs.info_icon_card, sc(disp_w), sc(disp_h));
+        lv_obj_set_size(ui_objs.info_icon_img, sc(disp_w), sc(disp_h));
+        lv_obj_set_size(ui_objs.info_icon_border, sc(disp_w), sc(disp_h));
+
+        ui_objs.info_icon_ref = get_cached_image(icon_path, sc(disp_w), sc(disp_h));
         if (ui_objs.info_icon_ref && ui_objs.info_icon_ref->valid()) {
             lv_image_set_src(ui_objs.info_icon_img, &ui_objs.info_icon_ref->dsc);
             set_visible(ui_objs.info_icon_img, true);
@@ -1311,7 +1341,8 @@ void sync_game_info(const State &a, Uint32 now)
 
     const float top_ent = entrance(a, now);
     set_opa_if_changed(ui_objs.info_icon_card, opa_from_float(top_ent));
-    set_pos_if_changed(ui_objs.info_icon_card, sc(25), sc(70.0f + 8.0f * (1.0f - top_ent)));
+    set_pos_if_changed(ui_objs.info_icon_card, sc(info_icon_x),
+                       sc(info_icon_y + 8.0f * (1.0f - top_ent)));
 
     if (rebuilt || last_info_focus != a.info_focus) {
         const bool play_focused = (a.info_focus == GameInfoFocus::Play);
