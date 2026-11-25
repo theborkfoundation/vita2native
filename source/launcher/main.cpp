@@ -6,9 +6,15 @@
 #ifdef __APPLE__
 #include "macos_activate.h"
 #endif
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
+#include <sys/wait.h>
+#include <unistd.h>
+
+extern char **environ;
 
 namespace
 {
@@ -86,8 +92,8 @@ void present(SDL_Renderer *renderer, SDL_Texture *texture, bool upload)
     SDL_RenderPresent(renderer);
 }
 
-void run(SDL_Renderer *renderer, SDL_Texture *texture, const ConfigResult &settings,
-         const std::string &warning)
+std::optional<std::filesystem::path> run(SDL_Renderer *renderer, SDL_Texture *texture,
+                                         const ConfigResult &settings, const std::string &warning)
 {
     State state(settings.config, settings.error);
     state.message = warning;
@@ -142,6 +148,7 @@ void run(SDL_Renderer *renderer, SDL_Texture *texture, const ConfigResult &setti
         }
         SDL_Delay(16);
     }
+    return state.launch_eboot;
 }
 } // namespace
 
@@ -184,6 +191,7 @@ int main(int, char **)
         out_h = screen_height;
     }
     int result = 0;
+    std::optional<std::filesystem::path> launch_eboot;
     std::string logo_warning;
     if (!launcher::ui::initialize(settings.error.empty() ? settings.config.logo_path :
                                                           std::filesystem::path{},
@@ -200,7 +208,7 @@ int main(int, char **)
             fprintf(stderr, "SDL texture: %s\n", SDL_GetError());
             result = 1;
         } else {
-            run(renderer, texture, settings, logo_warning);
+            launch_eboot = run(renderer, texture, settings, logo_warning);
             SDL_DestroyTexture(texture);
         }
         launcher::ui::shutdown();
@@ -208,5 +216,28 @@ int main(int, char **)
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
+    if (launch_eboot.has_value()) {
+        std::string loader = settings.config.loader_path.string();
+        std::string eboot = launch_eboot->string();
+        char *args[] = { loader.data(), eboot.data(), nullptr };
+        const pid_t pid = fork();
+        if (pid < 0) {
+            fprintf(stderr, "Failed to fork for %s: %s\n", loader.c_str(), strerror(errno));
+            return 1;
+        }
+        if (pid == 0) {
+            execve(loader.c_str(), args, environ);
+            fprintf(stderr, "Failed to launch %s: %s\n", loader.c_str(), strerror(errno));
+            _exit(127);
+        }
+        int status = 0;
+        while (waitpid(pid, &status, 0) < 0) {
+            if (errno != EINTR) {
+                fprintf(stderr, "waitpid failed: %s\n", strerror(errno));
+                return 1;
+            }
+        }
+        return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+    }
     return result;
 }

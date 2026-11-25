@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cctype>
+#include <unistd.h>
 
 #include "state.h"
 
@@ -316,7 +317,22 @@ void State::handle_game_info(Action action)
                shot_count > 0) {
         screenshot_index = std::min(shot_count - 1, screenshot_index + 1);
     } else if (action == Action::Select && info_focus == GameInfoFocus::Play) {
-        show_toast("Launching is not implemented yet.");
+#ifdef __APPLE__
+        show_toast("Launching is not supported on macOS.", ToastKind::Info);
+#else
+        std::error_code ec;
+        if (!fs::is_regular_file(config.loader_path, ec) ||
+            access(config.loader_path.c_str(), X_OK) != 0) {
+            show_toast("Loader not found or not executable.", ToastKind::Error);
+            return;
+        }
+        if (!fs::is_regular_file(game.eboot, ec)) {
+            show_toast("Could not find eboot.bin.", ToastKind::Error);
+            return;
+        }
+        launch_eboot = game.eboot;
+        running = false;
+#endif
     }
 }
 

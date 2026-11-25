@@ -148,6 +148,7 @@ struct State {
     uint64_t active_import_id = 0;
     std::string message;
     std::string toast;
+    std::optional<fs::path> launch_eboot;
     ToastKind toast_kind = ToastKind::Info;
     Uint32 toast_start = 0;
     Uint32 toast_hide_start = 0;

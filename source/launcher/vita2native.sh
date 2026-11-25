@@ -30,6 +30,7 @@ export SDL_GAMECONTROLLERCONFIG="$sdl_controllerconfig"
 
 $GPTOKEYB "launcher" &
 pm_platform_helper "$GAMEDIR/launcher" >/dev/null 2>&1 || true
+pm_platform_helper "$GAMEDIR/vita2native" >/dev/null 2>&1 || true
 
 ./launcher
 
