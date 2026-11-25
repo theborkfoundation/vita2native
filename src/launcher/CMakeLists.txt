@@ -45,6 +45,9 @@ embed_asset(Inter-SemiBold.ttf inter_bold)
 foreach(i RANGE 0 3)
     embed_asset(cover-${i}.jpg cover_${i})
 endforeach()
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
 add_executable(v2n-launcher
     main.cpp
     config.cpp
@@ -55,6 +58,10 @@ add_executable(v2n-launcher
     ui.cpp
     stb_impl.c
     ${EMBEDDED_ASSETS})
+if(APPLE)
+    target_sources(v2n-launcher PRIVATE macos_activate.mm)
+    target_link_libraries(v2n-launcher PRIVATE "-framework Cocoa")
+endif()
 set_source_files_properties(stb_impl.c PROPERTIES COMPILE_OPTIONS "-w")
 target_compile_features(v2n-launcher PRIVATE cxx_std_17)
 target_include_directories(v2n-launcher PRIVATE ${SDL2_INCLUDE_DIRS} "${CMAKE_CURRENT_BINARY_DIR}")

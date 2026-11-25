@@ -3,6 +3,9 @@
 #include "input.h"
 #include "state.h"
 #include "ui.h"
+#ifdef __APPLE__
+#include "macos_activate.h"
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -58,7 +61,7 @@ void save_snapshot(const char *path, const uint8_t *xrgb_pixels, int width, int 
 void present(SDL_Renderer *renderer, SDL_Texture *texture, bool upload)
 {
     if (upload)
-        SDL_UpdateTexture(texture, nullptr, ui::framebuffer(), screen_width * 4);
+        SDL_UpdateTexture(texture, nullptr, ui::framebuffer(), ui::render_width() * 4);
     SDL_RenderClear(renderer);
     SDL_RenderCopy(renderer, texture, nullptr, nullptr);
     SDL_RenderPresent(renderer);
@@ -106,7 +109,7 @@ void run(SDL_Renderer *renderer, SDL_Texture *texture, const ConfigResult &setti
             ui::sync(state);
             const bool flushed = ui::render(capture != nullptr);
             if (capture) {
-                save_snapshot(capture, ui::framebuffer(), screen_width, screen_height);
+                save_snapshot(capture, ui::framebuffer(), ui::render_width(), ui::render_height());
                 state.running = false;
             }
             if (flushed)
@@ -141,6 +144,10 @@ int main(int, char **)
         SDL_Quit();
         return 1;
     }
+    SDL_RaiseWindow(window);
+#ifdef __APPLE__
+    launcher::activate_macos_app();
+#endif
     SDL_Renderer *renderer =
         SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!renderer)
@@ -151,28 +158,34 @@ int main(int, char **)
         SDL_Quit();
         return 1;
     }
-    SDL_RenderSetLogicalSize(renderer, screen_width, screen_height);
-    SDL_Texture *texture =
-        SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
-                          screen_width, screen_height);
-    if (!texture) {
-        fprintf(stderr, "SDL texture: %s\n", SDL_GetError());
-        SDL_DestroyRenderer(renderer);
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return 1;
+    int out_w = screen_width;
+    int out_h = screen_height;
+    if (SDL_GetRendererOutputSize(renderer, &out_w, &out_h) != 0 || out_w <= 0 || out_h <= 0) {
+        out_w = screen_width;
+        out_h = screen_height;
     }
     int result = 0;
     std::string logo_warning;
     if (!launcher::ui::initialize(settings.error.empty() ? settings.config.logo_path :
-                                                          std::filesystem::path{}, logo_warning)) {
+                                                          std::filesystem::path{},
+                                  out_w, out_h, logo_warning)) {
         fprintf(stderr, "Failed to initialize LVGL or font\n");
         result = 1;
     } else {
-        run(renderer, texture, settings, logo_warning);
+        SDL_RenderSetLogicalSize(renderer, launcher::ui::render_width(),
+                                 launcher::ui::render_height());
+        SDL_Texture *texture =
+            SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
+                              launcher::ui::render_width(), launcher::ui::render_height());
+        if (!texture) {
+            fprintf(stderr, "SDL texture: %s\n", SDL_GetError());
+            result = 1;
+        } else {
+            run(renderer, texture, settings, logo_warning);
+            SDL_DestroyTexture(texture);
+        }
         launcher::ui::shutdown();
     }
-    SDL_DestroyTexture(texture);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();

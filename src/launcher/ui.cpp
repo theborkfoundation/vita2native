@@ -24,11 +24,26 @@ namespace launcher::ui
 {
 namespace
 {
-constexpr int32_t fb_stride = screen_width * 4;
+float ui_scale = 1.0f;
+int fb_w = screen_width;
+int fb_h = screen_height;
+int fb_stride = screen_width * 4;
 
 lv_display_t *display = nullptr;
 std::vector<uint8_t> framebuffer_data;
 bool frame_flushed = false;
+
+int32_t sc(float v)
+{
+    return static_cast<int32_t>(std::lround(v * ui_scale));
+}
+
+int32_t sc_border(float v)
+{
+    if (v <= 0.0f)
+        return 0;
+    return std::max<int32_t>(1, sc(v));
+}
 
 struct Fonts {
     lv_font_t *reg_10 = nullptr;
@@ -44,6 +59,7 @@ struct Fonts {
     lv_font_t *bold_19 = nullptr;
     lv_font_t *bold_20 = nullptr;
     lv_font_t *bold_22 = nullptr;
+    lv_font_t *bold_24 = nullptr;
 };
 Fonts fonts;
 
@@ -130,8 +146,8 @@ struct Widgets {
 
     lv_obj_t *header_layer = nullptr;
     BrandWidgets header_brand;
-    lv_obj_t *header_pill = nullptr;
-    lv_obj_t *header_pill_label = nullptr;
+    lv_obj_t *header_divider = nullptr;
+    lv_obj_t *header_screen = nullptr;
 
     lv_obj_t *home_layer = nullptr;
     lv_obj_t *home_heading = nullptr;
@@ -153,7 +169,6 @@ struct Widgets {
     lv_obj_t *import_subtitle = nullptr;
     std::array<ImportRow, 2> import_rows;
     lv_obj_t *import_details = nullptr;
-    lv_obj_t *import_loc_value = nullptr;
     lv_obj_t *import_btn = nullptr;
     lv_obj_t *import_btn_label = nullptr;
     lv_obj_t *import_status_primary = nullptr;
@@ -181,15 +196,14 @@ std::string last_config_error;
 int last_bg_selected = -1;
 int last_bg_previous = -1;
 bool last_bg_moving = false;
-Screen last_pill_screen = Screen::Home;
-bool last_pill_picker = false;
+Screen last_header_screen = Screen::Home;
+bool last_header_picker = false;
 std::string last_home_msg;
 int last_all_focus = -1;
 std::string last_all_msg;
 ImportFocus last_import_focus = ImportFocus::Package;
 std::string last_import_pkg;
 std::string last_import_lic;
-std::string last_import_loc;
 std::string last_import_msg;
 bool last_import_running = false;
 PickerKind last_pick_kind = PickerKind::Package;
@@ -226,22 +240,22 @@ void remove_interaction_flags(lv_obj_t *obj)
     lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
 }
 
-void init_clean_obj(lv_obj_t *obj, int32_t x, int32_t y, int32_t w, int32_t h)
+void init_clean_obj(lv_obj_t *obj, float x, float y, float w, float h)
 {
     lv_obj_remove_style_all(obj);
     remove_interaction_flags(obj);
-    lv_obj_set_pos(obj, x, y);
-    lv_obj_set_size(obj, w, h);
+    lv_obj_set_pos(obj, sc(x), sc(y));
+    lv_obj_set_size(obj, sc(w), sc(h));
 }
 
-lv_obj_t *make_box(lv_obj_t *parent, int32_t x, int32_t y, int32_t w, int32_t h, lv_color_t color,
-                   lv_opa_t opa, int32_t radius = 0)
+lv_obj_t *make_box(lv_obj_t *parent, float x, float y, float w, float h, lv_color_t color,
+                   lv_opa_t opa, float radius = 0)
 {
     lv_obj_t *obj = lv_obj_create(parent);
     init_clean_obj(obj, x, y, w, h);
     lv_obj_set_style_bg_color(obj, color, 0);
     lv_obj_set_style_bg_opa(obj, opa, 0);
-    lv_obj_set_style_radius(obj, radius, 0);
+    lv_obj_set_style_radius(obj, sc(radius), 0);
     return obj;
 }
 
@@ -262,8 +276,8 @@ void set_vertical_gradient(lv_obj_t *obj, lv_color_t top_c, lv_opa_t top_opa, lv
     lv_obj_set_style_bg_grad(obj, &grad, 0);
 }
 
-lv_obj_t *make_gradient(lv_obj_t *parent, int32_t x, int32_t y, int32_t w, int32_t h,
-                        lv_color_t top_c, lv_opa_t top_opa, lv_color_t bot_c, lv_opa_t bot_opa)
+lv_obj_t *make_gradient(lv_obj_t *parent, float x, float y, float w, float h, lv_color_t top_c,
+                        lv_opa_t top_opa, lv_color_t bot_c, lv_opa_t bot_opa)
 {
     lv_obj_t *obj = lv_obj_create(parent);
     init_clean_obj(obj, x, y, w, h);
@@ -271,17 +285,17 @@ lv_obj_t *make_gradient(lv_obj_t *parent, int32_t x, int32_t y, int32_t w, int32
     return obj;
 }
 
-lv_obj_t *make_label(lv_obj_t *parent, int32_t x, int32_t y, const char *text,
-                     const lv_font_t *font, lv_color_t color, int32_t max_w = 0)
+lv_obj_t *make_label(lv_obj_t *parent, float x, float y, const char *text, const lv_font_t *font,
+                     lv_color_t color, float max_w = 0)
 {
     lv_obj_t *lbl = lv_label_create(parent);
     lv_obj_remove_style_all(lbl);
     remove_interaction_flags(lbl);
-    lv_obj_set_pos(lbl, x, y);
+    lv_obj_set_pos(lbl, sc(x), sc(y));
     lv_obj_set_style_text_font(lbl, font, 0);
     lv_obj_set_style_text_color(lbl, color, 0);
     if (max_w > 0) {
-        lv_obj_set_width(lbl, max_w);
+        lv_obj_set_width(lbl, sc(max_w));
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_MODE_CLIP);
     } else {
         lv_obj_set_width(lbl, LV_SIZE_CONTENT);
@@ -401,13 +415,13 @@ float dist_cubic(float px, float py, float x0, float y0, float x1, float y1, flo
     return best;
 }
 
-// Rasterizes the 22x22 footer button icons with 4x4 supersampling to match NanoVG's vector glyphs.
-void build_footer_icon(ImageBuffer &out, char kind)
+// Rasterizes the 22x22 logical footer button icons at native display scale with 4x4 supersampling.
+void build_footer_icon(ImageBuffer &out, char kind, int size)
 {
-    constexpr int size = 22;
-    constexpr float cx = 11.0f, cy = 11.0f;
+    const float center = size / 2.0f;
+    const float scale = size / 22.0f;
     constexpr int samples = 4;
-    std::vector<uint8_t> rgba(size * size * 4);
+    std::vector<uint8_t> rgba(static_cast<size_t>(size) * size * 4);
     for (int y = 0; y < size; ++y) {
         for (int x = 0; x < size; ++x) {
             int circle_hits = 0;
@@ -416,7 +430,8 @@ void build_footer_icon(ImageBuffer &out, char kind)
                 for (int sx = 0; sx < samples; ++sx) {
                     const float px = x + (sx + 0.5f) / samples;
                     const float py = y + (sy + 0.5f) / samples;
-                    const float dx = px - cx, dy = py - cy;
+                    const float dx = (px - center) / scale;
+                    const float dy = (py - center) / scale;
                     if (dx * dx + dy * dy <= 11.0f * 11.0f) {
                         ++circle_hits;
                         bool in_glyph = false;
@@ -463,7 +478,7 @@ void build_footer_icon(ImageBuffer &out, char kind)
     init_argb8888_buffer(out, size, size, rgba.data(), false);
 }
 
-void build_brand(BrandWidgets &b, lv_obj_t *parent, int32_t x, int32_t y, int32_t size,
+void build_brand(BrandWidgets &b, lv_obj_t *parent, float x, float y, float size,
                  const ImageBuffer &custom_logo)
 {
     b.box = lv_obj_create(parent);
@@ -479,33 +494,34 @@ void build_brand(BrandWidgets &b, lv_obj_t *parent, int32_t x, int32_t y, int32_
     b.outline = make_box(b.box, 0, 0, size, size, rgb(0, 0, 0), LV_OPA_TRANSP, 5);
     lv_obj_set_style_border_color(b.outline, rgb(238, 246, 250), 0);
     lv_obj_set_style_border_opa(b.outline, 220, 0);
-    lv_obj_set_style_border_width(b.outline, 1, 0);
+    lv_obj_set_style_border_width(b.outline, sc_border(1.2f), 0);
 
+    const float px_size = size * ui_scale;
     b.points = { {
-        { static_cast<lv_value_precise_t>(std::lround(size * 0.20f)),
-          static_cast<lv_value_precise_t>(std::lround(size * 0.27f)) },
-        { static_cast<lv_value_precise_t>(std::lround(size * 0.38f)),
-          static_cast<lv_value_precise_t>(std::lround(size * 0.73f)) },
-        { static_cast<lv_value_precise_t>(std::lround(size * 0.50f)),
-          static_cast<lv_value_precise_t>(std::lround(size * 0.45f)) },
-        { static_cast<lv_value_precise_t>(std::lround(size * 0.62f)),
-          static_cast<lv_value_precise_t>(std::lround(size * 0.73f)) },
-        { static_cast<lv_value_precise_t>(std::lround(size * 0.80f)),
-          static_cast<lv_value_precise_t>(std::lround(size * 0.27f)) },
+        { static_cast<lv_value_precise_t>(std::lround(px_size * 0.20f)),
+          static_cast<lv_value_precise_t>(std::lround(px_size * 0.27f)) },
+        { static_cast<lv_value_precise_t>(std::lround(px_size * 0.38f)),
+          static_cast<lv_value_precise_t>(std::lround(px_size * 0.73f)) },
+        { static_cast<lv_value_precise_t>(std::lround(px_size * 0.50f)),
+          static_cast<lv_value_precise_t>(std::lround(px_size * 0.45f)) },
+        { static_cast<lv_value_precise_t>(std::lround(px_size * 0.62f)),
+          static_cast<lv_value_precise_t>(std::lround(px_size * 0.73f)) },
+        { static_cast<lv_value_precise_t>(std::lround(px_size * 0.80f)),
+          static_cast<lv_value_precise_t>(std::lround(px_size * 0.27f)) },
     } };
     b.line = lv_line_create(b.box);
     init_clean_obj(b.line, 0, 0, size, size);
     lv_line_set_points(b.line, b.points.data(), static_cast<uint32_t>(b.points.size()));
     lv_obj_set_style_line_color(b.line, rgb(255, 255, 255), 0);
-    lv_obj_set_style_line_width(b.line, std::max<int32_t>(1, std::lround(size * 0.07f)), 0);
+    lv_obj_set_style_line_width(b.line, std::max<int32_t>(1, std::lround(px_size * 0.07f)), 0);
     lv_obj_set_style_line_rounded(b.line, false, 0);
 }
 
 void build_cover_card_common(lv_obj_t *parent, lv_obj_t *&root, lv_obj_t *&img, lv_obj_t *&grad,
-                             lv_obj_t *&title, lv_obj_t *&border, int32_t x, int32_t y,
-                             int32_t w, int32_t h, const ImageBuffer &cover_img, const char *name,
-                             const lv_font_t *font, int32_t label_x, int32_t label_y,
-                             int32_t label_max_w, lv_opa_t grad_end_opa)
+                             lv_obj_t *&title, lv_obj_t *&border, float x, float y, float w,
+                             float h, const ImageBuffer &cover_img, const char *name,
+                             const lv_font_t *font, float label_x, float label_y,
+                             float label_max_w, lv_opa_t grad_end_opa)
 {
     root = make_box(parent, x, y, w, h, rgb(51, 68, 76), LV_OPA_COVER, 5);
     lv_obj_set_style_clip_corner(root, true, 0);
@@ -515,10 +531,11 @@ void build_cover_card_common(lv_obj_t *parent, lv_obj_t *&root, lv_obj_t *&img, 
     if (cover_img.valid())
         lv_image_set_src(img, &cover_img.dsc);
 
-    grad = make_gradient(root, 0, h - 75, w, 75, rgb(8, 15, 21), 0, rgb(8, 15, 21), grad_end_opa);
     if (h == 136) {
-        lv_obj_set_y(grad, 65);
-        lv_obj_set_height(grad, 71);
+        grad = make_gradient(root, 0, 65, w, 71, rgb(8, 15, 21), 0, rgb(8, 15, 21), grad_end_opa);
+    } else {
+        grad = make_gradient(root, 0, h - 75, w, 75, rgb(8, 15, 21), 0, rgb(8, 15, 21),
+                             grad_end_opa);
     }
 
     title = make_label(root, label_x, label_y, name, font, rgb(255, 255, 255), label_max_w);
@@ -526,7 +543,7 @@ void build_cover_card_common(lv_obj_t *parent, lv_obj_t *&root, lv_obj_t *&img, 
     border = make_box(root, 0, 0, w, h, rgb(0, 0, 0), LV_OPA_TRANSP, 5);
     lv_obj_set_style_border_color(border, rgb(255, 255, 255), 0);
     lv_obj_set_style_border_opa(border, 60, 0);
-    lv_obj_set_style_border_width(border, 1, 0);
+    lv_obj_set_style_border_width(border, sc_border(1), 0);
 }
 
 void create_ui_tree()
@@ -545,7 +562,7 @@ void create_ui_tree()
     ui_objs.error_body = make_label(ui_objs.error_layer, 32, 120, "", fonts.reg_14,
                                     rgb(220, 231, 235), 576);
     lv_label_set_long_mode(ui_objs.error_body, LV_LABEL_LONG_MODE_WRAP);
-    lv_obj_set_height(ui_objs.error_body, 250);
+    lv_obj_set_height(ui_objs.error_body, sc(250));
     make_label(ui_objs.error_layer, 32, 404, "Fix launcher.toml and restart.", fonts.reg_12,
                rgb(174, 193, 201));
     make_label(ui_objs.error_layer, 32, 446, "A / B  EXIT", fonts.bold_11, rgb(229, 243, 245));
@@ -587,15 +604,12 @@ void create_ui_tree()
     make_label(ui_objs.header_layer, 60, 19, "V2N", fonts.bold_16, rgb(244, 248, 250));
     make_label(ui_objs.header_layer, 60, 37, "LAUNCHER", fonts.bold_8, rgb(157, 177, 188));
 
-    ui_objs.header_pill = make_box(ui_objs.header_layer, 0, 18, LV_SIZE_CONTENT, 27,
-                                   rgb(135, 174, 185), 35, 14);
-    lv_obj_set_style_border_color(ui_objs.header_pill, rgb(162, 197, 205), 0);
-    lv_obj_set_style_border_opa(ui_objs.header_pill, 75, 0);
-    lv_obj_set_style_border_width(ui_objs.header_pill, 1, 0);
-    lv_obj_set_style_pad_hor(ui_objs.header_pill, 15, 0);
-    ui_objs.header_pill_label =
-        make_centered_label(ui_objs.header_pill, "", fonts.bold_11, rgb(229, 243, 245));
-    lv_obj_add_flag(ui_objs.header_pill, LV_OBJ_FLAG_HIDDEN);
+    ui_objs.header_divider =
+        make_box(ui_objs.header_layer, 120, 18, 1, 24, rgb(159, 190, 201), 70);
+    ui_objs.header_screen =
+        make_label(ui_objs.header_layer, 134, 15, "", fonts.bold_24, rgb(248, 251, 253));
+    lv_obj_add_flag(ui_objs.header_divider, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui_objs.header_screen, LV_OBJ_FLAG_HIDDEN);
 
     // Home screen
     ui_objs.home_layer = lv_obj_create(ui_objs.main_layer);
@@ -619,7 +633,7 @@ void create_ui_tree()
 
     for (int i = 0; i < 2; ++i) {
         auto &card = ui_objs.action_cards[i];
-        const int32_t x = 25 + i * 301;
+        const float x = 25 + i * 301;
         card.root = make_box(ui_objs.home_layer, x, 321, 289, 92, rgb(32, 52, 64), 225, 7);
         card.icon_box = make_box(card.root, 15, 26, 40, 40, rgb(204, 230, 234), 24, 7);
         if (i == 0) {
@@ -638,7 +652,7 @@ void create_ui_tree()
                        fonts.reg_10, rgb(164, 188, 196), 203);
         card.arrow = make_label(card.root, 258, 25, "→", fonts.bold_16, rgb(195, 218, 223), 24);
         card.border = make_box(card.root, 0, 0, 289, 92, rgb(0, 0, 0), LV_OPA_TRANSP, 7);
-        lv_obj_set_style_border_width(card.border, 1, 0);
+        lv_obj_set_style_border_width(card.border, sc_border(1), 0);
     }
     lv_obj_add_flag(ui_objs.home_layer, LV_OBJ_FLAG_HIDDEN);
 
@@ -649,7 +663,8 @@ void create_ui_tree()
         make_label(ui_objs.all_layer, 25, 72, "All games", fonts.bold_20, rgb(248, 251, 253));
     const std::string count_text = std::to_string(game_count) + " GAMES";
     ui_objs.all_count =
-        make_label(ui_objs.all_layer, 525, 79, count_text.c_str(), fonts.bold_10, rgb(174, 192, 200));
+        make_label(ui_objs.all_layer, 0, 79, count_text.c_str(), fonts.bold_10, rgb(174, 192, 200));
+    lv_obj_align(ui_objs.all_count, LV_ALIGN_TOP_RIGHT, -sc(25), sc(79));
     for (int i = 0; i < game_count; ++i) {
         auto &c = ui_objs.all_cards[i];
         build_cover_card_common(ui_objs.all_layer, c.root, c.img, c.grad, c.title, c.border,
@@ -673,7 +688,7 @@ void create_ui_tree()
                    rgb(174, 193, 201));
     for (int i = 0; i < 2; ++i) {
         auto &row = ui_objs.import_rows[i];
-        const int32_t y = 135 + i * 76;
+        const float y = 135 + i * 76;
         row.root = make_box(ui_objs.import_layer, 25, y, 590, 64, rgb(24, 40, 51), 225, 5);
         row.icon_box = make_box(row.root, 14, 14, 36, 36, rgb(255, 255, 255), 20, 4);
         row.icon_label =
@@ -687,23 +702,20 @@ void create_ui_tree()
         row.browse_label =
             make_centered_label(row.browse_btn, "BROWSE", fonts.bold_10, rgb(240, 247, 249));
         row.border = make_box(row.root, 0, 0, 590, 64, rgb(0, 0, 0), LV_OPA_TRANSP, 5);
-        lv_obj_set_style_border_width(row.border, 1, 0);
+        lv_obj_set_style_border_width(row.border, sc_border(1), 0);
     }
     ui_objs.import_details = lv_obj_create(ui_objs.import_layer);
     init_clean_obj(ui_objs.import_details, 0, 297, 640, 140);
-    make_label(ui_objs.import_details, 26, 0, "IMPORT LOCATION", fonts.bold_10, rgb(155, 179, 188));
-    ui_objs.import_loc_value =
-        make_label(ui_objs.import_details, 26, 18, "", fonts.reg_11, rgb(224, 235, 237), 395);
     ui_objs.import_btn =
-        make_box(ui_objs.import_details, 453, 7, 162, 40, rgb(92, 115, 124), 255, 5);
+        make_box(ui_objs.import_details, 25, 0, 590, 42, rgb(92, 115, 124), 255, 5);
     ui_objs.import_btn_label =
         make_centered_label(ui_objs.import_btn, "IMPORT GAME", fonts.bold_11, rgb(225, 236, 239));
     lv_obj_t *status_box =
-        make_box(ui_objs.import_details, 25, 68, 590, 47, rgb(255, 255, 255), 12, 5);
+        make_box(ui_objs.import_details, 25, 62, 590, 47, rgb(255, 255, 255), 12, 5);
     ui_objs.import_status_primary =
         make_label(status_box, 14, 8, "", fonts.reg_11, rgb(199, 218, 224), 560);
     ui_objs.import_status_secondary =
-        make_label(status_box, 14, 26, "Your title is saved in the import location above.",
+        make_label(status_box, 14, 26, "Your title will be added to your games library.",
                    fonts.reg_10, rgb(143, 168, 178));
     lv_obj_add_flag(ui_objs.import_layer, LV_OBJ_FLAG_HIDDEN);
 
@@ -721,7 +733,7 @@ void create_ui_tree()
     lv_obj_add_flag(ui_objs.picker_empty, LV_OBJ_FLAG_HIDDEN);
     for (int row = 0; row < picker_page_size; ++row) {
         auto &r = ui_objs.picker_rows[row];
-        const int32_t y = 127 + row * 37;
+        const float y = 127 + row * 37;
         r.root = make_box(ui_objs.picker_layer, 25, y, 590, 33, rgb(255, 255, 255), 0, 4);
         r.kind = make_label(r.root, 13, 9, "DIR", fonts.bold_10, rgb(159, 188, 197));
         r.name = make_label(r.root, 65, 8, "", fonts.reg_12, rgb(238, 247, 249), 505);
@@ -803,19 +815,19 @@ void update_background(const State &a, Uint32 now)
 
 void update_header_and_footer(const State &a)
 {
-    if (last_pill_screen != a.screen || last_pill_picker != a.picker || last_mode == ViewMode::None) {
-        if (a.screen == Screen::Home && !a.picker) {
-            set_visible(ui_objs.header_pill, false);
-        } else {
-            const char *name = a.picker                       ? "CHOOSE FILE"
-                               : a.screen == Screen::AllGames ? "ALL GAMES"
-                                                              : "IMPORT GAME";
-            lv_label_set_text(ui_objs.header_pill_label, name);
-            lv_obj_align(ui_objs.header_pill, LV_ALIGN_TOP_RIGHT, -25, 18);
-            set_visible(ui_objs.header_pill, true);
+    if (last_header_screen != a.screen || last_header_picker != a.picker ||
+        last_mode == ViewMode::None) {
+        const bool show_screen = (a.screen != Screen::Home || a.picker);
+        set_visible(ui_objs.header_divider, show_screen);
+        set_visible(ui_objs.header_screen, show_screen);
+        if (show_screen) {
+            const char *name = a.picker                       ? "Choose File"
+                               : a.screen == Screen::AllGames ? "All Games"
+                                                              : "Import Game";
+            lv_label_set_text(ui_objs.header_screen, name);
         }
-        last_pill_screen = a.screen;
-        last_pill_picker = a.picker;
+        last_header_screen = a.screen;
+        last_header_picker = a.picker;
     }
 
     const char *back = a.picker || a.screen != Screen::Home ? "BACK" : "EXIT";
@@ -823,13 +835,13 @@ void update_header_and_footer(const State &a)
         lv_point_t back_sz{}, select_sz{};
         lv_text_get_size(&back_sz, back, fonts.bold_10, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
         lv_text_get_size(&select_sz, "SELECT", fonts.bold_10, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-        const int32_t back_cx = 615 - back_sz.x - 19;
-        const int32_t select_cx = back_cx - 11 - 22 - select_sz.x - 19;
+        const int32_t back_cx = sc(615) - back_sz.x - sc(19);
+        const int32_t select_cx = back_cx - sc(11) - sc(22) - select_sz.x - sc(19);
 
-        lv_obj_set_pos(ui_objs.footer_select_icon, select_cx - 11, 10);
-        lv_obj_set_pos(ui_objs.footer_select_label, select_cx + 19, 17);
-        lv_obj_set_pos(ui_objs.footer_back_icon, back_cx - 11, 10);
-        lv_obj_set_pos(ui_objs.footer_back_label, back_cx + 19, 17);
+        lv_obj_set_pos(ui_objs.footer_select_icon, select_cx - sc(11), sc(10));
+        lv_obj_set_pos(ui_objs.footer_select_label, select_cx + sc(19), sc(17));
+        lv_obj_set_pos(ui_objs.footer_back_icon, back_cx - sc(11), sc(10));
+        lv_obj_set_pos(ui_objs.footer_back_label, back_cx + sc(19), sc(17));
         lv_label_set_text(ui_objs.footer_back_label, back);
         last_footer_back = back;
     }
@@ -839,7 +851,7 @@ void sync_home(const State &a, Uint32 now)
 {
     const float heading = entrance(a, now);
     set_opa_if_changed(ui_objs.home_heading, opa_from_float(heading));
-    set_pos_if_changed(ui_objs.home_heading, 25, 72 + static_cast<int32_t>(std::lround(8.0f * (1.0f - heading))));
+    set_pos_if_changed(ui_objs.home_heading, sc(25), sc(72.0f + 8.0f * (1.0f - heading)));
 
     const float t =
         a.moving ? ease_out(static_cast<float>(now - a.motion_start) / static_cast<float>(State::motion_duration))
@@ -873,15 +885,13 @@ void sync_home(const State &a, Uint32 now)
         const float active = (slot == active_slot_0) ? w0 : (slot == active_slot_0 + 1) ? w1 : 0.0f;
         const float entry = entrance(a, now, 65 + std::max(0, slot) * 50);
         auto &card = ui_objs.recent_cards[id];
-        const int32_t card_x = static_cast<int32_t>(std::lround(base_x + slot * pitch));
-        const int32_t card_y = 4 + static_cast<int32_t>(std::lround(12.0f * (1.0f - entry)));
-        set_pos_if_changed(card.root, card_x, card_y);
+        set_pos_if_changed(card.root, sc(base_x + slot * pitch), sc(4.0f + 12.0f * (1.0f - entry)));
         set_opa_if_changed(card.root, opa_from_float(entry));
 
         const lv_color_t edge_c = recent_focused ? rgb(248, 252, 255) : rgb(255, 255, 255);
         const lv_opa_t edge_opa = static_cast<lv_opa_t>(
             recent_focused ? std::lround(55.0f + 200.0f * active) : std::lround(45.0f + 55.0f * active));
-        const int32_t edge_w = static_cast<int32_t>(std::lround(1.0f + active));
+        const int32_t edge_w = sc_border(1.0f + active);
         if (lv_obj_get_style_border_opa(card.border, LV_PART_MAIN) != edge_opa ||
             lv_obj_get_style_border_width(card.border, LV_PART_MAIN) != edge_w ||
             lv_color_to_u32(lv_obj_get_style_border_color(card.border, LV_PART_MAIN)) !=
@@ -901,14 +911,13 @@ void sync_home(const State &a, Uint32 now)
         const float focused =
             (a.home_focus == target ? fp : 0.0f) + (a.previous_home_focus == target ? 1.0f - fp : 0.0f);
         auto &card = ui_objs.action_cards[i];
-        set_pos_if_changed(card.root, 25 + i * 301,
-                           321 + static_cast<int32_t>(std::lround(12.0f * (1.0f - show))));
+        set_pos_if_changed(card.root, sc(25 + i * 301), sc(321.0f + 12.0f * (1.0f - show)));
         set_opa_if_changed(card.root, opa_from_float(show));
         const lv_color_t border_c = rgb(187 + static_cast<int>(52 * focused),
                                         211 + static_cast<int>(37 * focused),
                                         219 + static_cast<int>(30 * focused));
         const lv_opa_t border_opa = static_cast<lv_opa_t>(60 + static_cast<int>(195 * focused));
-        const int32_t border_w = static_cast<int32_t>(std::lround(1.0f + focused));
+        const int32_t border_w = sc_border(1.0f + focused);
         if (lv_obj_get_style_border_opa(card.border, LV_PART_MAIN) != border_opa ||
             lv_obj_get_style_border_width(card.border, LV_PART_MAIN) != border_w ||
             lv_color_to_u32(lv_obj_get_style_border_color(card.border, LV_PART_MAIN)) !=
@@ -930,24 +939,24 @@ void sync_home(const State &a, Uint32 now)
 void sync_all_games(const State &a, Uint32 now)
 {
     const float heading = entrance(a, now);
-    const int32_t head_off = static_cast<int32_t>(std::lround(8.0f * (1.0f - heading)));
+    const float head_off = 8.0f * (1.0f - heading);
     set_opa_if_changed(ui_objs.all_heading, opa_from_float(heading));
-    set_pos_if_changed(ui_objs.all_heading, 25, 72 + head_off);
+    set_pos_if_changed(ui_objs.all_heading, sc(25), sc(72.0f + head_off));
     set_opa_if_changed(ui_objs.all_count, opa_from_float(heading));
-    set_pos_if_changed(ui_objs.all_count, 525, 79 + head_off);
+    lv_obj_align(ui_objs.all_count, LV_ALIGN_TOP_RIGHT, -sc(25), sc(79.0f + head_off));
 
     for (int i = 0; i < game_count; ++i) {
         const float show = entrance(a, now, 60 + i * 60);
-        const int32_t x = 25 + (i % 2) * 301;
-        const int32_t y = 111 + (i / 2) * 150 + static_cast<int32_t>(std::lround(10.0f * (1.0f - show)));
+        const float x = 25 + (i % 2) * 301;
+        const float y = 111 + (i / 2) * 150 + 10.0f * (1.0f - show);
         auto &card = ui_objs.all_cards[i];
-        set_pos_if_changed(card.root, x, y);
+        set_pos_if_changed(card.root, sc(x), sc(y));
         set_opa_if_changed(card.root, opa_from_float(show));
         if (last_all_focus != a.all_focus || last_mode != ViewMode::AllGames) {
             const bool focused = (a.all_focus == i);
             lv_obj_set_style_border_color(card.border, focused ? rgb(248, 252, 255) : rgb(255, 255, 255), 0);
             lv_obj_set_style_border_opa(card.border, focused ? 255 : 60, 0);
-            lv_obj_set_style_border_width(card.border, focused ? 2 : 1, 0);
+            lv_obj_set_style_border_width(card.border, sc_border(focused ? 2 : 1), 0);
         }
     }
     last_all_focus = a.all_focus;
@@ -963,22 +972,21 @@ void sync_all_games(const State &a, Uint32 now)
 void sync_import(const State &a, Uint32 now)
 {
     const float heading = entrance(a, now);
-    const int32_t head_off = static_cast<int32_t>(std::lround(10.0f * (1.0f - heading)));
+    const float head_off = 10.0f * (1.0f - heading);
     set_opa_if_changed(ui_objs.import_heading, opa_from_float(heading));
-    set_pos_if_changed(ui_objs.import_heading, 25, 72 + head_off);
+    set_pos_if_changed(ui_objs.import_heading, sc(25), sc(72.0f + head_off));
     set_opa_if_changed(ui_objs.import_subtitle, opa_from_float(heading));
-    set_pos_if_changed(ui_objs.import_subtitle, 25, 99 + head_off);
+    set_pos_if_changed(ui_objs.import_subtitle, sc(25), sc(99.0f + head_off));
 
     const std::string pkg_name = a.pkg.filename().string();
     const std::string lic_name = a.license.filename().string();
-    const std::string loc_str = a.config.games_path.string();
     const bool running = a.import_running();
 
     for (int i = 0; i < 2; ++i) {
         const float show = entrance(a, now, 80 + i * 90);
-        const int32_t y = 135 + i * 76 + static_cast<int32_t>(std::lround(12.0f * (1.0f - show)));
+        const float y = 135 + i * 76 + 12.0f * (1.0f - show);
         auto &row = ui_objs.import_rows[i];
-        set_pos_if_changed(row.root, 25, y);
+        set_pos_if_changed(row.root, sc(25), sc(y));
         set_opa_if_changed(row.root, opa_from_float(show));
         if (last_import_focus != a.import_focus || last_mode != ViewMode::Import) {
             const bool focused =
@@ -986,7 +994,7 @@ void sync_import(const State &a, Uint32 now)
             lv_obj_set_style_border_color(row.border,
                                           focused ? rgb(241, 248, 250) : rgb(119, 150, 162), 0);
             lv_obj_set_style_border_opa(row.border, focused ? 255 : 90, 0);
-            lv_obj_set_style_border_width(row.border, focused ? 2 : 1, 0);
+            lv_obj_set_style_border_width(row.border, sc_border(focused ? 2 : 1), 0);
         }
     }
     if (last_import_pkg != pkg_name || last_mode != ViewMode::Import) {
@@ -1002,13 +1010,8 @@ void sync_import(const State &a, Uint32 now)
 
     const float details = entrance(a, now, 260);
     set_opa_if_changed(ui_objs.import_details, opa_from_float(details));
-    set_pos_if_changed(ui_objs.import_details, 0,
-                       297 + static_cast<int32_t>(std::lround(10.0f * (1.0f - details))));
+    set_pos_if_changed(ui_objs.import_details, 0, sc(297.0f + 10.0f * (1.0f - details)));
 
-    if (last_import_loc != loc_str || last_mode != ViewMode::Import) {
-        lv_label_set_text(ui_objs.import_loc_value, loc_str.c_str());
-        last_import_loc = loc_str;
-    }
     if (last_import_focus != a.import_focus || last_import_running != running ||
         last_mode != ViewMode::Import) {
         const bool btn_focused = (a.import_focus == ImportFocus::Start);
@@ -1032,11 +1035,11 @@ void sync_import(const State &a, Uint32 now)
 void sync_picker(const State &a, Uint32 now)
 {
     const float heading = entrance(a, now);
-    const int32_t head_off = static_cast<int32_t>(std::lround(8.0f * (1.0f - heading)));
+    const float head_off = 8.0f * (1.0f - heading);
     set_opa_if_changed(ui_objs.picker_heading, opa_from_float(heading));
-    set_pos_if_changed(ui_objs.picker_heading, 25, 72 + head_off);
+    set_pos_if_changed(ui_objs.picker_heading, sc(25), sc(72.0f + head_off));
     set_opa_if_changed(ui_objs.picker_dir, opa_from_float(heading));
-    set_pos_if_changed(ui_objs.picker_dir, 25, 100 + head_off);
+    set_pos_if_changed(ui_objs.picker_dir, sc(25), sc(100.0f + head_off));
 
     const std::string dir_str = a.dir.string();
     if (last_pick_kind != a.pick_kind || last_mode != ViewMode::Picker) {
@@ -1063,15 +1066,14 @@ void sync_picker(const State &a, Uint32 now)
         }
         set_visible(r.root, true);
         const float show = entrance(a, now, 50 + row * 35);
-        set_pos_if_changed(r.root, 25,
-                           127 + row * 37 + static_cast<int32_t>(std::lround(8.0f * (1.0f - show))));
+        set_pos_if_changed(r.root, sc(25), sc(127 + row * 37 + 8.0f * (1.0f - show)));
         set_opa_if_changed(r.root, opa_from_float(show));
 
         if (list_changed) {
             const auto &it = a.items[idx];
             const bool selected = (idx == a.pick_index);
             lv_obj_set_style_bg_opa(r.root, selected ? 24 : 0, 0);
-            lv_obj_set_style_border_width(r.border, selected ? 2 : 0, 0);
+            lv_obj_set_style_border_width(r.border, selected ? sc_border(2) : 0, 0);
             lv_label_set_text(r.kind, it.dir ? "DIR" : "FILE");
             const std::string name =
                 it.path == parent_path ? ".." : it.path.filename().string();
@@ -1111,12 +1113,13 @@ void destroy_fonts()
     drop(fonts.bold_19);
     drop(fonts.bold_20);
     drop(fonts.bold_22);
+    drop(fonts.bold_24);
 }
 
 bool init_fonts()
 {
     auto mk = [](const unsigned char *data, size_t size, int32_t px) {
-        return lv_tiny_ttf_create_data(data, size, px);
+        return lv_tiny_ttf_create_data(data, size, sc(static_cast<float>(px)));
     };
     fonts.reg_10 = mk(inter_font, sizeof(inter_font), 10);
     fonts.reg_11 = mk(inter_font, sizeof(inter_font), 11);
@@ -1131,19 +1134,27 @@ bool init_fonts()
     fonts.bold_19 = mk(inter_bold, sizeof(inter_bold), 19);
     fonts.bold_20 = mk(inter_bold, sizeof(inter_bold), 20);
     fonts.bold_22 = mk(inter_bold, sizeof(inter_bold), 22);
+    fonts.bold_24 = mk(inter_bold, sizeof(inter_bold), 24);
     return fonts.reg_10 && fonts.reg_11 && fonts.reg_12 && fonts.reg_14 && fonts.bold_8 &&
            fonts.bold_10 && fonts.bold_11 && fonts.bold_13 && fonts.bold_15 && fonts.bold_16 &&
-           fonts.bold_19 && fonts.bold_20 && fonts.bold_22;
+           fonts.bold_19 && fonts.bold_20 && fonts.bold_22 && fonts.bold_24;
 }
 } // namespace
 
-bool initialize(const std::filesystem::path &logo_path, std::string &warning)
+bool initialize(const std::filesystem::path &logo_path, int drawable_width, int drawable_height,
+                std::string &warning)
 {
+    ui_scale = std::max(1.0f, std::min(static_cast<float>(drawable_width) / screen_width,
+                                       static_cast<float>(drawable_height) / screen_height));
+    fb_w = sc(screen_width);
+    fb_h = sc(screen_height);
+    fb_stride = fb_w * 4;
+
     lv_init();
     lv_tick_set_cb(SDL_GetTicks);
 
-    framebuffer_data.assign(static_cast<size_t>(fb_stride) * screen_height, 0);
-    display = lv_display_create(screen_width, screen_height);
+    framebuffer_data.assign(static_cast<size_t>(fb_stride) * fb_h, 0);
+    display = lv_display_create(fb_w, fb_h);
     if (!display) {
         shutdown();
         return false;
@@ -1162,8 +1173,8 @@ bool initialize(const std::filesystem::path &logo_path, std::string &warning)
         ImageBuffer raw_logo;
         try {
             if (load_logo(logo_path, raw_logo)) {
-                resize_argb8888_contain(raw_logo, 26, custom_logo_header);
-                resize_argb8888_contain(raw_logo, 72, custom_logo_splash);
+                resize_argb8888_contain(raw_logo, sc(26), custom_logo_header);
+                resize_argb8888_contain(raw_logo, sc(72), custom_logo_splash);
             }
         } catch (const std::exception &error) {
             fprintf(stderr, "Could not load logo %s: %s\n", logo_path.string().c_str(), error.what());
@@ -1185,15 +1196,16 @@ bool initialize(const std::filesystem::path &logo_path, std::string &warning)
             fprintf(stderr, "Could not load cover %d\n", i);
             continue;
         }
-        make_cover_variant(rgba, iw, ih, 640, 440, covers[i].bg);
-        make_cover_variant(rgba, iw, ih, 310, 154, covers[i].recent);
-        make_cover_variant(rgba, iw, ih, 289, 136, covers[i].grid);
+        make_cover_variant(rgba, iw, ih, sc(640), sc(440), covers[i].bg);
+        make_cover_variant(rgba, iw, ih, sc(310), sc(154), covers[i].recent);
+        make_cover_variant(rgba, iw, ih, sc(289), sc(136), covers[i].grid);
         stbi_image_free(rgba);
     }
 
-    build_footer_icon(icon_dpad, 'D');
-    build_footer_icon(icon_key_a, 'A');
-    build_footer_icon(icon_key_b, 'B');
+    const int icon_size = sc(22);
+    build_footer_icon(icon_dpad, 'D', icon_size);
+    build_footer_icon(icon_key_a, 'A', icon_size);
+    build_footer_icon(icon_key_b, 'B', icon_size);
 
     create_ui_tree();
     return true;
@@ -1260,10 +1272,9 @@ void sync(const State &a)
         const Uint32 elapsed = now - a.start;
         const float appear = ease_out(elapsed / 600.0f);
         set_opa_if_changed(ui_objs.splash_brand.box, opa_from_float(appear));
-        set_pos_if_changed(ui_objs.splash_brand.box, 284,
-                           170 + static_cast<int32_t>(std::lround(12.0f * (1.0f - appear))));
-        const int32_t bar_w = static_cast<int32_t>(
-            std::lround(160.0f * ease_out(elapsed / static_cast<float>(splash_duration))));
+        set_pos_if_changed(ui_objs.splash_brand.box, sc(284), sc(170.0f + 12.0f * (1.0f - appear)));
+        const int32_t bar_w =
+            sc(160.0f * ease_out(elapsed / static_cast<float>(splash_duration)));
         if (lv_obj_get_width(ui_objs.splash_fill) != bar_w)
             lv_obj_set_width(ui_objs.splash_fill, bar_w);
         last_mode = mode;
@@ -1300,6 +1311,16 @@ bool render(bool force)
 const uint8_t *framebuffer()
 {
     return framebuffer_data.data();
+}
+
+int render_width()
+{
+    return fb_w;
+}
+
+int render_height()
+{
+    return fb_h;
 }
 
 } // namespace launcher::ui
