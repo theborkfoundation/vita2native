@@ -82,6 +82,7 @@ struct ActionCard {
     lv_obj_t *title = nullptr;
     lv_obj_t *subtitle = nullptr;
     lv_obj_t *arrow = nullptr;
+    lv_obj_t *border = nullptr;
 };
 
 struct AllCard {
@@ -100,12 +101,14 @@ struct ImportRow {
     lv_obj_t *value = nullptr;
     lv_obj_t *browse_btn = nullptr;
     lv_obj_t *browse_label = nullptr;
+    lv_obj_t *border = nullptr;
 };
 
 struct PickerRow {
     lv_obj_t *root = nullptr;
     lv_obj_t *kind = nullptr;
     lv_obj_t *name = nullptr;
+    lv_obj_t *border = nullptr;
 };
 
 struct Widgets {
@@ -618,7 +621,6 @@ void create_ui_tree()
         auto &card = ui_objs.action_cards[i];
         const int32_t x = 25 + i * 301;
         card.root = make_box(ui_objs.home_layer, x, 321, 289, 92, rgb(32, 52, 64), 225, 7);
-        lv_obj_set_style_border_width(card.root, 1, 0);
         card.icon_box = make_box(card.root, 15, 26, 40, 40, rgb(204, 230, 234), 24, 7);
         if (i == 0) {
             for (int row = 0; row < 2; ++row)
@@ -635,6 +637,8 @@ void create_ui_tree()
             make_label(card.root, 68, 48, i == 0 ? "Browse your library" : "Add a package and license",
                        fonts.reg_10, rgb(164, 188, 196), 203);
         card.arrow = make_label(card.root, 258, 25, "→", fonts.bold_16, rgb(195, 218, 223), 24);
+        card.border = make_box(card.root, 0, 0, 289, 92, rgb(0, 0, 0), LV_OPA_TRANSP, 7);
+        lv_obj_set_style_border_width(card.border, 1, 0);
     }
     lv_obj_add_flag(ui_objs.home_layer, LV_OBJ_FLAG_HIDDEN);
 
@@ -671,7 +675,6 @@ void create_ui_tree()
         auto &row = ui_objs.import_rows[i];
         const int32_t y = 135 + i * 76;
         row.root = make_box(ui_objs.import_layer, 25, y, 590, 64, rgb(24, 40, 51), 225, 5);
-        lv_obj_set_style_border_width(row.root, 1, 0);
         row.icon_box = make_box(row.root, 14, 14, 36, 36, rgb(255, 255, 255), 20, 4);
         row.icon_label =
             make_centered_label(row.icon_box, i == 0 ? "P" : "L", fonts.bold_15, rgb(226, 238, 240));
@@ -683,6 +686,8 @@ void create_ui_tree()
         row.browse_btn = make_box(row.root, 509, 17, 64, 30, rgb(255, 255, 255), 24, 4);
         row.browse_label =
             make_centered_label(row.browse_btn, "BROWSE", fonts.bold_10, rgb(240, 247, 249));
+        row.border = make_box(row.root, 0, 0, 590, 64, rgb(0, 0, 0), LV_OPA_TRANSP, 5);
+        lv_obj_set_style_border_width(row.border, 1, 0);
     }
     ui_objs.import_details = lv_obj_create(ui_objs.import_layer);
     init_clean_obj(ui_objs.import_details, 0, 297, 640, 140);
@@ -718,10 +723,11 @@ void create_ui_tree()
         auto &r = ui_objs.picker_rows[row];
         const int32_t y = 127 + row * 37;
         r.root = make_box(ui_objs.picker_layer, 25, y, 590, 33, rgb(255, 255, 255), 0, 4);
-        lv_obj_set_style_border_color(r.root, rgb(239, 247, 250), 0);
-        lv_obj_set_style_border_width(r.root, 0, 0);
         r.kind = make_label(r.root, 13, 9, "DIR", fonts.bold_10, rgb(159, 188, 197));
         r.name = make_label(r.root, 65, 8, "", fonts.reg_12, rgb(238, 247, 249), 505);
+        r.border = make_box(r.root, 0, 0, 590, 33, rgb(0, 0, 0), LV_OPA_TRANSP, 4);
+        lv_obj_set_style_border_color(r.border, rgb(239, 247, 250), 0);
+        lv_obj_set_style_border_width(r.border, 0, 0);
         lv_obj_add_flag(r.root, LV_OBJ_FLAG_HIDDEN);
     }
     lv_obj_add_flag(ui_objs.picker_layer, LV_OBJ_FLAG_HIDDEN);
@@ -838,30 +844,36 @@ void sync_home(const State &a, Uint32 now)
     const float t =
         a.moving ? ease_out(static_cast<float>(now - a.motion_start) / static_cast<float>(State::motion_duration))
                  : 1.0f;
-    int first = a.selected;
-    float first_weight = 1.0f, second_weight = 0.0f, x = 25.0f;
     constexpr float pitch = 320.0f;
+    // Always keep the left neighbor rendered at x = 25 - pitch so cards leaving left never vanish
+    // at the end of a slide and cards entering from the left never pop in at the start.
+    int base = a.selected;
+    float base_x = 25.0f;
+    int active_slot_0 = 0;
+    float w0 = 1.0f, w1 = 0.0f;
     if (a.moving) {
         if (a.direction > 0) {
-            first = a.previous;
-            first_weight = 1.0f - t;
-            second_weight = t;
-            x = 25.0f - pitch * t;
+            base = a.previous;
+            base_x = 25.0f - pitch * t;
+            active_slot_0 = 0;
+            w0 = 1.0f - t;
+            w1 = t;
         } else {
-            first = a.selected;
-            first_weight = t;
-            second_weight = 1.0f - t;
-            x = 25.0f - pitch * (1.0f - t);
+            base = a.selected;
+            base_x = 25.0f - pitch * (1.0f - t);
+            active_slot_0 = 0;
+            w0 = t;
+            w1 = 1.0f - t;
         }
     }
 
     const bool recent_focused = (a.home_focus == HomeFocus::RecentGames);
-    for (int i = 0; i < game_count; ++i) {
-        const int id = (first + i) % game_count;
-        const float active = i == 0 ? first_weight : i == 1 ? second_weight : 0.0f;
-        const float entry = entrance(a, now, 65 + i * 50);
+    for (int slot = -1; slot < game_count - 1; ++slot) {
+        const int id = (base + slot + game_count) % game_count;
+        const float active = (slot == active_slot_0) ? w0 : (slot == active_slot_0 + 1) ? w1 : 0.0f;
+        const float entry = entrance(a, now, 65 + std::max(0, slot) * 50);
         auto &card = ui_objs.recent_cards[id];
-        const int32_t card_x = static_cast<int32_t>(std::lround(x));
+        const int32_t card_x = static_cast<int32_t>(std::lround(base_x + slot * pitch));
         const int32_t card_y = 4 + static_cast<int32_t>(std::lround(12.0f * (1.0f - entry)));
         set_pos_if_changed(card.root, card_x, card_y);
         set_opa_if_changed(card.root, opa_from_float(entry));
@@ -878,7 +890,6 @@ void sync_home(const State &a, Uint32 now)
             lv_obj_set_style_border_opa(card.border, edge_opa, 0);
             lv_obj_set_style_border_width(card.border, edge_w, 0);
         }
-        x += pitch;
     }
 
     const float fp =
@@ -898,13 +909,13 @@ void sync_home(const State &a, Uint32 now)
                                         219 + static_cast<int>(30 * focused));
         const lv_opa_t border_opa = static_cast<lv_opa_t>(60 + static_cast<int>(195 * focused));
         const int32_t border_w = static_cast<int32_t>(std::lround(1.0f + focused));
-        if (lv_obj_get_style_border_opa(card.root, LV_PART_MAIN) != border_opa ||
-            lv_obj_get_style_border_width(card.root, LV_PART_MAIN) != border_w ||
-            lv_color_to_u32(lv_obj_get_style_border_color(card.root, LV_PART_MAIN)) !=
+        if (lv_obj_get_style_border_opa(card.border, LV_PART_MAIN) != border_opa ||
+            lv_obj_get_style_border_width(card.border, LV_PART_MAIN) != border_w ||
+            lv_color_to_u32(lv_obj_get_style_border_color(card.border, LV_PART_MAIN)) !=
                 lv_color_to_u32(border_c)) {
-            lv_obj_set_style_border_color(card.root, border_c, 0);
-            lv_obj_set_style_border_opa(card.root, border_opa, 0);
-            lv_obj_set_style_border_width(card.root, border_w, 0);
+            lv_obj_set_style_border_color(card.border, border_c, 0);
+            lv_obj_set_style_border_opa(card.border, border_opa, 0);
+            lv_obj_set_style_border_width(card.border, border_w, 0);
         }
     }
 
@@ -972,10 +983,10 @@ void sync_import(const State &a, Uint32 now)
         if (last_import_focus != a.import_focus || last_mode != ViewMode::Import) {
             const bool focused =
                 (a.import_focus == (i == 0 ? ImportFocus::Package : ImportFocus::License));
-            lv_obj_set_style_border_color(row.root,
+            lv_obj_set_style_border_color(row.border,
                                           focused ? rgb(241, 248, 250) : rgb(119, 150, 162), 0);
-            lv_obj_set_style_border_opa(row.root, focused ? 255 : 90, 0);
-            lv_obj_set_style_border_width(row.root, focused ? 2 : 1, 0);
+            lv_obj_set_style_border_opa(row.border, focused ? 255 : 90, 0);
+            lv_obj_set_style_border_width(row.border, focused ? 2 : 1, 0);
         }
     }
     if (last_import_pkg != pkg_name || last_mode != ViewMode::Import) {
@@ -1060,7 +1071,7 @@ void sync_picker(const State &a, Uint32 now)
             const auto &it = a.items[idx];
             const bool selected = (idx == a.pick_index);
             lv_obj_set_style_bg_opa(r.root, selected ? 24 : 0, 0);
-            lv_obj_set_style_border_width(r.root, selected ? 2 : 0, 0);
+            lv_obj_set_style_border_width(r.border, selected ? 2 : 0, 0);
             lv_label_set_text(r.kind, it.dir ? "DIR" : "FILE");
             const std::string name =
                 it.path == parent_path ? ".." : it.path.filename().string();
