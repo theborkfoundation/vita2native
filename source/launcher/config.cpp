@@ -18,6 +18,7 @@ ConfigResult load_config()
     }
     result.config.games_path = (base / "games").lexically_normal();
     result.config.loader_path = (base / "v2n").lexically_normal();
+    result.config.storage_path = (base / "storage").lexically_normal();
     const fs::path path = base / "launcher.toml";
     const fs::file_status status = fs::symlink_status(path, ec);
     if (ec == std::errc::no_such_file_or_directory)
@@ -62,6 +63,7 @@ ConfigResult load_config()
         }
         read_path(paths, "paths", "games", result.config.games_path);
         read_path(paths, "paths", "loader", result.config.loader_path);
+        read_path(paths, "paths", "storage", result.config.storage_path);
         if (!result.error.empty())
             return result;
         const auto *appearance = section("appearance");

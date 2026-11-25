@@ -906,11 +906,16 @@ static int launch(SceKernelThreadEntry entry)
     return ret;
 }
 
-static void create_vita2native_paths(void)
+static void create_storage_paths(void)
 {
-    mkdir(VITA2NATIVE_ROOT_PATH, 0755);
-    mkdir(VITA2NATIVE_DUMP_PATH, 0755);
-    mkdir(VITA2NATIVE_DUMP_SHADER_PATH, 0755);
+    char dump_dir[PATH_MAX];
+    char shader_dir[PATH_MAX];
+
+    mkdir(v2n_storage_root(), 0755);
+    if (v2n_storage_path(dump_dir, sizeof(dump_dir), "dump") == 0)
+        mkdir(dump_dir, 0755);
+    if (v2n_storage_path(shader_dir, sizeof(shader_dir), "dump/shader") == 0)
+        mkdir(shader_dir, 0755);
 }
 
 /*
@@ -923,7 +928,7 @@ static int prepare_app_dir(const char *exe_path, char *out, size_t out_size)
     size_t len;
 
     if (vpk_is_archive(exe_path)) {
-        if (snprintf(out, out_size, "%s/app0", VITA2NATIVE_ROOT_PATH) >= (int)out_size)
+        if (v2n_storage_path(out, out_size, "app0") != 0)
             return -1;
         return vpk_extract(exe_path, out);
     }
@@ -947,7 +952,8 @@ static int prepare_app_dir(const char *exe_path, char *out, size_t out_size)
 
 int main(int argc, char *argv[])
 {
-    const char *exe_path = VITA2NATIVE_EXE_FILE;
+    char default_exe[PATH_MAX];
+    const char *exe_path = NULL;
     char app_dir[PATH_MAX];
     time_t now;
     char timestr[32];
@@ -1001,6 +1007,10 @@ int main(int argc, char *argv[])
         g_headless = cli.headless;
         if (cli.exe_path)
             exe_path = cli.exe_path;
+        else if (v2n_storage_path(default_exe, sizeof(default_exe), "executable") == 0)
+            exe_path = default_exe;
+        else
+            fatal_error("Storage path is too long.", "Check paths.storage in launcher.toml.");
     }
 
     if (vita2native_env_flag("VITA2NATIVE_ENV_DUMP")) {
@@ -1015,7 +1025,7 @@ int main(int argc, char *argv[])
     if (!g_headless && !getenv("DISPLAY") && !getenv("WAYLAND_DISPLAY"))
         g_headless = true;
 
-    create_vita2native_paths();
+    create_storage_paths();
 
     if (prepare_app_dir(exe_path, app_dir, sizeof(app_dir)) != 0)
         fatal_error("Could not prepare the application directory.", exe_path);
@@ -1025,12 +1035,13 @@ int main(int argc, char *argv[])
     install_guest_signal_handlers();
 #endif
 
-    if (host_fs_init(VITA2NATIVE_ROOT_PATH, app_dir) != 0)
-        fatal_error("Could not initialize the Vita filesystem.", "Check the vita2native directory.");
+    if (host_fs_init(v2n_storage_root(), app_dir) != 0)
+        fatal_error("Could not initialize the Vita filesystem.", "Check the storage directory.");
 
     /* Initialize netlog */
     netlog_init();
 
+    log_set_storage_root(v2n_storage_root());
     log_init(LOG_DEVICE_STDERR | LOG_DEVICE_NETLOG);
 
     LOG("%s", VITA2NATIVE_VERSION_STRING);

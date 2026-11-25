@@ -27,7 +27,7 @@ typedef enum {
 } CliResult;
 
 typedef struct {
-    /* NULL when the caller should fall back to VITA2NATIVE_EXE_FILE. */
+    /* NULL when the caller should fall back to <storage>/executable. */
     const char *exe_path;
     bool headless;
 } CliOptions;

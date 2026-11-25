@@ -17,6 +17,7 @@ add_executable(vita2native
     source/stb_image_impl.c
     source/stb_image_write_impl.c
     source/cli.c
+    source/config.cpp
     source/load.c
     source/log.c
     source/main.c
@@ -95,6 +96,7 @@ target_include_directories(vita2native PRIVATE
     include
     source/host
     external/argparse
+    external/tomlplusplus/include
     external/khronos/include
     external/minimp3
     external/font8x8

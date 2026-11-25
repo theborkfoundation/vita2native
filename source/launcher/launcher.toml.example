@@ -3,6 +3,8 @@
 games = "./games"
 # Reserved for future game launching.
 loader = "./v2n"
+# Guest filesystem root (ux0/, savedata/, system/, cache/, log.txt).
+storage = "./storage"
 
 [appearance]
 # Optional PNG or SVG, used in the splash screen and header.

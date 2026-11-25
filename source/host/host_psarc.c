@@ -11,6 +11,7 @@
  * Only the zlib PSARC variant used by the titles tested here is supported.
  */
 
+#include "fs.h"
 #include "host_psarc.h"
 
 #include <dirent.h>
@@ -28,8 +29,9 @@
 #include "config.h"
 #include "log.h"
 
+#include <limits.h>
+
 #define PSARC_MAX_CACHED 4
-#define PSARC_CACHE_DIR VITA2NATIVE_ROOT_PATH "/cache/psarc"
 #define PSARC_MAGIC "PSAR"
 
 typedef struct {
@@ -296,16 +298,20 @@ static int cache_file(const Psarc *ps, uint32_t index, char *out, size_t out_siz
     FILE *archive;
     FILE *cache;
     uint8_t *data;
+    char cache_root[PATH_MAX];
+    char psarc_dir[PATH_MAX];
+    const char *root = host_fs_root();
 
-    if (snprintf(out, out_size, PSARC_CACHE_DIR "/%08x_%08x.bin", hash, offset) >=
-        (int)out_size)
+    if (snprintf(cache_root, sizeof(cache_root), "%s/cache", root) >= (int)sizeof(cache_root) ||
+        snprintf(psarc_dir, sizeof(psarc_dir), "%s/cache/psarc", root) >= (int)sizeof(psarc_dir) ||
+        snprintf(out, out_size, "%s/%08x_%08x.bin", psarc_dir, hash, offset) >= (int)out_size)
         return -1;
 
     if (stat(out, &st) == 0 && st.st_size == (off_t)usize)
         return 0;
 
-    mkdir(VITA2NATIVE_ROOT_PATH "/cache", 0755);
-    mkdir(PSARC_CACHE_DIR, 0755);
+    mkdir(cache_root, 0755);
+    mkdir(psarc_dir, 0755);
 
     data = malloc(usize);
     if (!data)

@@ -1,9 +1,23 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-#define VITA2NATIVE_ROOT_PATH        "vita2native"
-#define VITA2NATIVE_EXE_FILE         VITA2NATIVE_ROOT_PATH "/executable"
-#define VITA2NATIVE_DUMP_PATH        VITA2NATIVE_ROOT_PATH "/dump"
-#define VITA2NATIVE_DUMP_SHADER_PATH VITA2NATIVE_DUMP_PATH "/shader"
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/*
+ * Returns the configured storage root from launcher.toml ([paths] storage),
+ * or "storage" when launcher.toml is absent or omits paths.storage.
+ */
+const char *v2n_storage_root(void);
+
+/* Formats "<storage_root>/<subpath>" into `out`. Returns 0 on success, -1 on truncation. */
+int v2n_storage_path(char *out, size_t out_size, const char *subpath);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

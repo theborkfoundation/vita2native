@@ -185,7 +185,7 @@ int host_fs_init(const char *root, const char *app_dir)
     size_t app_len;
 
     if (!root || !root[0])
-        root = "vita2native";
+        root = "storage";
 
     root_len = strlen(root);
     if (copy_string(g_root, sizeof(g_root), root, root_len) < 0)

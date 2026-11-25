@@ -841,7 +841,7 @@ static void gxm_dump_failed_shader(const char *source, const char *name)
     char path[PATH_MAX];
     FILE *file;
 
-    if (snprintf(path, sizeof(path), "%s/failed_%s.glsl", VITA2NATIVE_DUMP_SHADER_PATH, name) >=
+    if (snprintf(path, sizeof(path), "%s/dump/shader/failed_%s.glsl", host_fs_root(), name) >=
         (int)sizeof(path))
         return;
 

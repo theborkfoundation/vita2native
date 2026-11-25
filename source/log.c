@@ -1,7 +1,9 @@
+#include <limits.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
 
-#include "config.h"
 #include "host.h"
 #include "log.h"
 #include "netlog.h"
@@ -10,7 +12,14 @@
 static Mutex g_log_mutex;
 static uint32_t g_device_mask;
 
-const char log_file_path[] = VITA2NATIVE_ROOT_PATH "/log.txt";
+static char log_file_path[PATH_MAX] = "storage/log.txt";
+
+void log_set_storage_root(const char *root)
+{
+    if (!root || !root[0])
+        root = "storage";
+    snprintf(log_file_path, sizeof(log_file_path), "%s/log.txt", root);
+}
 
 void file_log(const char *str)
 {

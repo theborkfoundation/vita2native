@@ -222,7 +222,7 @@ void cli_print_usage(FILE *stream, const char *program)
     fprintf(stream, "  -V, --version         print the version and exit\n");
     fprintf(stream, "      --headless        run without a window\n");
     fprintf(stream, "\n");
-    fprintf(stream, "With no title, vita2native/executable is loaded from the working\n");
+    fprintf(stream, "With no title, <storage>/executable is loaded from the working\n");
     fprintf(stream, "directory. Settings are environment variables; VITA2NATIVE_ENV_DUMP=1\n");
     fprintf(stream, "lists them with their current values.\n");
     fflush(stream);

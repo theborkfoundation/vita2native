@@ -19,6 +19,7 @@ typedef enum {
     LOG_DEVICE_FILE   = BIT(2),
 } log_device_t;
 
+void log_set_storage_root(const char *root);
 void log_init(uint32_t device_mask);
 void log_print(const char *str);
 void log_printf(const char *format, ...) __attribute__((format(printf, 1, 2)));
