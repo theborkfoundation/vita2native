@@ -417,7 +417,7 @@ def main():
     if arch == "armhf":
         print("configure against it with `cmake --preset release`.")
     else:
-        print("configure with `cmake -S src/launcher --preset arm64-cross`.")
+        print("configure with `cmake -S source/launcher --preset arm64-cross`.")
     return 0
 
 

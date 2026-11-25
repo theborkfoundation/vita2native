@@ -33,13 +33,13 @@ the arm64 build clears it because its pkg-config paths are absolute, while the
 armhf build keeps it because `cmake/deps.cmake` leaves `PKG_CONFIG_SYSROOT_DIR`
 unset and passes sysroot-relative `-L`.
 
-The launcher under `src/launcher` is its own ARM64 project. It cross-builds from
+The launcher under `source/launcher` is its own ARM64 project. It cross-builds from
 macOS with the `external/zig-cross` submodule and a separate bookworm/arm64
 sysroot, leaving the armhf one alone:
 
 ```sh
 tools/debian-sysroot.py --arch arm64      # once: build/sysroot-arm64
-cmake -S src/launcher --preset arm64-cross
+cmake -S source/launcher --preset arm64-cross
 cmake --build build/launcher-arm64-cross
 ```
 

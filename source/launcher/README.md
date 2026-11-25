@@ -14,7 +14,7 @@ OpenSSL 3 and zlib development files (including the static
 libcrypto archive), pkg-config, CMake 3.18+, a C/C++ compiler and Python 3:
 
 ```sh
-cmake -S src/launcher -B build/launcher-arm64 -DCMAKE_BUILD_TYPE=Release
+cmake -S source/launcher -B build/launcher-arm64 -DCMAKE_BUILD_TYPE=Release
 cmake --build build/launcher-arm64
 ```
 
@@ -26,7 +26,7 @@ The resulting executable is `build/launcher-arm64/v2n-launcher`.
 SDL2 and OpenSSL 3 must be installed (`brew install sdl2 openssl@3`):
 
 ```sh
-cmake -S src/launcher --preset macos
+cmake -S source/launcher --preset macos
 cmake --build build/launcher-macos
 ```
 
@@ -41,7 +41,7 @@ bookworm/arm64 Debian sysroot:
 
 ```sh
 tools/debian-sysroot.py --arch arm64   # populate build/sysroot-arm64; --verify checks it
-cmake -S src/launcher --preset arm64-cross
+cmake -S source/launcher --preset arm64-cross
 cmake --build build/launcher-arm64-cross
 ```
 
@@ -137,7 +137,7 @@ mappings vary; a platform SDL game-controller mapping may be needed.
 - `state.h` and `state.cpp` define navigation, focus and picker state.
 - `input.cpp` maps keyboard, controller and joystick events to navigation actions.
 - `import.cpp` starts the import thread and receives its channel messages.
-- `../package/` implements the package, PFS and SELF extraction pipeline.
+- `../../src/package/` implements the package, PFS and SELF extraction pipeline.
 - `ui.cpp` builds and updates the screens with LVGL; `library.h` holds the mock games.
 
 The launcher is excluded from the project test suite.

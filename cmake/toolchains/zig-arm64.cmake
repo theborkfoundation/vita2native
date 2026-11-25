@@ -1,5 +1,5 @@
 # ARM64 Linux launcher cross-build using mrexodia/zig-cross and a Debian sysroot.
-# The runtime itself is ARM32; configure src/launcher as a standalone project.
+# The runtime itself is ARM32; configure source/launcher as a standalone project.
 get_filename_component(_v2n_root "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
 set(_v2n_zig_cross "${_v2n_root}/external/zig-cross/cmake/zig-toolchain.cmake")
 if(NOT EXISTS "${_v2n_zig_cross}")

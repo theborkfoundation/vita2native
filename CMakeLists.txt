@@ -63,4 +63,4 @@ include(cmake/tests.cmake)
 include(cmake/install.cmake)
 
 # Handheld library and package importer.
-add_subdirectory(src/launcher)
+add_subdirectory(source/launcher)

@@ -29,7 +29,7 @@ cmake --build --preset release
 
 Rerun `tools/debian-sysroot.py` after the sysroot lock changes. These presets
 target the ARM32 runtime. The launcher primarily targets ARM64 Linux and links
-package extraction into its own binary; see [launcher build instructions](src/launcher/README.md).
+package extraction into its own binary; see [launcher build instructions](source/launcher/README.md).
 
 On a 32-bit ARM host the build also works without a cross toolchain, using the
 distribution's SDL2:
