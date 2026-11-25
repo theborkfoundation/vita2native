@@ -46,20 +46,18 @@ int32_t sc_border(float v)
 }
 
 struct Fonts {
-    lv_font_t *reg_10 = nullptr;
-    lv_font_t *reg_11 = nullptr;
-    lv_font_t *reg_12 = nullptr;
     lv_font_t *reg_14 = nullptr;
-    lv_font_t *bold_10 = nullptr;
-    lv_font_t *bold_11 = nullptr;
-    lv_font_t *bold_13 = nullptr;
-    lv_font_t *bold_15 = nullptr;
+    lv_font_t *reg_16 = nullptr;
+    lv_font_t *reg_18 = nullptr;
+    lv_font_t *bold_14 = nullptr;
     lv_font_t *bold_16 = nullptr;
-    lv_font_t *bold_19 = nullptr;
+    lv_font_t *bold_18 = nullptr;
     lv_font_t *bold_20 = nullptr;
     lv_font_t *bold_22 = nullptr;
     lv_font_t *bold_24 = nullptr;
-    lv_font_t *icon_15 = nullptr;
+    lv_font_t *bold_26 = nullptr;
+    lv_font_t *bold_28 = nullptr;
+    lv_font_t *icon_18 = nullptr;
 };
 Fonts fonts;
 
@@ -176,10 +174,6 @@ struct Widgets {
     lv_obj_t *splash_fill = nullptr;
 
     lv_obj_t *main_layer = nullptr;
-    lv_obj_t *bg_prev = nullptr;
-    lv_obj_t *bg_curr = nullptr;
-    std::shared_ptr<ImageBuffer> bg_prev_ref;
-    std::shared_ptr<ImageBuffer> bg_curr_ref;
     lv_obj_t *bg_tint = nullptr;
     lv_obj_t *bg_grad = nullptr;
 
@@ -258,10 +252,6 @@ ViewMode last_mode = ViewMode::None;
 ConfirmKind last_confirm = ConfirmKind::None;
 int last_games_revision = -1;
 std::string last_config_error;
-int last_bg_selected = -1;
-int last_bg_previous = -1;
-Uint32 bg_fade_start = 0;
-int last_bg_revision = -1;
 std::string last_header_text;
 int last_all_focus = -1;
 int all_scroll_row = 0;
@@ -498,11 +488,6 @@ std::filesystem::path game_card_art(const GameEntry &g)
     return !g.boxart.empty() ? g.boxart : g.art;
 }
 
-std::filesystem::path game_hero_art(const GameEntry &g)
-{
-    return !g.art.empty() ? g.art : g.boxart;
-}
-
 float dist_segment(float px, float py, float ax, float ay, float bx, float by)
 {
     const float vx = bx - ax, vy = by - ay;
@@ -649,7 +634,7 @@ GameCardWidgets build_game_card(lv_obj_t *parent, float x, float y, float w, flo
         lv_image_set_src(c.img, &c.art_ref->dsc);
     } else {
         lv_obj_add_flag(c.img, LV_OBJ_FLAG_HIDDEN);
-        c.fallback_id = make_label(c.root, 0, 0, game.title_id.c_str(), fonts.bold_16,
+        c.fallback_id = make_label(c.root, 0, 0, game.title_id.c_str(), fonts.bold_20,
                                    rgb(159, 190, 201));
         lv_obj_set_style_text_opa(c.fallback_id, 65, 0);
         lv_obj_align(c.fallback_id, LV_ALIGN_CENTER, 0, -sc(10));
@@ -678,24 +663,24 @@ GameCardWidgets build_game_card(lv_obj_t *parent, float x, float y, float w, flo
 void create_confirm_modal(ConfirmModal &m, lv_obj_t *parent)
 {
     m.backdrop = make_box(parent, 0, 0, screen_width, screen_height, rgb(6, 13, 19), 185);
-    m.card = make_box(m.backdrop, 130, 163, 380, 154, rgb(20, 35, 45), 250, 8);
+    m.card = make_box(m.backdrop, 110, 152, 420, 176, rgb(20, 35, 45), 250, 8);
     lv_obj_set_style_border_color(m.card, rgb(195, 222, 230), 0);
     lv_obj_set_style_border_opa(m.card, 110, 0);
     lv_obj_set_style_border_width(m.card, sc_border(1), 0);
 
-    m.title = make_label(m.card, 24, 22, "", fonts.bold_19, rgb(248, 251, 253), 332);
-    m.message = make_label(m.card, 24, 54, "", fonts.reg_12, rgb(174, 193, 201), 332);
+    m.title = make_label(m.card, 24, 22, "", fonts.bold_22, rgb(248, 251, 253), 372);
+    m.message = make_label(m.card, 24, 58, "", fonts.reg_16, rgb(174, 193, 201), 372);
     lv_label_set_long_mode(m.message, LV_LABEL_LONG_MODE_WRAP);
 
     m.confirm_icon = lv_image_create(m.card);
-    init_clean_obj(m.confirm_icon, 0, 108, 22, 22);
+    init_clean_obj(m.confirm_icon, 0, 124, 22, 22);
     lv_image_set_src(m.confirm_icon, &icon_key_a.dsc);
-    m.confirm_label = make_label(m.card, 0, 114, "", fonts.bold_11, rgb(225, 237, 240));
+    m.confirm_label = make_label(m.card, 0, 126, "", fonts.bold_16, rgb(225, 237, 240));
 
     m.cancel_icon = lv_image_create(m.card);
-    init_clean_obj(m.cancel_icon, 0, 108, 22, 22);
+    init_clean_obj(m.cancel_icon, 0, 124, 22, 22);
     lv_image_set_src(m.cancel_icon, &icon_key_b.dsc);
-    m.cancel_label = make_label(m.card, 0, 114, "", fonts.bold_11, rgb(225, 237, 240));
+    m.cancel_label = make_label(m.card, 0, 126, "", fonts.bold_16, rgb(225, 237, 240));
 
     lv_obj_add_flag(m.backdrop, LV_OBJ_FLAG_HIDDEN);
 }
@@ -705,16 +690,16 @@ void layout_modal_actions(ConfirmModal &m, const char *confirm_text, const char 
     lv_label_set_text(m.confirm_label, confirm_text);
     lv_label_set_text(m.cancel_label, cancel_text);
     lv_point_t confirm_sz{}, cancel_sz{};
-    lv_text_get_size(&confirm_sz, confirm_text, fonts.bold_11, 0, 0, LV_COORD_MAX,
+    lv_text_get_size(&confirm_sz, confirm_text, fonts.bold_16, 0, 0, LV_COORD_MAX,
                      LV_TEXT_FLAG_NONE);
-    lv_text_get_size(&cancel_sz, cancel_text, fonts.bold_11, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    lv_text_get_size(&cancel_sz, cancel_text, fonts.bold_16, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
 
     const int32_t icon_w = sc(22);
-    const int32_t icon_gap = sc(7);
-    const int32_t pair_gap = sc(20);
-    const int32_t right_edge = sc(356);
-    const int32_t y_icon = sc(108);
-    const int32_t y_label = sc(114);
+    const int32_t icon_gap = sc(8);
+    const int32_t pair_gap = sc(22);
+    const int32_t right_edge = sc(396);
+    const int32_t y_icon = sc(124);
+    const int32_t y_label = sc(126);
 
     const int32_t cancel_x = right_edge - (icon_w + icon_gap + cancel_sz.x);
     const int32_t confirm_x = cancel_x - pair_gap - (icon_w + icon_gap + confirm_sz.x);
@@ -760,13 +745,13 @@ ToastAppearance toast_appearance(ToastKind kind)
 
 void create_toast(ToastOverlay &t, lv_obj_t *parent)
 {
-    t.root = make_box(parent, 0, 388, 180, 32, rgb(16, 30, 40), 245, 16);
+    t.root = make_box(parent, 0, 384, 200, 38, rgb(16, 30, 40), 245, 19);
     lv_obj_set_style_border_color(t.root, rgb(106, 198, 222), 0);
     lv_obj_set_style_border_opa(t.root, 185, 0);
     lv_obj_set_style_border_width(t.root, sc_border(1), 0);
-    t.icon = make_label(t.root, 13, 8, "", fonts.icon_15, rgb(106, 198, 222));
-    t.label = make_label(t.root, 35, 9, "", fonts.reg_11, rgb(236, 245, 248), 490);
-    lv_obj_set_height(t.label, lv_font_get_line_height(fonts.reg_11));
+    t.icon = make_label(t.root, 14, 10, "", fonts.icon_18, rgb(106, 198, 222));
+    t.label = make_label(t.root, 40, 9, "", fonts.reg_16, rgb(236, 245, 248), 520);
+    lv_obj_set_height(t.label, lv_font_get_line_height(fonts.reg_16));
     lv_label_set_long_mode(t.label, LV_LABEL_LONG_MODE_DOTS);
     lv_obj_add_flag(t.root, LV_OBJ_FLAG_HIDDEN);
 }
@@ -782,15 +767,15 @@ void create_ui_tree()
     // Config error screen
     ui_objs.error_layer = make_gradient(ui_objs.root, 0, 0, screen_width, screen_height,
                                         rgb(43, 64, 73), 255, rgb(7, 13, 20), 255);
-    make_label(ui_objs.error_layer, 32, 72, "Configuration error", fonts.bold_22,
+    make_label(ui_objs.error_layer, 32, 72, "Configuration error", fonts.bold_26,
                rgb(248, 251, 253));
-    ui_objs.error_body = make_label(ui_objs.error_layer, 32, 120, "", fonts.reg_14,
+    ui_objs.error_body = make_label(ui_objs.error_layer, 32, 120, "", fonts.reg_18,
                                     rgb(220, 231, 235), 576);
     lv_label_set_long_mode(ui_objs.error_body, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_set_height(ui_objs.error_body, sc(250));
-    make_label(ui_objs.error_layer, 32, 404, "Fix launcher.toml and restart.", fonts.reg_12,
+    make_label(ui_objs.error_layer, 32, 398, "Fix launcher.toml and restart.", fonts.reg_16,
                rgb(174, 193, 201));
-    make_label(ui_objs.error_layer, 32, 446, "A / B  EXIT", fonts.bold_11, rgb(229, 243, 245));
+    make_label(ui_objs.error_layer, 32, 442, "A / B  EXIT", fonts.bold_16, rgb(229, 243, 245));
     lv_obj_add_flag(ui_objs.error_layer, LV_OBJ_FLAG_HIDDEN);
 
     // Splash screen
@@ -808,17 +793,7 @@ void create_ui_tree()
     init_clean_obj(ui_objs.main_layer, 0, 0, screen_width, screen_height);
     lv_obj_add_flag(ui_objs.main_layer, LV_OBJ_FLAG_HIDDEN);
 
-    // Background cover + crossfade + dark tint + vertical gradient
-    ui_objs.bg_prev = lv_image_create(ui_objs.main_layer);
-    init_clean_obj(ui_objs.bg_prev, 0, 0, 640, 440);
-    lv_obj_set_style_image_opa(ui_objs.bg_prev, 122, 0);
-    lv_obj_add_flag(ui_objs.bg_prev, LV_OBJ_FLAG_HIDDEN);
-
-    ui_objs.bg_curr = lv_image_create(ui_objs.main_layer);
-    init_clean_obj(ui_objs.bg_curr, 0, 0, 640, 440);
-    lv_obj_set_style_image_opa(ui_objs.bg_curr, 0, 0);
-    lv_obj_add_flag(ui_objs.bg_curr, LV_OBJ_FLAG_HIDDEN);
-
+    // Background tint + vertical gradient
     ui_objs.bg_tint = make_box(ui_objs.main_layer, 0, 0, 640, 440, rgb(12, 25, 35), 190);
     ui_objs.bg_grad = make_gradient(ui_objs.main_layer, 0, 0, 640, 440, rgb(30, 43, 52), 75,
                                     rgb(10, 22, 30), 240);
@@ -826,37 +801,39 @@ void create_ui_tree()
     // Header
     ui_objs.header_layer = lv_obj_create(ui_objs.main_layer);
     init_clean_obj(ui_objs.header_layer, 0, 0, 640, 64);
-    build_brand(ui_objs.header_brand, ui_objs.header_layer, 25, 17, 26, custom_logo_header);
-    ui_objs.header_screen = make_label(ui_objs.header_layer, 63, 16, "Vita2Native",
-                                       fonts.bold_24, rgb(248, 251, 253), 552);
-    lv_obj_set_height(ui_objs.header_screen, lv_font_get_line_height(fonts.bold_24));
+    build_brand(ui_objs.header_brand, ui_objs.header_layer, 25, 16, 28, custom_logo_header);
+    ui_objs.header_screen = make_label(ui_objs.header_layer, 64, 15, "Vita2Native",
+                                       fonts.bold_28, rgb(248, 251, 253), 551);
+    lv_obj_set_height(ui_objs.header_screen, lv_font_get_line_height(fonts.bold_28));
     lv_label_set_long_mode(ui_objs.header_screen, LV_LABEL_LONG_MODE_DOTS);
 
     // Home screen
     ui_objs.home_layer = lv_obj_create(ui_objs.main_layer);
     init_clean_obj(ui_objs.home_layer, 0, 0, 640, 438);
     ui_objs.home_heading =
-        make_label(ui_objs.home_layer, 25, 72, "Recent games", fonts.bold_20, rgb(248, 251, 253));
+        make_label(ui_objs.home_layer, 25, 68, "Recent games", fonts.bold_24, rgb(248, 251, 253));
 
     ui_objs.home_carousel = lv_obj_create(ui_objs.home_layer);
-    init_clean_obj(ui_objs.home_carousel, 0, 103, 640, 165);
+    init_clean_obj(ui_objs.home_carousel, 0, 102, 640, 166);
 
     ui_objs.home_empty =
-        make_box(ui_objs.home_layer, 25, 107, 590, 154, rgb(24, 40, 51), 200, 6);
+        make_box(ui_objs.home_layer, 25, 106, 590, 154, rgb(24, 40, 51), 200, 6);
     lv_obj_set_style_border_color(ui_objs.home_empty, rgb(119, 150, 162), 0);
     lv_obj_set_style_border_opa(ui_objs.home_empty, 75, 0);
     lv_obj_set_style_border_width(ui_objs.home_empty, sc_border(1), 0);
-    make_label(ui_objs.home_empty, 24, 52, "No games found", fonts.bold_16, rgb(238, 247, 249));
-    make_label(ui_objs.home_empty, 24, 80,
-               "Import a .pkg or place title folders (*/eboot.bin) in your games directory.",
-               fonts.reg_11, rgb(164, 188, 196), 542);
+    make_label(ui_objs.home_empty, 24, 40, "No games found", fonts.bold_20, rgb(238, 247, 249));
+    lv_obj_t *home_empty_sub = make_label(
+        ui_objs.home_empty, 24, 72,
+        "Import a .pkg or place title folders (*/eboot.bin) in your games directory.",
+        fonts.reg_16, rgb(164, 188, 196), 542);
+    lv_label_set_long_mode(home_empty_sub, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_add_flag(ui_objs.home_empty, LV_OBJ_FLAG_HIDDEN);
 
     for (int i = 0; i < 2; ++i) {
         auto &card = ui_objs.action_cards[i];
         const float x = 25 + i * 301;
-        card.root = make_box(ui_objs.home_layer, x, 321, 289, 92, rgb(32, 52, 64), 225, 7);
-        card.icon_box = make_box(card.root, 15, 26, 40, 40, rgb(204, 230, 234), 24, 7);
+        card.root = make_box(ui_objs.home_layer, x, 315, 289, 98, rgb(32, 52, 64), 225, 7);
+        card.icon_box = make_box(card.root, 15, 29, 40, 40, rgb(204, 230, 234), 24, 7);
         if (i == 0) {
             for (int row = 0; row < 2; ++row)
                 for (int col = 0; col < 2; ++col)
@@ -866,13 +843,13 @@ void create_ui_tree()
             make_box(card.icon_box, 19, 10, 2, 20, rgb(213, 232, 235), 255);
             make_box(card.icon_box, 10, 19, 20, 2, rgb(213, 232, 235), 255);
         }
-        card.title = make_label(card.root, 68, 22, i == 0 ? "View all games" : "Import game",
-                                fonts.bold_15, rgb(245, 250, 251), 190);
-        card.subtitle = make_label(card.root, 68, 48,
+        card.title = make_label(card.root, 68, 21, i == 0 ? "View all games" : "Import game",
+                                fonts.bold_20, rgb(245, 250, 251), 184);
+        card.subtitle = make_label(card.root, 68, 52,
                                    i == 0 ? "Browse your library" : "Add a package and license",
-                                   fonts.reg_10, rgb(164, 188, 196), 203);
-        card.arrow = make_label(card.root, 258, 25, "→", fonts.bold_16, rgb(195, 218, 223), 24);
-        card.border = make_box(card.root, 0, 0, 289, 92, rgb(0, 0, 0), LV_OPA_TRANSP, 7);
+                                   fonts.reg_14, rgb(164, 188, 196), 205);
+        card.arrow = make_label(card.root, 258, 24, "→", fonts.bold_20, rgb(195, 218, 223), 24);
+        card.border = make_box(card.root, 0, 0, 289, 98, rgb(0, 0, 0), LV_OPA_TRANSP, 7);
         lv_obj_set_style_border_width(card.border, sc_border(1), 0);
     }
     lv_obj_add_flag(ui_objs.home_layer, LV_OBJ_FLAG_HIDDEN);
@@ -881,30 +858,32 @@ void create_ui_tree()
     ui_objs.all_layer = lv_obj_create(ui_objs.main_layer);
     init_clean_obj(ui_objs.all_layer, 0, 0, 640, 438);
     ui_objs.all_heading =
-        make_label(ui_objs.all_layer, 25, 72, "All games", fonts.bold_20, rgb(248, 251, 253));
+        make_label(ui_objs.all_layer, 25, 68, "All games", fonts.bold_24, rgb(248, 251, 253));
     ui_objs.all_count =
-        make_label(ui_objs.all_layer, 0, 79, "0 GAMES", fonts.bold_10, rgb(174, 192, 200));
-    lv_obj_align(ui_objs.all_count, LV_ALIGN_TOP_RIGHT, -sc(25), sc(79));
+        make_label(ui_objs.all_layer, 0, 74, "0 GAMES", fonts.bold_14, rgb(174, 192, 200));
+    lv_obj_align(ui_objs.all_count, LV_ALIGN_TOP_RIGHT, -sc(25), sc(74));
 
     ui_objs.all_viewport = lv_obj_create(ui_objs.all_layer);
-    init_clean_obj(ui_objs.all_viewport, 0, 107, 640, 326);
+    init_clean_obj(ui_objs.all_viewport, 0, 104, 640, 328);
 
     ui_objs.all_empty =
-        make_box(ui_objs.all_layer, 25, 111, 590, 136, rgb(24, 40, 51), 200, 6);
+        make_box(ui_objs.all_layer, 25, 108, 590, 154, rgb(24, 40, 51), 200, 6);
     lv_obj_set_style_border_color(ui_objs.all_empty, rgb(119, 150, 162), 0);
     lv_obj_set_style_border_opa(ui_objs.all_empty, 75, 0);
     lv_obj_set_style_border_width(ui_objs.all_empty, sc_border(1), 0);
-    make_label(ui_objs.all_empty, 24, 42, "No games in your library yet", fonts.bold_16,
+    make_label(ui_objs.all_empty, 24, 38, "No games in your library yet", fonts.bold_20,
                rgb(238, 247, 249));
-    make_label(ui_objs.all_empty, 24, 70,
-               "Use Import game on the home screen or add title folders containing eboot.bin.",
-               fonts.reg_11, rgb(164, 188, 196), 542);
+    lv_obj_t *all_empty_sub = make_label(
+        ui_objs.all_empty, 24, 70,
+        "Use Import game on the home screen or add title folders containing eboot.bin.",
+        fonts.reg_16, rgb(164, 188, 196), 542);
+    lv_label_set_long_mode(all_empty_sub, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_add_flag(ui_objs.all_empty, LV_OBJ_FLAG_HIDDEN);
 
     ui_objs.all_scrollbar_track =
-        make_box(ui_objs.all_layer, 626, 111, 3, 286, rgb(255, 255, 255), 25, 2);
+        make_box(ui_objs.all_layer, 626, 108, 3, 288, rgb(255, 255, 255), 25, 2);
     ui_objs.all_scrollbar_thumb =
-        make_box(ui_objs.all_layer, 626, 111, 3, 80, rgb(225, 237, 239), 180, 2);
+        make_box(ui_objs.all_layer, 626, 108, 3, 80, rgb(225, 237, 239), 180, 2);
     lv_obj_add_flag(ui_objs.all_scrollbar_track, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(ui_objs.all_scrollbar_thumb, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(ui_objs.all_layer, LV_OBJ_FLAG_HIDDEN);
@@ -913,63 +892,69 @@ void create_ui_tree()
     ui_objs.import_layer = lv_obj_create(ui_objs.main_layer);
     init_clean_obj(ui_objs.import_layer, 0, 0, 640, 438);
     ui_objs.import_heading =
-        make_label(ui_objs.import_layer, 25, 72, "Import a game", fonts.bold_20, rgb(248, 251, 253));
+        make_label(ui_objs.import_layer, 25, 68, "Import a game", fonts.bold_24, rgb(248, 251, 253));
     ui_objs.import_subtitle =
         make_label(ui_objs.import_layer, 25, 99,
-                   "Select your package and its license to add a game.", fonts.reg_12,
+                   "Select your package and its license to add a game.", fonts.reg_16,
                    rgb(174, 193, 201));
     for (int i = 0; i < 2; ++i) {
         auto &row = ui_objs.import_rows[i];
-        const float y = 135 + i * 76;
-        row.root = make_box(ui_objs.import_layer, 25, y, 590, 64, rgb(24, 40, 51), 225, 5);
-        row.icon_box = make_box(row.root, 14, 14, 36, 36, rgb(255, 255, 255), 20, 4);
+        const float y = 132 + i * 78;
+        row.root = make_box(ui_objs.import_layer, 25, y, 590, 68, rgb(24, 40, 51), 225, 5);
+        row.icon_box = make_box(row.root, 14, 15, 38, 38, rgb(255, 255, 255), 20, 4);
         row.icon_label =
-            make_centered_label(row.icon_box, i == 0 ? "P" : "L", fonts.bold_15, rgb(226, 238, 240));
-        row.title = make_label(row.root, 64, 11, i == 0 ? "Game package" : "License file",
-                               fonts.bold_13, rgb(244, 249, 251));
-        row.value = make_label(row.root, 64, 34,
+            make_centered_label(row.icon_box, i == 0 ? "P" : "L", fonts.bold_20, rgb(226, 238, 240));
+        row.title = make_label(row.root, 66, 11, i == 0 ? "Game package" : "License file",
+                               fonts.bold_18, rgb(244, 249, 251));
+        row.value = make_label(row.root, 66, 37,
                                i == 0 ? "Choose a .pkg file" : "Choose a work.bin file",
-                               fonts.reg_11, rgb(173, 194, 202), 350);
-        row.browse_btn = make_box(row.root, 509, 17, 64, 30, rgb(255, 255, 255), 24, 4);
+                               fonts.reg_16, rgb(173, 194, 202), 390);
+        lv_obj_set_height(row.value, lv_font_get_line_height(fonts.reg_16));
+        lv_label_set_long_mode(row.value, LV_LABEL_LONG_MODE_DOTS);
+        row.browse_btn = make_box(row.root, 476, 17, 98, 34, rgb(255, 255, 255), 24, 4);
         row.browse_label =
-            make_centered_label(row.browse_btn, "BROWSE", fonts.bold_10, rgb(240, 247, 249));
-        row.border = make_box(row.root, 0, 0, 590, 64, rgb(0, 0, 0), LV_OPA_TRANSP, 5);
+            make_centered_label(row.browse_btn, "BROWSE", fonts.bold_14, rgb(240, 247, 249));
+        row.border = make_box(row.root, 0, 0, 590, 68, rgb(0, 0, 0), LV_OPA_TRANSP, 5);
         lv_obj_set_style_border_width(row.border, sc_border(1), 0);
     }
     ui_objs.import_details = lv_obj_create(ui_objs.import_layer);
-    init_clean_obj(ui_objs.import_details, 0, 297, 640, 140);
+    init_clean_obj(ui_objs.import_details, 0, 294, 640, 144);
     ui_objs.import_btn =
-        make_box(ui_objs.import_details, 25, 0, 590, 42, rgb(92, 115, 124), 255, 5);
+        make_box(ui_objs.import_details, 25, 0, 590, 44, rgb(92, 115, 124), 255, 5);
     ui_objs.import_btn_label =
-        make_centered_label(ui_objs.import_btn, "IMPORT GAME", fonts.bold_11, rgb(225, 236, 239));
+        make_centered_label(ui_objs.import_btn, "IMPORT GAME", fonts.bold_16, rgb(225, 236, 239));
     lv_obj_t *status_box =
-        make_box(ui_objs.import_details, 25, 62, 590, 47, rgb(255, 255, 255), 12, 5);
+        make_box(ui_objs.import_details, 25, 56, 590, 68, rgb(255, 255, 255), 12, 5);
     ui_objs.import_status_primary =
-        make_label(status_box, 14, 8, "", fonts.reg_11, rgb(199, 218, 224), 560);
+        make_label(status_box, 14, 9, "", fonts.reg_16, rgb(199, 218, 224), 562);
     ui_objs.import_status_secondary =
-        make_label(status_box, 14, 26, "Your title will be added to your games library.",
-                   fonts.reg_10, rgb(143, 168, 178));
+        make_label(status_box, 14, 38, "Your title will be added to your games library.",
+                   fonts.reg_14, rgb(143, 168, 178));
     lv_obj_add_flag(ui_objs.import_layer, LV_OBJ_FLAG_HIDDEN);
 
     // Picker screen
     ui_objs.picker_layer = lv_obj_create(ui_objs.main_layer);
     init_clean_obj(ui_objs.picker_layer, 0, 0, 640, 438);
     ui_objs.picker_heading =
-        make_label(ui_objs.picker_layer, 25, 72, "Choose a package", fonts.bold_20,
+        make_label(ui_objs.picker_layer, 25, 68, "Choose a package", fonts.bold_24,
                    rgb(248, 251, 253));
     ui_objs.picker_dir =
-        make_label(ui_objs.picker_layer, 25, 100, "", fonts.reg_11, rgb(174, 193, 201), 590);
+        make_label(ui_objs.picker_layer, 25, 99, "", fonts.reg_14, rgb(174, 193, 201), 590);
+    lv_obj_set_height(ui_objs.picker_dir, lv_font_get_line_height(fonts.reg_14));
+    lv_label_set_long_mode(ui_objs.picker_dir, LV_LABEL_LONG_MODE_DOTS);
     ui_objs.picker_empty =
-        make_label(ui_objs.picker_layer, 36, 156, "No matching files or folders.", fonts.reg_12,
+        make_label(ui_objs.picker_layer, 36, 156, "No matching files or folders.", fonts.reg_16,
                    rgb(168, 189, 197));
     lv_obj_add_flag(ui_objs.picker_empty, LV_OBJ_FLAG_HIDDEN);
     for (int row = 0; row < picker_page_size; ++row) {
         auto &r = ui_objs.picker_rows[row];
-        const float y = 127 + row * 37;
-        r.root = make_box(ui_objs.picker_layer, 25, y, 590, 33, rgb(255, 255, 255), 0, 4);
-        r.kind = make_label(r.root, 13, 9, "DIR", fonts.bold_10, rgb(159, 188, 197));
-        r.name = make_label(r.root, 65, 8, "", fonts.reg_12, rgb(238, 247, 249), 505);
-        r.border = make_box(r.root, 0, 0, 590, 33, rgb(0, 0, 0), LV_OPA_TRANSP, 4);
+        const float y = 124 + row * 38;
+        r.root = make_box(ui_objs.picker_layer, 25, y, 590, 34, rgb(255, 255, 255), 0, 4);
+        r.kind = make_label(r.root, 13, 8, "DIR", fonts.bold_14, rgb(159, 188, 197));
+        r.name = make_label(r.root, 72, 7, "", fonts.reg_16, rgb(238, 247, 249), 500);
+        lv_obj_set_height(r.name, lv_font_get_line_height(fonts.reg_16));
+        lv_label_set_long_mode(r.name, LV_LABEL_LONG_MODE_DOTS);
+        r.border = make_box(r.root, 0, 0, 590, 34, rgb(0, 0, 0), LV_OPA_TRANSP, 4);
         lv_obj_set_style_border_color(r.border, rgb(239, 247, 250), 0);
         lv_obj_set_style_border_width(r.border, 0, 0);
         lv_obj_add_flag(r.root, LV_OBJ_FLAG_HIDDEN);
@@ -988,7 +973,7 @@ void create_ui_tree()
     ui_objs.info_boxart_img = lv_image_create(ui_objs.info_boxart_card);
     init_clean_obj(ui_objs.info_boxart_img, 0, 0, 120, 152);
     ui_objs.info_boxart_fallback =
-        make_label(ui_objs.info_boxart_card, 0, 0, "", fonts.bold_15, rgb(159, 190, 201));
+        make_label(ui_objs.info_boxart_card, 0, 0, "", fonts.bold_20, rgb(159, 190, 201));
     lv_obj_set_style_text_opa(ui_objs.info_boxart_fallback, 140, 0);
     lv_obj_align(ui_objs.info_boxart_fallback, LV_ALIGN_CENTER, 0, 0);
     lv_obj_t *boxart_border =
@@ -998,59 +983,54 @@ void create_ui_tree()
     lv_obj_set_style_border_width(boxart_border, sc_border(1), 0);
 
     ui_objs.info_badges = lv_obj_create(ui_objs.info_layer);
-    init_clean_obj(ui_objs.info_badges, 162, 72, 453, 24);
+    init_clean_obj(ui_objs.info_badges, 162, 70, 453, 28);
     lv_obj_set_flex_flow(ui_objs.info_badges, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_column(ui_objs.info_badges, sc(8), 0);
 
     auto make_badge = [&](lv_obj_t *&pill, lv_obj_t *&lbl, lv_color_t bg, lv_opa_t bg_opa,
-                          lv_color_t fg, bool bordered) {
-        pill = make_box(ui_objs.info_badges, 0, 0, 0, 22, bg, bg_opa, 11);
+                          lv_color_t fg) {
+        pill = make_box(ui_objs.info_badges, 0, 0, 0, 26, bg, bg_opa, 13);
         lv_obj_set_width(pill, LV_SIZE_CONTENT);
-        lv_obj_set_style_pad_hor(pill, sc(10), 0);
-        if (bordered) {
-            lv_obj_set_style_border_color(pill, rgb(162, 197, 205), 0);
-            lv_obj_set_style_border_opa(pill, 75, 0);
-            lv_obj_set_style_border_width(pill, sc_border(1), 0);
-        }
-        lbl = make_centered_label(pill, "", fonts.bold_10, fg);
+        lv_obj_set_style_pad_hor(pill, sc(11), 0);
+        lbl = make_centered_label(pill, "", fonts.bold_14, fg);
     };
     make_badge(ui_objs.info_badge_id, ui_objs.info_badge_id_label, rgb(135, 174, 185), 35,
-               rgb(229, 243, 245), true);
+               rgb(229, 243, 245));
     make_badge(ui_objs.info_badge_cat, ui_objs.info_badge_cat_label, rgb(255, 255, 255), 18,
-               rgb(199, 218, 224), false);
+               rgb(199, 218, 224));
     make_badge(ui_objs.info_badge_rating, ui_objs.info_badge_rating_label, rgb(255, 255, 255), 18,
-               rgb(245, 215, 130), false);
+               rgb(245, 215, 130));
 
     ui_objs.info_desc =
-        make_label(ui_objs.info_layer, 162, 104, "", fonts.reg_11, rgb(184, 203, 211), 453);
-    lv_obj_set_height(ui_objs.info_desc, sc(72));
+        make_label(ui_objs.info_layer, 162, 104, "", fonts.reg_16, rgb(184, 203, 211), 453);
+    lv_obj_set_height(ui_objs.info_desc, sc(76));
     lv_label_set_long_mode(ui_objs.info_desc, LV_LABEL_LONG_MODE_DOTS);
 
     ui_objs.info_play_btn =
-        make_box(ui_objs.info_layer, 162, 186, 170, 36, rgb(225, 237, 239), 255, 5);
+        make_box(ui_objs.info_layer, 162, 186, 178, 38, rgb(225, 237, 239), 255, 5);
     lv_obj_set_style_border_color(ui_objs.info_play_btn, rgb(248, 252, 255), 0);
     lv_obj_set_style_border_opa(ui_objs.info_play_btn, 0, 0);
     lv_obj_set_style_border_width(ui_objs.info_play_btn, sc_border(1), 0);
     ui_objs.info_play_label =
-        make_centered_label(ui_objs.info_play_btn, "PLAY", fonts.bold_11, rgb(14, 28, 35));
+        make_centered_label(ui_objs.info_play_btn, "PLAY", fonts.bold_16, rgb(14, 28, 35));
 
     ui_objs.info_shot_heading =
-        make_label(ui_objs.info_layer, 25, 240, "Screenshots", fonts.bold_15, rgb(248, 251, 253));
+        make_label(ui_objs.info_layer, 25, 238, "Screenshots", fonts.bold_20, rgb(248, 251, 253));
     ui_objs.info_shot_count =
-        make_label(ui_objs.info_layer, 0, 243, "", fonts.bold_10, rgb(174, 192, 200));
-    lv_obj_align(ui_objs.info_shot_count, LV_ALIGN_TOP_RIGHT, -sc(25), sc(243));
+        make_label(ui_objs.info_layer, 0, 242, "", fonts.bold_14, rgb(174, 192, 200));
+    lv_obj_align(ui_objs.info_shot_count, LV_ALIGN_TOP_RIGHT, -sc(25), sc(242));
 
     ui_objs.info_shot_empty =
-        make_box(ui_objs.info_layer, 25, 266, 590, 148, rgb(24, 40, 51), 150, 6);
+        make_box(ui_objs.info_layer, 25, 268, 590, 148, rgb(24, 40, 51), 150, 6);
     lv_obj_set_style_border_color(ui_objs.info_shot_empty, rgb(119, 150, 162), 0);
     lv_obj_set_style_border_opa(ui_objs.info_shot_empty, 60, 0);
     lv_obj_set_style_border_width(ui_objs.info_shot_empty, sc_border(1), 0);
-    make_centered_label(ui_objs.info_shot_empty, "No screenshots available.", fonts.reg_11,
+    make_centered_label(ui_objs.info_shot_empty, "No screenshots available.", fonts.reg_16,
                         rgb(155, 179, 188));
     lv_obj_add_flag(ui_objs.info_shot_empty, LV_OBJ_FLAG_HIDDEN);
 
     ui_objs.info_shot_strip = lv_obj_create(ui_objs.info_layer);
-    init_clean_obj(ui_objs.info_shot_strip, 25, 266, 590, 152);
+    init_clean_obj(ui_objs.info_shot_strip, 25, 268, 590, 152);
     lv_obj_add_flag(ui_objs.info_layer, LV_OBJ_FLAG_HIDDEN);
 
     // Footer
@@ -1060,19 +1040,19 @@ void create_ui_tree()
     lv_obj_t *dpad = lv_image_create(ui_objs.footer_layer);
     init_clean_obj(dpad, 24, 10, 22, 22);
     lv_image_set_src(dpad, &icon_dpad.dsc);
-    make_label(ui_objs.footer_layer, 54, 17, "NAVIGATE", fonts.bold_10, rgb(191, 210, 217));
+    make_label(ui_objs.footer_layer, 54, 13, "NAVIGATE", fonts.bold_14, rgb(191, 210, 217));
 
     ui_objs.footer_select_icon = lv_image_create(ui_objs.footer_layer);
     init_clean_obj(ui_objs.footer_select_icon, 0, 10, 22, 22);
     lv_image_set_src(ui_objs.footer_select_icon, &icon_key_a.dsc);
     ui_objs.footer_select_label =
-        make_label(ui_objs.footer_layer, 0, 17, "SELECT", fonts.bold_10, rgb(191, 210, 217));
+        make_label(ui_objs.footer_layer, 0, 13, "SELECT", fonts.bold_14, rgb(191, 210, 217));
 
     ui_objs.footer_back_icon = lv_image_create(ui_objs.footer_layer);
     init_clean_obj(ui_objs.footer_back_icon, 0, 10, 22, 22);
     lv_image_set_src(ui_objs.footer_back_icon, &icon_key_b.dsc);
     ui_objs.footer_back_label =
-        make_label(ui_objs.footer_layer, 0, 17, "EXIT", fonts.bold_10, rgb(191, 210, 217));
+        make_label(ui_objs.footer_layer, 0, 13, "EXIT", fonts.bold_14, rgb(191, 210, 217));
 
     create_toast(ui_objs.toast, ui_objs.main_layer);
     create_confirm_modal(ui_objs.confirm_modal, ui_objs.main_layer);
@@ -1106,8 +1086,8 @@ void rebuild_game_lists(const State &a)
     const int rc = a.recent_count();
     for (int i = 0; i < rc; ++i) {
         ui_objs.recent_cards.push_back(build_game_card(
-            ui_objs.home_carousel, 25 + i * 320, 4, 310, 154, a.games[i], fonts.bold_19, 16,
-            154 - 32, 310 - 32, 220));
+            ui_objs.home_carousel, 25 + i * 320, 4, 310, 154, a.games[i], fonts.bold_22, 16,
+            154 - 36, 310 - 32, 220));
     }
     set_visible(ui_objs.home_carousel, rc > 0);
     set_visible(ui_objs.home_empty, rc == 0);
@@ -1119,94 +1099,19 @@ void rebuild_game_lists(const State &a)
     for (int i = 0; i < total; ++i) {
         ui_objs.all_cards.push_back(build_game_card(
             ui_objs.all_viewport, 25 + (i % 2) * 301, 4 + (i / 2) * 150, 289, 136, a.games[i],
-            fonts.bold_16, 14, 104, 260, 225));
+            fonts.bold_20, 14, 101, 260, 225));
     }
     set_visible(ui_objs.all_viewport, total > 0);
     set_visible(ui_objs.all_empty, total == 0);
     const std::string count_text =
         std::to_string(total) + (total == 1 ? " GAME" : " GAMES");
     lv_label_set_text(ui_objs.all_count, count_text.c_str());
-    lv_obj_align(ui_objs.all_count, LV_ALIGN_TOP_RIGHT, -sc(25), sc(79));
+    lv_obj_align(ui_objs.all_count, LV_ALIGN_TOP_RIGHT, -sc(25), sc(74));
 
     all_scroll_row = 0;
     last_all_focus = -1;
     last_info_game = -1;
-    last_bg_selected = -1;
-    last_bg_previous = -1;
     last_games_revision = a.games_revision;
-}
-
-void set_bg_image(lv_obj_t *img, std::shared_ptr<ImageBuffer> &ref, const State &a, int idx)
-{
-    if (idx >= 0 && idx < static_cast<int>(a.games.size()))
-        ref = get_cached_image(game_hero_art(a.games[idx]), sc(640), sc(440));
-    else
-        ref.reset();
-
-    if (ref && ref->valid()) {
-        lv_image_set_src(img, &ref->dsc);
-        set_visible(img, true);
-    } else {
-        set_visible(img, false);
-    }
-}
-
-void update_background(const State &a, Uint32 now)
-{
-    int curr_idx = -1;
-    if (!a.games.empty()) {
-        if (a.screen == Screen::GameInfo)
-            curr_idx = a.info_game;
-        else if (a.screen == Screen::AllGames)
-            curr_idx = a.all_focus;
-        else
-            curr_idx = a.selected;
-    }
-
-    if (last_bg_revision != a.games_revision || last_bg_selected == -1 ||
-        a.screen != Screen::Home || a.picker || a.recent_count() <= 1) {
-        if (last_bg_selected != curr_idx || last_bg_revision != a.games_revision ||
-            bg_fade_start != 0) {
-            set_bg_image(ui_objs.bg_prev, ui_objs.bg_prev_ref, a, curr_idx);
-            set_visible(ui_objs.bg_curr, false);
-            ui_objs.bg_curr_ref.reset();
-            last_bg_selected = curr_idx;
-            last_bg_previous = curr_idx;
-            bg_fade_start = 0;
-        }
-        last_bg_revision = a.games_revision;
-        return;
-    }
-
-    if (curr_idx != last_bg_selected) {
-        int from_idx = last_bg_selected;
-        if (bg_fade_start != 0) {
-            const float prev_t = ease_out(static_cast<float>(now - bg_fade_start) /
-                                          static_cast<float>(State::motion_duration));
-            if (prev_t < 0.5f)
-                from_idx = last_bg_previous;
-        }
-        last_bg_previous = from_idx;
-        last_bg_selected = curr_idx;
-        set_bg_image(ui_objs.bg_prev, ui_objs.bg_prev_ref, a, from_idx);
-        set_bg_image(ui_objs.bg_curr, ui_objs.bg_curr_ref, a, curr_idx);
-        bg_fade_start = a.moving ? a.motion_start : now;
-    }
-
-    if (bg_fade_start != 0) {
-        const float raw = static_cast<float>(now - bg_fade_start) /
-                          static_cast<float>(State::motion_duration);
-        if (raw >= 1.0f) {
-            set_bg_image(ui_objs.bg_prev, ui_objs.bg_prev_ref, a, last_bg_selected);
-            set_visible(ui_objs.bg_curr, false);
-            ui_objs.bg_curr_ref.reset();
-            last_bg_previous = last_bg_selected;
-            bg_fade_start = 0;
-        } else if (ui_objs.bg_curr_ref && ui_objs.bg_curr_ref->valid()) {
-            lv_obj_set_style_image_opa(ui_objs.bg_curr, opa_from_float(0.48f * ease_out(raw)), 0);
-        }
-    }
-    last_bg_revision = a.games_revision;
 }
 
 void update_header_and_footer(const State &a)
@@ -1232,15 +1137,15 @@ void update_header_and_footer(const State &a)
     const char *back = a.picker || a.screen != Screen::Home ? "BACK" : "EXIT";
     if (last_footer_back != back) {
         lv_point_t back_sz{}, select_sz{};
-        lv_text_get_size(&back_sz, back, fonts.bold_10, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-        lv_text_get_size(&select_sz, "SELECT", fonts.bold_10, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        lv_text_get_size(&back_sz, back, fonts.bold_14, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        lv_text_get_size(&select_sz, "SELECT", fonts.bold_14, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
         const int32_t back_cx = sc(615) - back_sz.x - sc(19);
         const int32_t select_cx = back_cx - sc(11) - sc(22) - select_sz.x - sc(19);
 
         lv_obj_set_pos(ui_objs.footer_select_icon, select_cx - sc(11), sc(10));
-        lv_obj_set_pos(ui_objs.footer_select_label, select_cx + sc(19), sc(17));
+        lv_obj_set_pos(ui_objs.footer_select_label, select_cx + sc(19), sc(13));
         lv_obj_set_pos(ui_objs.footer_back_icon, back_cx - sc(11), sc(10));
-        lv_obj_set_pos(ui_objs.footer_back_label, back_cx + sc(19), sc(17));
+        lv_obj_set_pos(ui_objs.footer_back_label, back_cx + sc(19), sc(13));
         lv_label_set_text(ui_objs.footer_back_label, back);
         last_footer_back = back;
     }
@@ -1250,12 +1155,12 @@ void sync_home(const State &a, Uint32 now)
 {
     const float heading = entrance(a, now);
     set_opa_if_changed(ui_objs.home_heading, opa_from_float(heading));
-    set_pos_if_changed(ui_objs.home_heading, sc(25), sc(72.0f + 8.0f * (1.0f - heading)));
+    set_pos_if_changed(ui_objs.home_heading, sc(25), sc(68.0f + 8.0f * (1.0f - heading)));
 
     const int rc = static_cast<int>(ui_objs.recent_cards.size());
     if (rc == 0) {
         const float entry = entrance(a, now, 65);
-        set_pos_if_changed(ui_objs.home_empty, sc(25), sc(107.0f + 12.0f * (1.0f - entry)));
+        set_pos_if_changed(ui_objs.home_empty, sc(25), sc(106.0f + 12.0f * (1.0f - entry)));
         set_opa_if_changed(ui_objs.home_empty, opa_from_float(entry));
     } else {
         const float current_offset = a.motion_offset(now);
@@ -1306,7 +1211,7 @@ void sync_home(const State &a, Uint32 now)
         const float focused =
             (a.home_focus == target ? fp : 0.0f) + (a.previous_home_focus == target ? 1.0f - fp : 0.0f);
         auto &card = ui_objs.action_cards[i];
-        set_pos_if_changed(card.root, sc(25 + i * 301), sc(321.0f + 12.0f * (1.0f - show)));
+        set_pos_if_changed(card.root, sc(25 + i * 301), sc(315.0f + 12.0f * (1.0f - show)));
         set_opa_if_changed(card.root, opa_from_float(show));
         const lv_color_t border_c = rgb(187 + static_cast<int>(52 * focused),
                                         211 + static_cast<int>(37 * focused),
@@ -1329,14 +1234,14 @@ void sync_all_games(const State &a, Uint32 now)
     const float heading = entrance(a, now);
     const float head_off = 8.0f * (1.0f - heading);
     set_opa_if_changed(ui_objs.all_heading, opa_from_float(heading));
-    set_pos_if_changed(ui_objs.all_heading, sc(25), sc(72.0f + head_off));
+    set_pos_if_changed(ui_objs.all_heading, sc(25), sc(68.0f + head_off));
     set_opa_if_changed(ui_objs.all_count, opa_from_float(heading));
-    lv_obj_align(ui_objs.all_count, LV_ALIGN_TOP_RIGHT, -sc(25), sc(79.0f + head_off));
+    lv_obj_align(ui_objs.all_count, LV_ALIGN_TOP_RIGHT, -sc(25), sc(74.0f + head_off));
 
     const int count = static_cast<int>(ui_objs.all_cards.size());
     if (count == 0) {
         const float show = entrance(a, now, 60);
-        set_pos_if_changed(ui_objs.all_empty, sc(25), sc(111.0f + 10.0f * (1.0f - show)));
+        set_pos_if_changed(ui_objs.all_empty, sc(25), sc(108.0f + 10.0f * (1.0f - show)));
         set_opa_if_changed(ui_objs.all_empty, opa_from_float(show));
         set_visible(ui_objs.all_scrollbar_track, false);
         set_visible(ui_objs.all_scrollbar_thumb, false);
@@ -1372,10 +1277,10 @@ void sync_all_games(const State &a, Uint32 now)
         set_visible(ui_objs.all_scrollbar_track, need_scroll);
         set_visible(ui_objs.all_scrollbar_thumb, need_scroll);
         if (need_scroll) {
-            constexpr float track_h = 286.0f;
+            constexpr float track_h = 288.0f;
             const float thumb_h = std::max(36.0f, track_h * 2.0f / total_rows);
             const float max_scroll = static_cast<float>(total_rows - 2);
-            const float thumb_y = 111.0f + (track_h - thumb_h) * (all_scroll_row / max_scroll);
+            const float thumb_y = 108.0f + (track_h - thumb_h) * (all_scroll_row / max_scroll);
             lv_obj_set_height(ui_objs.all_scrollbar_thumb, sc(thumb_h));
             set_pos_if_changed(ui_objs.all_scrollbar_thumb, sc(626), sc(thumb_y));
         }
@@ -1388,7 +1293,7 @@ void sync_import(const State &a, Uint32 now)
     const float heading = entrance(a, now);
     const float head_off = 10.0f * (1.0f - heading);
     set_opa_if_changed(ui_objs.import_heading, opa_from_float(heading));
-    set_pos_if_changed(ui_objs.import_heading, sc(25), sc(72.0f + head_off));
+    set_pos_if_changed(ui_objs.import_heading, sc(25), sc(68.0f + head_off));
     set_opa_if_changed(ui_objs.import_subtitle, opa_from_float(heading));
     set_pos_if_changed(ui_objs.import_subtitle, sc(25), sc(99.0f + head_off));
 
@@ -1398,7 +1303,7 @@ void sync_import(const State &a, Uint32 now)
 
     for (int i = 0; i < 2; ++i) {
         const float show = entrance(a, now, 80 + i * 90);
-        const float y = 135 + i * 76 + 12.0f * (1.0f - show);
+        const float y = 132 + i * 78 + 12.0f * (1.0f - show);
         auto &row = ui_objs.import_rows[i];
         set_pos_if_changed(row.root, sc(25), sc(y));
         set_opa_if_changed(row.root, opa_from_float(show));
@@ -1424,7 +1329,7 @@ void sync_import(const State &a, Uint32 now)
 
     const float details = entrance(a, now, 260);
     set_opa_if_changed(ui_objs.import_details, opa_from_float(details));
-    set_pos_if_changed(ui_objs.import_details, 0, sc(297.0f + 10.0f * (1.0f - details)));
+    set_pos_if_changed(ui_objs.import_details, 0, sc(294.0f + 10.0f * (1.0f - details)));
 
     if (last_import_focus != a.import_focus || last_import_running != running ||
         last_mode != ViewMode::Import) {
@@ -1451,9 +1356,9 @@ void sync_picker(const State &a, Uint32 now)
     const float heading = entrance(a, now);
     const float head_off = 8.0f * (1.0f - heading);
     set_opa_if_changed(ui_objs.picker_heading, opa_from_float(heading));
-    set_pos_if_changed(ui_objs.picker_heading, sc(25), sc(72.0f + head_off));
+    set_pos_if_changed(ui_objs.picker_heading, sc(25), sc(68.0f + head_off));
     set_opa_if_changed(ui_objs.picker_dir, opa_from_float(heading));
-    set_pos_if_changed(ui_objs.picker_dir, sc(25), sc(100.0f + head_off));
+    set_pos_if_changed(ui_objs.picker_dir, sc(25), sc(99.0f + head_off));
 
     const std::string dir_str = a.dir.string();
     if (last_pick_kind != a.pick_kind || last_mode != ViewMode::Picker) {
@@ -1480,7 +1385,7 @@ void sync_picker(const State &a, Uint32 now)
         }
         set_visible(r.root, true);
         const float show = entrance(a, now, 50 + row * 35);
-        set_pos_if_changed(r.root, sc(25), sc(127 + row * 37 + 8.0f * (1.0f - show)));
+        set_pos_if_changed(r.root, sc(25), sc(124 + row * 38 + 8.0f * (1.0f - show)));
         set_opa_if_changed(r.root, opa_from_float(show));
 
         if (list_changed) {
@@ -1587,7 +1492,7 @@ void sync_game_info(const State &a, Uint32 now)
 
         const float shot_ent = entrance(a, now, 120);
         set_opa_if_changed(ui_objs.info_shot_strip, opa_from_float(shot_ent));
-        set_pos_if_changed(ui_objs.info_shot_strip, sc(25), sc(266.0f + 8.0f * (1.0f - shot_ent)));
+        set_pos_if_changed(ui_objs.info_shot_strip, sc(25), sc(268.0f + 8.0f * (1.0f - shot_ent)));
 
         for (int i = 0; i < shot_count; ++i) {
             auto &scard = ui_objs.info_shots[i];
@@ -1606,7 +1511,7 @@ void sync_game_info(const State &a, Uint32 now)
             const std::string ratio =
                 std::to_string(a.screenshot_index + 1) + " / " + std::to_string(shot_count);
             lv_label_set_text(ui_objs.info_shot_count, ratio.c_str());
-            lv_obj_align(ui_objs.info_shot_count, LV_ALIGN_TOP_RIGHT, -sc(25), sc(243));
+            lv_obj_align(ui_objs.info_shot_count, LV_ALIGN_TOP_RIGHT, -sc(25), sc(242));
         }
     }
 
@@ -1629,20 +1534,18 @@ void destroy_fonts()
             f = nullptr;
         }
     };
-    drop(fonts.reg_10);
-    drop(fonts.reg_11);
-    drop(fonts.reg_12);
     drop(fonts.reg_14);
-    drop(fonts.bold_10);
-    drop(fonts.bold_11);
-    drop(fonts.bold_13);
-    drop(fonts.bold_15);
+    drop(fonts.reg_16);
+    drop(fonts.reg_18);
+    drop(fonts.bold_14);
     drop(fonts.bold_16);
-    drop(fonts.bold_19);
+    drop(fonts.bold_18);
     drop(fonts.bold_20);
     drop(fonts.bold_22);
     drop(fonts.bold_24);
-    drop(fonts.icon_15);
+    drop(fonts.bold_26);
+    drop(fonts.bold_28);
+    drop(fonts.icon_18);
 }
 
 bool init_fonts()
@@ -1650,23 +1553,21 @@ bool init_fonts()
     auto mk = [](const unsigned char *data, size_t size, int32_t px) {
         return lv_tiny_ttf_create_data(data, size, sc(static_cast<float>(px)));
     };
-    fonts.reg_10 = mk(inter_font, sizeof(inter_font), 10);
-    fonts.reg_11 = mk(inter_font, sizeof(inter_font), 11);
-    fonts.reg_12 = mk(inter_font, sizeof(inter_font), 12);
     fonts.reg_14 = mk(inter_font, sizeof(inter_font), 14);
-    fonts.bold_10 = mk(inter_bold, sizeof(inter_bold), 10);
-    fonts.bold_11 = mk(inter_bold, sizeof(inter_bold), 11);
-    fonts.bold_13 = mk(inter_bold, sizeof(inter_bold), 13);
-    fonts.bold_15 = mk(inter_bold, sizeof(inter_bold), 15);
+    fonts.reg_16 = mk(inter_font, sizeof(inter_font), 16);
+    fonts.reg_18 = mk(inter_font, sizeof(inter_font), 18);
+    fonts.bold_14 = mk(inter_bold, sizeof(inter_bold), 14);
     fonts.bold_16 = mk(inter_bold, sizeof(inter_bold), 16);
-    fonts.bold_19 = mk(inter_bold, sizeof(inter_bold), 19);
+    fonts.bold_18 = mk(inter_bold, sizeof(inter_bold), 18);
     fonts.bold_20 = mk(inter_bold, sizeof(inter_bold), 20);
     fonts.bold_22 = mk(inter_bold, sizeof(inter_bold), 22);
     fonts.bold_24 = mk(inter_bold, sizeof(inter_bold), 24);
-    fonts.icon_15 = mk(lucide_font, sizeof(lucide_font), 15);
-    return fonts.reg_10 && fonts.reg_11 && fonts.reg_12 && fonts.reg_14 && fonts.bold_10 &&
-           fonts.bold_11 && fonts.bold_13 && fonts.bold_15 && fonts.bold_16 && fonts.bold_19 &&
-           fonts.bold_20 && fonts.bold_22 && fonts.bold_24 && fonts.icon_15;
+    fonts.bold_26 = mk(inter_bold, sizeof(inter_bold), 26);
+    fonts.bold_28 = mk(inter_bold, sizeof(inter_bold), 28);
+    fonts.icon_18 = mk(lucide_font, sizeof(lucide_font), 18);
+    return fonts.reg_14 && fonts.reg_16 && fonts.reg_18 && fonts.bold_14 && fonts.bold_16 &&
+           fonts.bold_18 && fonts.bold_20 && fonts.bold_22 && fonts.bold_24 && fonts.bold_26 &&
+           fonts.bold_28 && fonts.icon_18;
 }
 } // namespace
 
@@ -1736,8 +1637,6 @@ void shutdown()
     ui_objs.recent_cards.clear();
     ui_objs.all_cards.clear();
     ui_objs.info_shots.clear();
-    ui_objs.bg_prev_ref.reset();
-    ui_objs.bg_curr_ref.reset();
     ui_objs.info_boxart_ref.reset();
     image_cache.clear();
     image_lru.clear();
@@ -1806,7 +1705,6 @@ void sync(const State &a)
     if (last_games_revision != a.games_revision)
         rebuild_game_lists(a);
 
-    update_background(a, now);
     update_header_and_footer(a);
 
     if (mode == ViewMode::Home)
@@ -1841,12 +1739,12 @@ void sync(const State &a)
             lv_label_set_text(ui_objs.toast.icon, style.glyph);
 
             lv_point_t sz{};
-            lv_text_get_size(&sz, a.toast.c_str(), fonts.reg_11, 0, 0, LV_COORD_MAX,
+            lv_text_get_size(&sz, a.toast.c_str(), fonts.reg_16, 0, 0, LV_COORD_MAX,
                              LV_TEXT_FLAG_NONE);
-            const int32_t pill_w = std::clamp(sc(51) + sz.x, sc(120), sc(540));
+            const int32_t pill_w = std::clamp(sc(58) + sz.x, sc(140), sc(580));
             ui_objs.toast.width = pill_w;
             lv_obj_set_width(ui_objs.toast.root, pill_w);
-            lv_obj_set_width(ui_objs.toast.label, pill_w - sc(51));
+            lv_obj_set_width(ui_objs.toast.label, pill_w - sc(58));
             lv_label_set_text(ui_objs.toast.label, a.toast.c_str());
             last_toast_text = a.toast;
             last_toast_kind = a.toast_kind;
@@ -1856,7 +1754,7 @@ void sync(const State &a)
         const float y_off = (a.toast_hide_start != 0) ? 8.0f * (1.0f - toast_p)
                                                       : 12.0f * (1.0f - toast_p);
         set_pos_if_changed(ui_objs.toast.root, (sc(screen_width) - ui_objs.toast.width) / 2,
-                           sc(388.0f + y_off));
+                           sc(384.0f + y_off));
     }
 
     float confirm_p = 0.0f;
@@ -1890,8 +1788,8 @@ void sync(const State &a)
         if (lv_obj_get_style_bg_opa(ui_objs.confirm_modal.backdrop, LV_PART_MAIN) != back_opa)
             lv_obj_set_style_bg_opa(ui_objs.confirm_modal.backdrop, back_opa, 0);
         set_opa_if_changed(ui_objs.confirm_modal.card, opa_from_float(confirm_p));
-        set_pos_if_changed(ui_objs.confirm_modal.card, sc(130),
-                           sc(163.0f + 12.0f * (1.0f - confirm_p)));
+        set_pos_if_changed(ui_objs.confirm_modal.card, sc(110),
+                           sc(152.0f + 12.0f * (1.0f - confirm_p)));
     }
 
     last_mode = mode;
