@@ -33,6 +33,10 @@ enum class ImportFocus {
     License,
     Start
 };
+enum class ConfirmKind {
+    None,
+    Quit
+};
 enum class Action {
     Up,
     Down,
@@ -65,6 +69,8 @@ struct State {
     std::string config_error;
     bool running = true;
     bool picker = false;
+    ConfirmKind confirm = ConfirmKind::None;
+    ConfirmKind previous_confirm = ConfirmKind::None;
     Screen screen = Screen::Home;
     HomeFocus home_focus = HomeFocus::RecentGames;
     HomeFocus previous_home_focus = HomeFocus::RecentGames;
@@ -79,8 +85,10 @@ struct State {
     int queued = 0;
     Uint32 motion_start = 0;
     Uint32 focus_start = 0;
+    Uint32 confirm_start = 0;
     Uint32 screen_start = SDL_GetTicks() + splash_duration;
     static constexpr Uint32 motion_duration = 300;
+    static constexpr Uint32 confirm_duration = 200;
     static constexpr Uint32 entrance_duration = 600;
     bool moving = false;
     fs::path pkg;
@@ -94,6 +102,7 @@ struct State {
 
     void change_screen(Screen next);
     void set_home_focus(HomeFocus next);
+    void set_confirm(ConfirmKind next);
     void move_game(int step);
     void update_motion();
     bool animating() const;
@@ -109,7 +118,8 @@ struct State {
     auto visible_state() const
     {
         return std::make_tuple(screen, home_focus, all_focus, import_focus, selected, picker,
-                               pick_index, scroll, dir, pkg, license, message, import_running());
+                               confirm, pick_index, scroll, dir, pkg, license, message,
+                               import_running());
     }
 
   private:

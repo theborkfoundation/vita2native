@@ -38,6 +38,10 @@ void configure_snapshot(State &state)
         state.move_game(-1);
         state.motion_start = SDL_GetTicks() - 100;
     }
+    if (screen && strcmp(screen, "confirm-quit") == 0) {
+        state.set_confirm(ConfirmKind::Quit);
+        state.confirm_start = SDL_GetTicks() - 1000;
+    }
 }
 
 void save_snapshot(const char *path, const uint8_t *xrgb_pixels, int width, int height)

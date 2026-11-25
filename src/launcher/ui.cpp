@@ -127,6 +127,19 @@ struct PickerRow {
     lv_obj_t *border = nullptr;
 };
 
+struct ConfirmModal {
+    lv_obj_t *backdrop = nullptr;
+    lv_obj_t *card = nullptr;
+    lv_obj_t *title = nullptr;
+    lv_obj_t *message = nullptr;
+    lv_obj_t *confirm_pill = nullptr;
+    lv_obj_t *confirm_icon = nullptr;
+    lv_obj_t *confirm_label = nullptr;
+    lv_obj_t *cancel_pill = nullptr;
+    lv_obj_t *cancel_icon = nullptr;
+    lv_obj_t *cancel_label = nullptr;
+};
+
 struct Widgets {
     lv_obj_t *root = nullptr;
 
@@ -146,7 +159,6 @@ struct Widgets {
 
     lv_obj_t *header_layer = nullptr;
     BrandWidgets header_brand;
-    lv_obj_t *header_divider = nullptr;
     lv_obj_t *header_screen = nullptr;
 
     lv_obj_t *home_layer = nullptr;
@@ -186,12 +198,15 @@ struct Widgets {
     lv_obj_t *footer_back_icon = nullptr;
     lv_obj_t *footer_back_label = nullptr;
 
+    ConfirmModal confirm_modal;
+
     std::deque<lv_grad_dsc_t> gradients;
 };
 Widgets ui_objs;
 
 enum class ViewMode { None, Error, Splash, Home, AllGames, Import, Picker };
 ViewMode last_mode = ViewMode::None;
+ConfirmKind last_confirm = ConfirmKind::None;
 std::string last_config_error;
 int last_bg_selected = -1;
 int last_bg_previous = -1;
@@ -546,6 +561,8 @@ void build_cover_card_common(lv_obj_t *parent, lv_obj_t *&root, lv_obj_t *&img, 
     lv_obj_set_style_border_width(border, sc_border(1), 0);
 }
 
+void create_confirm_modal(ConfirmModal &m, lv_obj_t *parent);
+
 void create_ui_tree()
 {
     ui_objs.root = lv_screen_active();
@@ -601,14 +618,8 @@ void create_ui_tree()
     ui_objs.header_layer = lv_obj_create(ui_objs.main_layer);
     init_clean_obj(ui_objs.header_layer, 0, 0, 640, 64);
     build_brand(ui_objs.header_brand, ui_objs.header_layer, 25, 17, 26, custom_logo_header);
-    make_label(ui_objs.header_layer, 60, 19, "V2N", fonts.bold_16, rgb(244, 248, 250));
-    make_label(ui_objs.header_layer, 60, 37, "LAUNCHER", fonts.bold_8, rgb(157, 177, 188));
-
-    ui_objs.header_divider =
-        make_box(ui_objs.header_layer, 120, 18, 1, 24, rgb(159, 190, 201), 70);
     ui_objs.header_screen =
-        make_label(ui_objs.header_layer, 134, 15, "", fonts.bold_24, rgb(248, 251, 253));
-    lv_obj_add_flag(ui_objs.header_divider, LV_OBJ_FLAG_HIDDEN);
+        make_label(ui_objs.header_layer, 63, 16, "", fonts.bold_24, rgb(248, 251, 253));
     lv_obj_add_flag(ui_objs.header_screen, LV_OBJ_FLAG_HIDDEN);
 
     // Home screen
@@ -764,6 +775,71 @@ void create_ui_tree()
     lv_image_set_src(ui_objs.footer_back_icon, &icon_key_b.dsc);
     ui_objs.footer_back_label =
         make_label(ui_objs.footer_layer, 0, 17, "EXIT", fonts.bold_10, rgb(191, 210, 217));
+
+    create_confirm_modal(ui_objs.confirm_modal, ui_objs.main_layer);
+}
+
+void create_confirm_modal(ConfirmModal &m, lv_obj_t *parent)
+{
+    m.backdrop = make_box(parent, 0, 0, screen_width, screen_height, rgb(6, 13, 19), 185);
+    m.card = make_box(m.backdrop, 130, 152, 380, 176, rgb(20, 35, 45), 250, 8);
+    lv_obj_set_style_border_color(m.card, rgb(195, 222, 230), 0);
+    lv_obj_set_style_border_opa(m.card, 110, 0);
+    lv_obj_set_style_border_width(m.card, sc_border(1), 0);
+
+    m.title = make_label(m.card, 24, 22, "", fonts.bold_19, rgb(248, 251, 253), 332);
+    m.message = make_label(m.card, 24, 54, "", fonts.reg_12, rgb(174, 193, 201), 332);
+    lv_label_set_long_mode(m.message, LV_LABEL_LONG_MODE_WRAP);
+    make_box(m.card, 24, 108, 332, 1, rgb(159, 190, 201), 35);
+
+    m.confirm_pill = make_box(m.card, 24, 122, 158, 34, rgb(32, 52, 64), 255, 5);
+    lv_obj_set_style_border_color(m.confirm_pill, rgb(140, 173, 184), 0);
+    lv_obj_set_style_border_opa(m.confirm_pill, 90, 0);
+    lv_obj_set_style_border_width(m.confirm_pill, sc_border(1), 0);
+    m.confirm_icon = lv_image_create(m.confirm_pill);
+    init_clean_obj(m.confirm_icon, 0, 6, 22, 22);
+    lv_image_set_src(m.confirm_icon, &icon_key_a.dsc);
+    m.confirm_label =
+        make_label(m.confirm_pill, 0, 10, "", fonts.bold_11, rgb(225, 237, 240));
+
+    m.cancel_pill = make_box(m.card, 198, 122, 158, 34, rgb(32, 52, 64), 255, 5);
+    lv_obj_set_style_border_color(m.cancel_pill, rgb(140, 173, 184), 0);
+    lv_obj_set_style_border_opa(m.cancel_pill, 90, 0);
+    lv_obj_set_style_border_width(m.cancel_pill, sc_border(1), 0);
+    m.cancel_icon = lv_image_create(m.cancel_pill);
+    init_clean_obj(m.cancel_icon, 0, 6, 22, 22);
+    lv_image_set_src(m.cancel_icon, &icon_key_b.dsc);
+    m.cancel_label =
+        make_label(m.cancel_pill, 0, 10, "", fonts.bold_11, rgb(225, 237, 240));
+
+    lv_obj_add_flag(m.backdrop, LV_OBJ_FLAG_HIDDEN);
+}
+
+void layout_modal_pill(lv_obj_t *icon, lv_obj_t *label, const char *text)
+{
+    lv_label_set_text(label, text);
+    lv_point_t sz{};
+    lv_text_get_size(&sz, text, fonts.bold_11, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    const int32_t pill_w = sc(158);
+    const int32_t icon_w = sc(22);
+    const int32_t gap = sc(8);
+    const int32_t start_x = std::max<int32_t>(sc(12), (pill_w - (icon_w + gap + sz.x)) / 2);
+    lv_obj_set_pos(icon, start_x, sc(6));
+    lv_obj_set_pos(label, start_x + icon_w + gap, sc(11));
+}
+
+void set_confirm_modal(ConfirmModal &m, bool visible, const char *title, const char *message,
+                       const char *confirm_text, const char *cancel_text)
+{
+    if (!visible) {
+        lv_obj_add_flag(m.backdrop, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_label_set_text(m.title, title);
+    lv_label_set_text(m.message, message);
+    layout_modal_pill(m.confirm_icon, m.confirm_label, confirm_text);
+    layout_modal_pill(m.cancel_icon, m.cancel_label, cancel_text);
+    lv_obj_clear_flag(m.backdrop, LV_OBJ_FLAG_HIDDEN);
 }
 
 void set_visible(lv_obj_t *obj, bool show)
@@ -818,7 +894,6 @@ void update_header_and_footer(const State &a)
     if (last_header_screen != a.screen || last_header_picker != a.picker ||
         last_mode == ViewMode::None) {
         const bool show_screen = (a.screen != Screen::Home || a.picker);
-        set_visible(ui_objs.header_divider, show_screen);
         set_visible(ui_objs.header_screen, show_screen);
         if (show_screen) {
             const char *name = a.picker                       ? "Choose File"
@@ -1231,6 +1306,7 @@ void shutdown()
     icon_key_b.reset();
     ui_objs = {};
     last_mode = ViewMode::None;
+    last_confirm = ConfirmKind::None;
 }
 
 void sync(const State &a)
@@ -1292,6 +1368,40 @@ void sync(const State &a)
         sync_import(a, now);
     else if (mode == ViewMode::Picker)
         sync_picker(a, now);
+
+    float confirm_p = 0.0f;
+    if (a.confirm != ConfirmKind::None) {
+        confirm_p = a.confirm_start
+                        ? ease_out(static_cast<float>(now - a.confirm_start) /
+                                   static_cast<float>(State::confirm_duration))
+                        : 1.0f;
+    } else if (a.confirm_start && now - a.confirm_start < State::confirm_duration) {
+        confirm_p = 1.0f - ease_out(static_cast<float>(now - a.confirm_start) /
+                                    static_cast<float>(State::confirm_duration));
+    }
+
+    if (confirm_p <= 0.0f) {
+        if (last_confirm != ConfirmKind::None || last_mode == ViewMode::None) {
+            set_confirm_modal(ui_objs.confirm_modal, false, "", "", "", "");
+            last_confirm = ConfirmKind::None;
+        }
+    } else {
+        const ConfirmKind kind =
+            a.confirm != ConfirmKind::None ? a.confirm : a.previous_confirm;
+        if (kind != last_confirm || lv_obj_has_flag(ui_objs.confirm_modal.backdrop, LV_OBJ_FLAG_HIDDEN)) {
+            if (kind == ConfirmKind::Quit) {
+                set_confirm_modal(ui_objs.confirm_modal, true, "Quit V2N Launcher?",
+                                  "Are you sure you want to exit the launcher?", "QUIT", "CANCEL");
+            }
+            last_confirm = kind;
+        }
+        const lv_opa_t back_opa = static_cast<lv_opa_t>(std::lround(185.0f * confirm_p));
+        if (lv_obj_get_style_bg_opa(ui_objs.confirm_modal.backdrop, LV_PART_MAIN) != back_opa)
+            lv_obj_set_style_bg_opa(ui_objs.confirm_modal.backdrop, back_opa, 0);
+        set_opa_if_changed(ui_objs.confirm_modal.card, opa_from_float(confirm_p));
+        set_pos_if_changed(ui_objs.confirm_modal.card, sc(130),
+                           sc(152.0f + 12.0f * (1.0f - confirm_p)));
+    }
 
     last_mode = mode;
 }

@@ -22,6 +22,15 @@ void State::set_home_focus(HomeFocus next)
     }
 }
 
+void State::set_confirm(ConfirmKind next)
+{
+    if (confirm != next) {
+        previous_confirm = confirm;
+        confirm = next;
+        confirm_start = SDL_GetTicks();
+    }
+}
+
 void State::move_game(int step)
 {
     if (moving) {
@@ -52,7 +61,8 @@ bool State::animating() const
 {
     Uint32 now = SDL_GetTicks();
     return moving || (now - start >= splash_duration && now - screen_start < entrance_duration) ||
-           (focus_start && now - focus_start < focus_duration);
+           (focus_start && now - focus_start < focus_duration) ||
+           (confirm_start && now - confirm_start < confirm_duration);
 }
 
 void State::scan()
@@ -204,13 +214,23 @@ void State::action(Action action)
             message = "Import is running; please wait.";
         return;
     }
+    if (confirm != ConfirmKind::None) {
+        if (action == Action::Select) {
+            if (confirm == ConfirmKind::Quit)
+                running = false;
+            set_confirm(ConfirmKind::None);
+        } else if (action == Action::Back) {
+            set_confirm(ConfirmKind::None);
+        }
+        return;
+    }
     if (picker) {
         handle_picker(action);
         return;
     }
     if (action == Action::Back) {
         if (screen == Screen::Home) {
-            running = false;
+            set_confirm(ConfirmKind::Quit);
         } else {
             Screen from = screen;
             change_screen(Screen::Home);
