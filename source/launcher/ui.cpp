@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "icons.h"
 #include "logo.h"
 #include "state.h"
 
@@ -209,7 +210,6 @@ struct Widgets {
     std::vector<GameCardWidgets> all_cards;
 
     lv_obj_t *import_layer = nullptr;
-    lv_obj_t *import_heading = nullptr;
     lv_obj_t *import_subtitle = nullptr;
     std::array<ImportCard, 2> import_cards;
     lv_obj_t *import_details = nullptr;
@@ -269,7 +269,6 @@ int all_scroll_row = 0;
 ImportFocus last_import_focus = ImportFocus::Local;
 bool last_web_running = false;
 std::string last_web_url;
-bool last_import_running = false;
 int last_import_history_rev = -1;
 PickerKind last_pick_kind = PickerKind::Package;
 std::string last_picker_dir;
@@ -743,14 +742,14 @@ ToastAppearance toast_appearance(ToastKind kind)
 {
     switch (kind) {
     case ToastKind::Success:
-        return { "\xee\x88\xa6", rgb(98, 212, 148) }; // Lucide circle-check (U+E226)
+        return { icons::circle_check, rgb(98, 212, 148) };
     case ToastKind::Warning:
-        return { "\xee\x86\x93", rgb(240, 194, 92) }; // Lucide triangle-alert (U+E193)
+        return { icons::triangle_alert, rgb(240, 194, 92) };
     case ToastKind::Error:
-        return { "\xee\x82\x84", rgb(236, 114, 114) }; // Lucide circle-x (U+E084)
+        return { icons::circle_x, rgb(236, 114, 114) };
     case ToastKind::Info:
     default:
-        return { "\xee\x83\xb9", rgb(106, 198, 222) }; // Lucide info (U+E0F9)
+        return { icons::info, rgb(106, 198, 222) };
     }
 }
 
@@ -845,15 +844,8 @@ void create_ui_tree()
         const float x = 25 + i * 301;
         card.root = make_box(ui_objs.home_layer, x, 315, 289, 98, rgb(32, 52, 64), 225, 7);
         card.icon_box = make_box(card.root, 15, 29, 40, 40, rgb(204, 230, 234), 24, 7);
-        if (i == 0) {
-            for (int row = 0; row < 2; ++row)
-                for (int col = 0; col < 2; ++col)
-                    make_box(card.icon_box, 10 + col * 11, 10 + row * 11, 7, 7,
-                             rgb(213, 232, 235), 255, 1);
-        } else {
-            make_box(card.icon_box, 19, 10, 2, 20, rgb(213, 232, 235), 255);
-            make_box(card.icon_box, 10, 19, 20, 2, rgb(213, 232, 235), 255);
-        }
+        make_centered_label(card.icon_box, i == 0 ? icons::layout_grid : icons::plus,
+                            fonts.icon_18, rgb(213, 232, 235));
         card.title = make_label(card.root, 68, 21, i == 0 ? "View all games" : "Import game",
                                 fonts.bold_20, rgb(245, 250, 251), 184);
         card.subtitle = make_label(card.root, 68, 52,
@@ -902,40 +894,37 @@ void create_ui_tree()
     // Import screen
     ui_objs.import_layer = lv_obj_create(ui_objs.main_layer);
     init_clean_obj(ui_objs.import_layer, 0, 0, 640, 438);
-    ui_objs.import_heading =
-        make_label(ui_objs.import_layer, 25, 68, "Import a game", fonts.bold_24, rgb(248, 251, 253));
     ui_objs.import_subtitle =
-        make_label(ui_objs.import_layer, 25, 99,
+        make_label(ui_objs.import_layer, 25, 68,
                    "Choose local files or start the web upload server.", fonts.reg_16,
                    rgb(174, 193, 201));
     for (int i = 0; i < 2; ++i) {
         auto &card = ui_objs.import_cards[i];
         const float x = 25 + i * 301;
-        card.root = make_box(ui_objs.import_layer, x, 132, 289, 112, rgb(24, 40, 51), 225, 7);
-        card.icon_box = make_box(card.root, 16, 18, 36, 36, rgb(255, 255, 255), 22, 6);
-        card.icon_label =
-            make_centered_label(card.icon_box, i == 0 ? "L" : "W", fonts.bold_18, rgb(226, 238, 240));
-        card.title = make_label(card.root, 64, 16, i == 0 ? "Local import" : "Web import",
+        card.root = make_box(ui_objs.import_layer, x, 104, 289, 96, rgb(24, 40, 51), 225, 7);
+        card.icon_box = make_box(card.root, 16, 16, 36, 36, rgb(255, 255, 255), 22, 6);
+        card.icon_label = make_centered_label(card.icon_box, i == 0 ? icons::folder : icons::globe,
+                                              fonts.icon_18, rgb(226, 238, 240));
+        card.title = make_label(card.root, 64, 15, i == 0 ? "Local import" : "Web import",
                                 fonts.bold_18, rgb(244, 249, 251), 160);
-        card.subtitle = make_label(card.root, 64, 40,
+        card.subtitle = make_label(card.root, 64, 39,
                                    i == 0 ? "Select .pkg and work.bin" : "Browser upload server",
                                    fonts.reg_14, rgb(164, 188, 196), 210);
-        card.detail = make_label(card.root, 16, 76,
-                                 i == 0 ? "Browse local storage" : "Press Select to start",
-                                 fonts.reg_14, rgb(173, 194, 202), 257);
-        lv_obj_set_height(card.detail, lv_font_get_line_height(fonts.reg_14));
-        lv_label_set_long_mode(card.detail, LV_LABEL_LONG_MODE_DOTS);
         if (i == 1) {
-            card.badge = make_box(card.root, 227, 18, 46, 22, rgb(255, 255, 255), 24, 11);
+            card.detail = make_label(card.root, 16, 66, "", fonts.reg_14, rgb(94, 234, 212), 257);
+            lv_obj_set_height(card.detail, lv_font_get_line_height(fonts.reg_14));
+            lv_label_set_long_mode(card.detail, LV_LABEL_LONG_MODE_DOTS);
+            lv_obj_add_flag(card.detail, LV_OBJ_FLAG_HIDDEN);
+            card.badge = make_box(card.root, 227, 16, 46, 22, rgb(255, 255, 255), 24, 11);
             card.badge_label =
                 make_centered_label(card.badge, "OFF", fonts.bold_14, rgb(199, 218, 224));
         }
-        card.border = make_box(card.root, 0, 0, 289, 112, rgb(0, 0, 0), LV_OPA_TRANSP, 7);
+        card.border = make_box(card.root, 0, 0, 289, 96, rgb(0, 0, 0), LV_OPA_TRANSP, 7);
         lv_obj_set_style_border_width(card.border, sc_border(1), 0);
     }
 
     ui_objs.import_details = lv_obj_create(ui_objs.import_layer);
-    init_clean_obj(ui_objs.import_details, 0, 262, 640, 170);
+    init_clean_obj(ui_objs.import_details, 0, 222, 640, 210);
     ui_objs.import_history_heading = make_label(ui_objs.import_details, 25, 0, "IMPORT HISTORY",
                                                 fonts.bold_14, rgb(174, 192, 200));
     ui_objs.import_history_count =
@@ -943,11 +932,8 @@ void create_ui_tree()
     lv_obj_align(ui_objs.import_history_count, LV_ALIGN_TOP_RIGHT, -sc(25), 0);
 
     ui_objs.import_history_empty =
-        make_box(ui_objs.import_details, 25, 24, 590, 132, rgb(255, 255, 255), 12, 6);
-    make_label(ui_objs.import_history_empty, 16, 40, "No imports in this session yet.",
-               fonts.reg_16, rgb(199, 218, 224), 558);
-    make_label(ui_objs.import_history_empty, 16, 68,
-               "Use Local import or Web import above to add a game.", fonts.reg_14,
+        make_box(ui_objs.import_details, 25, 24, 590, 44, rgb(255, 255, 255), 10, 6);
+    make_label(ui_objs.import_history_empty, 16, 12, "No imports yet.", fonts.reg_14,
                rgb(143, 168, 178), 558);
 
     for (int i = 0; i < import_history_visible; ++i) {
@@ -1327,12 +1313,9 @@ void sync_import(const State &a, Uint32 now)
 {
     const float heading = entrance(a, now);
     const float head_off = 10.0f * (1.0f - heading);
-    set_opa_if_changed(ui_objs.import_heading, opa_from_float(heading));
-    set_pos_if_changed(ui_objs.import_heading, sc(25), sc(68.0f + head_off));
     set_opa_if_changed(ui_objs.import_subtitle, opa_from_float(heading));
-    set_pos_if_changed(ui_objs.import_subtitle, sc(25), sc(99.0f + head_off));
+    set_pos_if_changed(ui_objs.import_subtitle, sc(25), sc(68.0f + head_off));
 
-    const bool running = a.import_running();
     const bool web_on = a.web_server_running();
     const std::string web_url = a.web_server_url();
     const bool mode_entered = (last_mode != ViewMode::Import);
@@ -1340,7 +1323,7 @@ void sync_import(const State &a, Uint32 now)
     for (int i = 0; i < 2; ++i) {
         const float show = entrance(a, now, 80 + i * 90);
         const float x = 25 + i * 301;
-        const float y = 132 + 12.0f * (1.0f - show);
+        const float y = 104 + 12.0f * (1.0f - show);
         auto &card = ui_objs.import_cards[i];
         set_pos_if_changed(card.root, sc(x), sc(y));
         set_opa_if_changed(card.root, opa_from_float(show));
@@ -1361,20 +1344,11 @@ void sync_import(const State &a, Uint32 now)
         }
     }
 
-    if (last_import_running != running || mode_entered) {
-        lv_label_set_text(ui_objs.import_cards[0].detail,
-                          running ? "Import in progress..." : "Browse local storage");
-        last_import_running = running;
-    }
-
     if (last_web_running != web_on || last_web_url != web_url || mode_entered) {
         auto &web_card = ui_objs.import_cards[1];
-        lv_label_set_text(web_card.subtitle,
-                          web_on ? "Server listening" : "Browser upload server");
-        lv_label_set_text(web_card.detail,
-                          web_on && !web_url.empty() ? web_url.c_str() : "Press Select to start");
-        lv_obj_set_style_text_color(web_card.detail,
-                                    web_on ? rgb(94, 234, 212) : rgb(173, 194, 202), 0);
+        set_visible(web_card.detail, web_on && !web_url.empty());
+        if (web_on && !web_url.empty())
+            lv_label_set_text(web_card.detail, web_url.c_str());
         lv_obj_set_style_bg_color(web_card.badge,
                                   web_on ? rgb(45, 212, 191) : rgb(255, 255, 255), 0);
         lv_obj_set_style_bg_opa(web_card.badge, web_on ? 255 : 24, 0);
@@ -1387,7 +1361,7 @@ void sync_import(const State &a, Uint32 now)
 
     const float details = entrance(a, now, 260);
     set_opa_if_changed(ui_objs.import_details, opa_from_float(details));
-    set_pos_if_changed(ui_objs.import_details, 0, sc(262.0f + 10.0f * (1.0f - details)));
+    set_pos_if_changed(ui_objs.import_details, 0, sc(222.0f + 10.0f * (1.0f - details)));
 
     if (last_import_history_rev != a.import_history_revision || mode_entered) {
         const size_t total = a.import_history.size();
