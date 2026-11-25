@@ -59,7 +59,7 @@ the binary (or to the device running it) and pass its `eboot.bin`.
 ## Build
 
 The standalone command is a host build. It shares the extraction pipeline in
-`src/package/` with the launcher; the launcher links that pipeline into its own
+`source/package/` with the launcher; the launcher links that pipeline into its own
 ARM or native binary and does not require the command.
 
 - CMake 3.18+, a C and C++17 compiler
@@ -71,14 +71,14 @@ Homebrew OpenSSL keg when it finds one.
 
 ## Where the code comes from
 
-- **pkg reader** (`src/package/pkg_reader.c`) — C, written here; the container layout
+- **pkg reader** (`source/package/pkg_reader.c`) — C, written here; the container layout
   and the three public keys follow [pkg2zip](https://github.com/mmozeiko/pkg2zip)
   (public domain) and Vita3K's `packages/pkg.cpp`.
 - **PFS layer** — the vendored `external/Vita3K/external/psvpfstools`
   (TeamMolecule's psvpfstools, GPLv2), called through its `execute()` entry
   point exactly as Vita3K does.
 - **SELF layer** — Vita3K's `vita3k/packages/src/sce_utils.cpp` (GPLv2), which
-  carries the key store and `decrypt_fself()`. `src/package/compat/util/log.h` replaces its
+  carries the key store and `decrypt_fself()`. `source/package/compat/util/log.h` replaces its
   spdlog logging so only that translation unit is needed.
 
 The launcher and standalone command link GPLv2 Vita3K and psvpfstools code.

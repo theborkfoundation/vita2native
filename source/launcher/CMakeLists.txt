@@ -28,7 +28,7 @@ if(NOT CMAKE_C_COMPILER_ID STREQUAL "MSVC")
 endif()
 
 # Link the shared package extraction pipeline into the launcher.
-add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../src/package"
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../package"
                  "${CMAKE_CURRENT_BINARY_DIR}/package")
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 find_package(Threads REQUIRED)
