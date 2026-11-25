@@ -2,6 +2,7 @@
 #include "extract.h"
 #include "web_server.h"
 
+#include <toml++/toml.hpp>
 #include <cerrno>
 #include <condition_variable>
 #include <fcntl.h>
@@ -10,7 +11,9 @@
 #include <cstring>
 #include <deque>
 #include <exception>
+#include <fstream>
 #include <mutex>
+#include <sstream>
 #include <thread>
 #include <utility>
 #include <unistd.h>
@@ -27,6 +30,52 @@ namespace launcher
 {
 namespace
 {
+bool is_valid_title_id(const std::string &id)
+{
+    if (id.empty() || id.size() > 64 || id == "." || id == "..")
+        return false;
+    for (unsigned char c : id) {
+        if (c == '/' || c == '\\' || c < 0x20)
+            return false;
+    }
+    return true;
+}
+
+std::string url_encode_component(const std::string &s)
+{
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char c : s) {
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~') {
+            out.push_back(static_cast<char>(c));
+        } else {
+            char buf[4];
+            std::snprintf(buf, sizeof(buf), "%%%02X", c);
+            out += buf;
+        }
+    }
+    return out;
+}
+
+std::vector<std::string> split_lines(const std::string &s)
+{
+    std::vector<std::string> out;
+    size_t pos = 0;
+    while (pos < s.size()) {
+        size_t nl = s.find('\n', pos);
+        std::string line = s.substr(pos, nl == std::string::npos ? s.size() - pos : nl - pos);
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (!line.empty())
+            out.push_back(std::move(line));
+        if (nl == std::string::npos)
+            break;
+        pos = nl + 1;
+    }
+    return out;
+}
+
 // Staging and the destination share a directory/filesystem. Never replace an
 // existing title, even if it appears after the import begins.
 int move_title_no_replace(const fs::path &from, const fs::path &to)
@@ -145,8 +194,8 @@ State::State(Config settings, std::string error)
     if (config_error.empty())
         refresh_games();
     if (games.empty()) {
-        home_focus = HomeFocus::Import;
-        previous_home_focus = HomeFocus::Import;
+        home_focus = HomeFocus::WebUI;
+        previous_home_focus = HomeFocus::WebUI;
     }
 }
 State::~State()
@@ -176,12 +225,186 @@ void State::toggle_web_server()
 {
     if (web_server_running()) {
         stop_web_server();
-        show_toast("Web import server stopped.", ToastKind::Info);
+        show_toast("Web UI stopped.", ToastKind::Info);
         return;
     }
     auto server = std::make_unique<WebServer>();
     WebServer::Callbacks cb;
     cb.status_json = [this] { return web_status_json(); };
+    cb.games_json = [this] { return web_games_json(); };
+    cb.game_asset = [this](const std::string &title_id, const std::string &kind,
+                           const std::string &name, fs::path &out_path) -> bool {
+        if (!is_valid_title_id(title_id))
+            return false;
+        const auto list = scan_games(config.games_path);
+        for (const auto &g : list) {
+            if (g.title_id != title_id)
+                continue;
+            if (kind == "art" && !g.art.empty()) {
+                out_path = g.art;
+                return true;
+            }
+            if (kind == "icon" && !g.icon.empty()) {
+                out_path = g.icon;
+                return true;
+            }
+            if (kind == "screenshot" && !name.empty()) {
+                for (const auto &shot : g.screenshots) {
+                    if (shot.filename().string() == name) {
+                        out_path = shot;
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        return false;
+    };
+    cb.update_game_meta = [this](const std::string &title_id, const MultipartForm &form,
+                                 std::string &error_out) -> bool {
+        if (!is_valid_title_id(title_id)) {
+            error_out = "Invalid title ID.";
+            return false;
+        }
+        std::error_code ec;
+        const fs::path game_dir = config.games_path / title_id;
+        if (!fs::is_directory(game_dir, ec)) {
+            error_out = "Game not found.";
+            return false;
+        }
+        const fs::path toml_path = game_dir / "v2n.toml";
+        toml::table root;
+        if (fs::is_regular_file(toml_path, ec)) {
+            try {
+                root = toml::parse_file(toml_path.string());
+            } catch (...) {
+                root = toml::table{};
+            }
+        }
+        if (!root.contains("meta") || !root["meta"].is_table())
+            root.insert_or_assign("meta", toml::table{});
+        if (!root.contains("media") || !root["media"].is_table())
+            root.insert_or_assign("media", toml::table{});
+        auto &meta = *root["meta"].as_table();
+        auto &media = *root["media"].as_table();
+
+        auto set_str = [&](const char *key) {
+            const auto it = form.fields.find(key);
+            if (it == form.fields.end())
+                return;
+            if (it->second.empty())
+                meta.erase(key);
+            else
+                meta.insert_or_assign(key, it->second);
+        };
+        set_str("name");
+        set_str("description");
+        set_str("category");
+        set_str("rating");
+
+        const fs::path media_dir = game_dir / "v2n-media";
+        auto save_single_asset = [&](const char *field, const char *remove_field,
+                                     const char *toml_key, const char *base_name) {
+            if (auto rm = form.fields.find(remove_field);
+                rm != form.fields.end() && rm->second == "1") {
+                media.erase(toml_key);
+                return;
+            }
+            const auto fit = form.files.find(field);
+            if (fit == form.files.end() || fit->second.empty())
+                return;
+            fs::create_directories(media_dir, ec);
+            const auto &up = fit->second.front();
+            const std::string ext = up.path.extension().string();
+            const fs::path dest = media_dir / (std::string(base_name) + ext);
+            fs::copy_file(up.path, dest, fs::copy_options::overwrite_existing, ec);
+            if (!ec)
+                media.insert_or_assign(toml_key, std::string("v2n-media/") + dest.filename().string());
+        };
+        save_single_asset("art", "removeArt", "art", "art");
+        save_single_asset("icon", "removeIcon", "icon", "icon");
+        media.erase("boxart");
+
+        std::vector<std::string> shots;
+        if (const auto *arr = media["screenshots"].as_array()) {
+            for (const auto &el : *arr) {
+                if (auto s = el.value<std::string>())
+                    shots.push_back(*s);
+            }
+        } else if (auto s = media["screenshots"].value<std::string>()) {
+            shots.push_back(*s);
+        }
+
+        if (auto rm_it = form.fields.find("removeScreenshots"); rm_it != form.fields.end()) {
+            const auto to_remove = split_lines(rm_it->second);
+            shots.erase(std::remove_if(shots.begin(), shots.end(),
+                                       [&](const std::string &s) {
+                                           const std::string fname = fs::path(s).filename().string();
+                                           return std::find(to_remove.begin(), to_remove.end(),
+                                                            fname) != to_remove.end();
+                                       }),
+                        shots.end());
+        }
+
+        if (auto sit = form.files.find("screenshots"); sit != form.files.end()) {
+            fs::create_directories(media_dir, ec);
+            size_t idx = 1;
+            for (const auto &up : sit->second) {
+                const std::string ext = up.path.extension().string();
+                fs::path dest;
+                do {
+                    dest = media_dir / ("screenshot-" + std::to_string(idx++) + ext);
+                } while (fs::exists(dest, ec));
+                fs::copy_file(up.path, dest, fs::copy_options::overwrite_existing, ec);
+                if (!ec)
+                    shots.push_back(std::string("v2n-media/") + dest.filename().string());
+            }
+        }
+
+        if (shots.empty()) {
+            media.erase("screenshots");
+        } else {
+            toml::array arr;
+            for (const auto &s : shots)
+                arr.push_back(s);
+            media.insert_or_assign("screenshots", std::move(arr));
+        }
+
+        std::ostringstream oss;
+        oss << root << "\n";
+        std::ofstream out(toml_path, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            error_out = "Could not write v2n.toml.";
+            return false;
+        }
+        const std::string text = oss.str();
+        out.write(text.data(), static_cast<std::streamsize>(text.size()));
+        out.close();
+
+        std::lock_guard<std::mutex> lock(web_mutex);
+        pending_games_refresh = true;
+        return true;
+    };
+    cb.delete_game = [this](const std::string &title_id, std::string &error_out) -> bool {
+        if (!is_valid_title_id(title_id)) {
+            error_out = "Invalid title ID.";
+            return false;
+        }
+        std::error_code ec;
+        const fs::path game_dir = config.games_path / title_id;
+        if (!fs::is_directory(game_dir, ec)) {
+            error_out = "Game not found.";
+            return false;
+        }
+        fs::remove_all(game_dir, ec);
+        if (ec) {
+            error_out = "Could not delete game directory.";
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(web_mutex);
+        pending_games_refresh = true;
+        return true;
+    };
     cb.is_busy = [this] {
         std::lock_guard<std::mutex> lock(web_mutex);
         return active_import_id != 0 || pending_web_import.has_value();
@@ -201,7 +424,41 @@ void State::toggle_web_server()
         return;
     }
     web_server = std::move(server);
-    show_toast("Web server listening at " + web_server->url(), ToastKind::Success);
+    show_toast("Web UI listening at " + web_server->url(), ToastKind::Success);
+}
+
+std::string State::web_games_json() const
+{
+    const auto list = scan_games(config.games_path);
+    std::string out = "[";
+    for (size_t i = 0; i < list.size(); ++i) {
+        if (i > 0)
+            out += ',';
+        const auto &g = list[i];
+        const std::string enc_id = url_encode_component(g.title_id);
+        out += "{\"titleId\":\"" + json_escape(g.title_id) + "\",\"name\":\"" +
+               json_escape(g.name) + "\",\"description\":\"" + json_escape(g.description) +
+               "\",\"category\":\"" + json_escape(g.category) + "\",\"rating\":\"" +
+               json_escape(g.rating) + "\",\"hasArt\":" + (g.art.empty() ? "false" : "true") +
+               ",\"hasIcon\":" + (g.icon.empty() ? "false" : "true") +
+               ",\"artUrl\":" +
+               (g.art.empty() ? "null"
+                              : ("\"/api/games/" + enc_id + "/asset?kind=art\"")) +
+               ",\"iconUrl\":" +
+               (g.icon.empty() ? "null"
+                               : ("\"/api/games/" + enc_id + "/asset?kind=icon\"")) +
+               ",\"screenshots\":[";
+        for (size_t s = 0; s < g.screenshots.size(); ++s) {
+            if (s > 0)
+                out += ',';
+            const std::string fname = g.screenshots[s].filename().string();
+            out += "{\"name\":\"" + json_escape(fname) + "\",\"url\":\"/api/games/" + enc_id +
+                   "/asset?kind=screenshot&name=" + url_encode_component(fname) + "\"}";
+        }
+        out += "]}";
+    }
+    out += "]";
+    return out;
 }
 
 std::string State::web_status_json() const
@@ -215,29 +472,15 @@ std::string State::web_status_json() const
         if (i > 0)
             out += ',';
         const auto &e = import_history[i];
-        const char *channel = e.channel == ImportChannel::Local ? "Local" : "Web";
         const char *status = e.status == ImportStatus::Running
                                  ? "running"
                                  : (e.status == ImportStatus::Success ? "success" : "failed");
-        out += "{\"id\":" + std::to_string(e.id) + ",\"channel\":\"" + channel +
-               "\",\"title\":\"" + json_escape(e.title) + "\",\"status\":\"" + status +
-               "\",\"statusText\":\"" + json_escape(e.status_text) + "\"}";
+        out += "{\"id\":" + std::to_string(e.id) + ",\"channel\":\"Web\",\"title\":\"" +
+               json_escape(e.title) + "\",\"status\":\"" + status + "\",\"statusText\":\"" +
+               json_escape(e.status_text) + "\"}";
     }
     out += "]}";
     return out;
-}
-
-void State::start_import()
-{
-    if (import_running()) {
-        show_toast("Import is running; please wait.", ToastKind::Warning);
-        return;
-    }
-    if (pkg.empty() || license.empty()) {
-        show_toast("Select a package and work.bin first.", ToastKind::Warning);
-        return;
-    }
-    begin_import(pkg, license, ImportChannel::Local, pkg.filename().string());
 }
 
 void State::begin_import(const fs::path &pkg_path, const fs::path &lic_path, ImportChannel channel,
@@ -318,6 +561,16 @@ void State::begin_import(const fs::path &pkg_path, const fs::path &lic_path, Imp
 void State::poll()
 {
     update_toast();
+    bool need_refresh = false;
+    {
+        std::lock_guard<std::mutex> lock(web_mutex);
+        if (pending_games_refresh) {
+            need_refresh = true;
+            pending_games_refresh = false;
+        }
+    }
+    if (need_refresh)
+        refresh_games();
     if (!worker) {
         std::optional<PendingWebImport> pending;
         {
@@ -417,8 +670,6 @@ void State::poll()
         message = "Import complete: " + title_id;
         update_active_entry("Imported", ImportStatus::Success, display_title);
         show_toast("Imported " + display_title, ToastKind::Success);
-        pkg.clear();
-        license.clear();
         return;
     }
 }

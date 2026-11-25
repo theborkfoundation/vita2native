@@ -15,7 +15,7 @@ struct GameEntry {
     std::filesystem::path dir;
     std::filesystem::path eboot;
     std::filesystem::path art;
-    std::filesystem::path boxart;
+    std::filesystem::path icon;
     std::vector<std::filesystem::path> screenshots;
 };
 

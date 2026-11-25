@@ -6,14 +6,35 @@
 #include <functional>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 
 namespace launcher
 {
+
+struct UploadedFile {
+    std::filesystem::path path;
+    std::string filename;
+};
+
+struct MultipartForm {
+    std::unordered_map<std::string, std::string> fields;
+    std::unordered_map<std::string, std::vector<UploadedFile>> files;
+    std::filesystem::path upload_dir;
+};
 
 class WebServer {
   public:
     struct Callbacks {
         std::function<std::string()> status_json;
+        std::function<std::string()> games_json;
+        std::function<bool(const std::string &title_id, const std::string &kind,
+                           const std::string &name, std::filesystem::path &out_path)>
+            game_asset;
+        std::function<bool(const std::string &title_id, const MultipartForm &form,
+                           std::string &error_out)>
+            update_game_meta;
+        std::function<bool(const std::string &title_id, std::string &error_out)> delete_game;
         std::function<bool()> is_busy;
         std::function<bool(const std::filesystem::path &pkg, const std::filesystem::path &license,
                            const std::filesystem::path &upload_dir, std::string display_name)>

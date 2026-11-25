@@ -120,32 +120,15 @@ struct ActionCard {
     lv_obj_t *border = nullptr;
 };
 
-struct ImportCard {
+struct WebUICard {
     lv_obj_t *root = nullptr;
     lv_obj_t *icon_box = nullptr;
     lv_obj_t *icon_label = nullptr;
     lv_obj_t *title = nullptr;
     lv_obj_t *subtitle = nullptr;
-    lv_obj_t *detail = nullptr;
+    lv_obj_t *url = nullptr;
     lv_obj_t *badge = nullptr;
     lv_obj_t *badge_label = nullptr;
-    lv_obj_t *border = nullptr;
-};
-
-struct ImportHistoryRow {
-    lv_obj_t *root = nullptr;
-    lv_obj_t *channel_box = nullptr;
-    lv_obj_t *channel_label = nullptr;
-    lv_obj_t *title = nullptr;
-    lv_obj_t *status = nullptr;
-};
-
-constexpr int import_history_visible = 4;
-
-struct PickerRow {
-    lv_obj_t *root = nullptr;
-    lv_obj_t *kind = nullptr;
-    lv_obj_t *name = nullptr;
     lv_obj_t *border = nullptr;
 };
 
@@ -209,26 +192,15 @@ struct Widgets {
     lv_obj_t *all_scrollbar_thumb = nullptr;
     std::vector<GameCardWidgets> all_cards;
 
-    lv_obj_t *import_layer = nullptr;
-    lv_obj_t *import_subtitle = nullptr;
-    std::array<ImportCard, 2> import_cards;
-    lv_obj_t *import_details = nullptr;
-    lv_obj_t *import_history_heading = nullptr;
-    lv_obj_t *import_history_count = nullptr;
-    lv_obj_t *import_history_empty = nullptr;
-    std::array<ImportHistoryRow, import_history_visible> import_history_rows;
-
-    lv_obj_t *picker_layer = nullptr;
-    lv_obj_t *picker_heading = nullptr;
-    lv_obj_t *picker_dir = nullptr;
-    lv_obj_t *picker_empty = nullptr;
-    std::array<PickerRow, picker_page_size> picker_rows;
+    lv_obj_t *web_layer = nullptr;
+    lv_obj_t *web_subtitle = nullptr;
+    WebUICard web_card;
 
     lv_obj_t *info_layer = nullptr;
-    lv_obj_t *info_boxart_card = nullptr;
-    lv_obj_t *info_boxart_img = nullptr;
-    lv_obj_t *info_boxart_fallback = nullptr;
-    std::shared_ptr<ImageBuffer> info_boxart_ref;
+    lv_obj_t *info_icon_card = nullptr;
+    lv_obj_t *info_icon_img = nullptr;
+    lv_obj_t *info_icon_fallback = nullptr;
+    std::shared_ptr<ImageBuffer> info_icon_ref;
     lv_obj_t *info_badges = nullptr;
     lv_obj_t *info_badge_id = nullptr;
     lv_obj_t *info_badge_id_label = nullptr;
@@ -258,7 +230,7 @@ struct Widgets {
 };
 Widgets ui_objs;
 
-enum class ViewMode { None, Error, Splash, Home, AllGames, Import, Picker, GameInfo };
+enum class ViewMode { None, Error, Splash, Home, AllGames, WebUI, GameInfo };
 ViewMode last_mode = ViewMode::None;
 ConfirmKind last_confirm = ConfirmKind::None;
 int last_games_revision = -1;
@@ -266,15 +238,8 @@ std::string last_config_error;
 std::string last_header_text;
 int last_all_focus = -1;
 int all_scroll_row = 0;
-ImportFocus last_import_focus = ImportFocus::Local;
 bool last_web_running = false;
 std::string last_web_url;
-int last_import_history_rev = -1;
-PickerKind last_pick_kind = PickerKind::Package;
-std::string last_picker_dir;
-int last_picker_scroll = -1;
-int last_picker_index = -1;
-size_t last_picker_count = SIZE_MAX;
 int last_info_game = -1;
 int last_info_revision = -1;
 GameInfoFocus last_info_focus = GameInfoFocus::Play;
@@ -495,7 +460,7 @@ std::shared_ptr<ImageBuffer> get_cached_image(const fs::path &path, int target_w
 
 std::filesystem::path game_card_art(const GameEntry &g)
 {
-    return !g.boxart.empty() ? g.boxart : g.art;
+    return !g.icon.empty() ? g.icon : g.art;
 }
 
 float dist_segment(float px, float py, float ax, float ay, float bx, float by)
@@ -834,7 +799,7 @@ void create_ui_tree()
     make_label(ui_objs.home_empty, 24, 40, "No games found", fonts.bold_20, rgb(238, 247, 249));
     lv_obj_t *home_empty_sub = make_label(
         ui_objs.home_empty, 24, 72,
-        "Import a .pkg or place title folders (*/eboot.bin) in your games directory.",
+        "Use Web UI on the home screen or place title folders (*/eboot.bin) in your games directory.",
         fonts.reg_16, rgb(164, 188, 196), 542);
     lv_label_set_long_mode(home_empty_sub, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_add_flag(ui_objs.home_empty, LV_OBJ_FLAG_HIDDEN);
@@ -844,12 +809,12 @@ void create_ui_tree()
         const float x = 25 + i * 301;
         card.root = make_box(ui_objs.home_layer, x, 315, 289, 98, rgb(32, 52, 64), 225, 7);
         card.icon_box = make_box(card.root, 15, 29, 40, 40, rgb(204, 230, 234), 24, 7);
-        make_centered_label(card.icon_box, i == 0 ? icons::layout_grid : icons::plus,
+        make_centered_label(card.icon_box, i == 0 ? icons::layout_grid : icons::globe,
                             fonts.icon_18, rgb(213, 232, 235));
-        card.title = make_label(card.root, 68, 21, i == 0 ? "View all games" : "Import game",
+        card.title = make_label(card.root, 68, 21, i == 0 ? "View all games" : "Web UI",
                                 fonts.bold_20, rgb(245, 250, 251), 184);
         card.subtitle = make_label(card.root, 68, 52,
-                                   i == 0 ? "Browse your library" : "Add a package and license",
+                                   i == 0 ? "Browse your library" : "Manage & import games",
                                    fonts.reg_14, rgb(164, 188, 196), 205);
         card.arrow = make_label(card.root, 258, 24, "→", fonts.bold_20, rgb(195, 218, 223), 24);
         card.border = make_box(card.root, 0, 0, 289, 98, rgb(0, 0, 0), LV_OPA_TRANSP, 7);
@@ -878,7 +843,7 @@ void create_ui_tree()
                rgb(238, 247, 249));
     lv_obj_t *all_empty_sub = make_label(
         ui_objs.all_empty, 24, 70,
-        "Use Import game on the home screen or add title folders containing eboot.bin.",
+        "Use Web UI on the home screen or add title folders containing eboot.bin.",
         fonts.reg_16, rgb(164, 188, 196), 542);
     lv_label_set_long_mode(all_empty_sub, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_add_flag(ui_objs.all_empty, LV_OBJ_FLAG_HIDDEN);
@@ -891,117 +856,58 @@ void create_ui_tree()
     lv_obj_add_flag(ui_objs.all_scrollbar_thumb, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(ui_objs.all_layer, LV_OBJ_FLAG_HIDDEN);
 
-    // Import screen
-    ui_objs.import_layer = lv_obj_create(ui_objs.main_layer);
-    init_clean_obj(ui_objs.import_layer, 0, 0, 640, 438);
-    ui_objs.import_subtitle =
-        make_label(ui_objs.import_layer, 25, 68,
-                   "Choose local files or start the web upload server.", fonts.reg_16,
-                   rgb(174, 193, 201));
-    for (int i = 0; i < 2; ++i) {
-        auto &card = ui_objs.import_cards[i];
-        const float x = 25 + i * 301;
-        card.root = make_box(ui_objs.import_layer, x, 104, 289, 96, rgb(24, 40, 51), 225, 7);
-        card.icon_box = make_box(card.root, 16, 16, 36, 36, rgb(255, 255, 255), 22, 6);
-        card.icon_label = make_centered_label(card.icon_box, i == 0 ? icons::folder : icons::globe,
-                                              fonts.icon_18, rgb(226, 238, 240));
-        card.title = make_label(card.root, 64, 15, i == 0 ? "Local import" : "Web import",
-                                fonts.bold_18, rgb(244, 249, 251), 160);
-        card.subtitle = make_label(card.root, 64, 39,
-                                   i == 0 ? "Select .pkg and work.bin" : "Browser upload server",
-                                   fonts.reg_14, rgb(164, 188, 196), 210);
-        if (i == 1) {
-            card.detail = make_label(card.root, 16, 66, "", fonts.reg_14, rgb(94, 234, 212), 257);
-            lv_obj_set_height(card.detail, lv_font_get_line_height(fonts.reg_14));
-            lv_label_set_long_mode(card.detail, LV_LABEL_LONG_MODE_DOTS);
-            lv_obj_add_flag(card.detail, LV_OBJ_FLAG_HIDDEN);
-            card.badge = make_box(card.root, 227, 16, 46, 22, rgb(255, 255, 255), 24, 11);
-            card.badge_label =
-                make_centered_label(card.badge, "OFF", fonts.bold_14, rgb(199, 218, 224));
-        }
-        card.border = make_box(card.root, 0, 0, 289, 96, rgb(0, 0, 0), LV_OPA_TRANSP, 7);
-        lv_obj_set_style_border_width(card.border, sc_border(1), 0);
+    // Web UI screen
+    ui_objs.web_layer = lv_obj_create(ui_objs.main_layer);
+    init_clean_obj(ui_objs.web_layer, 0, 0, 640, 438);
+    ui_objs.web_subtitle =
+        make_label(ui_objs.web_layer, 25, 68,
+                   "Manage your library, metadata, and package imports from a browser.",
+                   fonts.reg_16, rgb(174, 193, 201));
+
+    {
+        auto &card = ui_objs.web_card;
+        card.root = make_box(ui_objs.web_layer, 25, 112, 590, 118, rgb(24, 40, 51), 225, 7);
+        card.icon_box = make_box(card.root, 18, 22, 40, 40, rgb(255, 255, 255), 22, 6);
+        card.icon_label = make_centered_label(card.icon_box, icons::globe, fonts.icon_18,
+                                              rgb(226, 238, 240));
+        card.title = make_label(card.root, 72, 20, "Web management interface", fonts.bold_20,
+                                rgb(244, 249, 251), 420);
+        card.subtitle = make_label(card.root, 72, 48,
+                                   "Import .pkg titles, edit metadata & assets, or delete games",
+                                   fonts.reg_14, rgb(164, 188, 196), 440);
+        card.url = make_label(card.root, 18, 82, "", fonts.bold_16, rgb(94, 234, 212), 554);
+        lv_obj_set_height(card.url, lv_font_get_line_height(fonts.bold_16));
+        lv_label_set_long_mode(card.url, LV_LABEL_LONG_MODE_DOTS);
+        lv_obj_add_flag(card.url, LV_OBJ_FLAG_HIDDEN);
+        card.badge = make_box(card.root, 524, 22, 48, 24, rgb(255, 255, 255), 24, 12);
+        card.badge_label =
+            make_centered_label(card.badge, "OFF", fonts.bold_14, rgb(199, 218, 224));
+        card.border = make_box(card.root, 0, 0, 590, 118, rgb(0, 0, 0), LV_OPA_TRANSP, 7);
+        lv_obj_set_style_border_width(card.border, sc_border(2), 0);
+        lv_obj_set_style_border_color(card.border, rgb(241, 248, 250), 0);
     }
-
-    ui_objs.import_details = lv_obj_create(ui_objs.import_layer);
-    init_clean_obj(ui_objs.import_details, 0, 222, 640, 210);
-    ui_objs.import_history_heading = make_label(ui_objs.import_details, 25, 0, "IMPORT HISTORY",
-                                                fonts.bold_14, rgb(174, 192, 200));
-    ui_objs.import_history_count =
-        make_label(ui_objs.import_details, 0, 0, "0 ITEMS", fonts.bold_14, rgb(143, 168, 178));
-    lv_obj_align(ui_objs.import_history_count, LV_ALIGN_TOP_RIGHT, -sc(25), 0);
-
-    ui_objs.import_history_empty =
-        make_box(ui_objs.import_details, 25, 24, 590, 44, rgb(255, 255, 255), 10, 6);
-    make_label(ui_objs.import_history_empty, 16, 12, "No imports yet.", fonts.reg_14,
-               rgb(143, 168, 178), 558);
-
-    for (int i = 0; i < import_history_visible; ++i) {
-        auto &r = ui_objs.import_history_rows[i];
-        r.root = make_box(ui_objs.import_details, 25, 24 + i * 35, 590, 31, rgb(24, 40, 51), 190, 5);
-        r.channel_box = make_box(r.root, 10, 6, 50, 19, rgb(255, 255, 255), 24, 4);
-        r.channel_label =
-            make_centered_label(r.channel_box, "LOCAL", fonts.bold_14, rgb(225, 236, 239));
-        r.title = make_label(r.root, 70, 7, "", fonts.reg_14, rgb(238, 247, 249), 330);
-        lv_obj_set_height(r.title, lv_font_get_line_height(fonts.reg_14));
-        lv_label_set_long_mode(r.title, LV_LABEL_LONG_MODE_DOTS);
-        r.status = make_label(r.root, 408, 7, "", fonts.bold_14, rgb(174, 193, 201), 170);
-        lv_obj_set_height(r.status, lv_font_get_line_height(fonts.bold_14));
-        lv_label_set_long_mode(r.status, LV_LABEL_LONG_MODE_DOTS);
-        lv_obj_set_style_text_align(r.status, LV_TEXT_ALIGN_RIGHT, 0);
-        lv_obj_add_flag(r.root, LV_OBJ_FLAG_HIDDEN);
-    }
-    lv_obj_add_flag(ui_objs.import_layer, LV_OBJ_FLAG_HIDDEN);
-
-    // Picker screen
-    ui_objs.picker_layer = lv_obj_create(ui_objs.main_layer);
-    init_clean_obj(ui_objs.picker_layer, 0, 0, 640, 438);
-    ui_objs.picker_heading =
-        make_label(ui_objs.picker_layer, 25, 68, "Choose a package", fonts.bold_24,
-                   rgb(248, 251, 253));
-    ui_objs.picker_dir =
-        make_label(ui_objs.picker_layer, 25, 99, "", fonts.reg_14, rgb(174, 193, 201), 590);
-    lv_obj_set_height(ui_objs.picker_dir, lv_font_get_line_height(fonts.reg_14));
-    lv_label_set_long_mode(ui_objs.picker_dir, LV_LABEL_LONG_MODE_DOTS);
-    ui_objs.picker_empty =
-        make_label(ui_objs.picker_layer, 36, 156, "No matching files or folders.", fonts.reg_16,
-                   rgb(168, 189, 197));
-    lv_obj_add_flag(ui_objs.picker_empty, LV_OBJ_FLAG_HIDDEN);
-    for (int row = 0; row < picker_page_size; ++row) {
-        auto &r = ui_objs.picker_rows[row];
-        const float y = 124 + row * 38;
-        r.root = make_box(ui_objs.picker_layer, 25, y, 590, 34, rgb(255, 255, 255), 0, 4);
-        r.kind = make_label(r.root, 13, 8, "DIR", fonts.bold_14, rgb(159, 188, 197));
-        r.name = make_label(r.root, 72, 7, "", fonts.reg_16, rgb(238, 247, 249), 500);
-        lv_obj_set_height(r.name, lv_font_get_line_height(fonts.reg_16));
-        lv_label_set_long_mode(r.name, LV_LABEL_LONG_MODE_DOTS);
-        r.border = make_box(r.root, 0, 0, 590, 34, rgb(0, 0, 0), LV_OPA_TRANSP, 4);
-        lv_obj_set_style_border_color(r.border, rgb(239, 247, 250), 0);
-        lv_obj_set_style_border_width(r.border, 0, 0);
-        lv_obj_add_flag(r.root, LV_OBJ_FLAG_HIDDEN);
-    }
-    lv_obj_add_flag(ui_objs.picker_layer, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui_objs.web_layer, LV_OBJ_FLAG_HIDDEN);
 
     // Game Info screen
     ui_objs.info_layer = lv_obj_create(ui_objs.main_layer);
     init_clean_obj(ui_objs.info_layer, 0, 0, 640, 438);
 
-    ui_objs.info_boxart_card =
+    ui_objs.info_icon_card =
         make_gradient(ui_objs.info_layer, 25, 70, 120, 152, rgb(32, 54, 68), 255, rgb(14, 26, 36),
                       255);
-    lv_obj_set_style_radius(ui_objs.info_boxart_card, sc(6), 0);
-    lv_obj_set_style_clip_corner(ui_objs.info_boxart_card, true, 0);
-    ui_objs.info_boxart_img = lv_image_create(ui_objs.info_boxart_card);
-    init_clean_obj(ui_objs.info_boxart_img, 0, 0, 120, 152);
-    ui_objs.info_boxart_fallback =
-        make_label(ui_objs.info_boxart_card, 0, 0, "", fonts.bold_20, rgb(159, 190, 201));
-    lv_obj_set_style_text_opa(ui_objs.info_boxart_fallback, 140, 0);
-    lv_obj_align(ui_objs.info_boxart_fallback, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_t *boxart_border =
-        make_box(ui_objs.info_boxart_card, 0, 0, 120, 152, rgb(0, 0, 0), LV_OPA_TRANSP, 6);
-    lv_obj_set_style_border_color(boxart_border, rgb(255, 255, 255), 0);
-    lv_obj_set_style_border_opa(boxart_border, 70, 0);
-    lv_obj_set_style_border_width(boxart_border, sc_border(1), 0);
+    lv_obj_set_style_radius(ui_objs.info_icon_card, sc(6), 0);
+    lv_obj_set_style_clip_corner(ui_objs.info_icon_card, true, 0);
+    ui_objs.info_icon_img = lv_image_create(ui_objs.info_icon_card);
+    init_clean_obj(ui_objs.info_icon_img, 0, 0, 120, 152);
+    ui_objs.info_icon_fallback =
+        make_label(ui_objs.info_icon_card, 0, 0, "", fonts.bold_20, rgb(159, 190, 201));
+    lv_obj_set_style_text_opa(ui_objs.info_icon_fallback, 140, 0);
+    lv_obj_align(ui_objs.info_icon_fallback, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_t *icon_border =
+        make_box(ui_objs.info_icon_card, 0, 0, 120, 152, rgb(0, 0, 0), LV_OPA_TRANSP, 6);
+    lv_obj_set_style_border_color(icon_border, rgb(255, 255, 255), 0);
+    lv_obj_set_style_border_opa(icon_border, 70, 0);
+    lv_obj_set_style_border_width(icon_border, sc_border(1), 0);
 
     ui_objs.info_badges = lv_obj_create(ui_objs.info_layer);
     init_clean_obj(ui_objs.info_badges, 162, 70, 453, 28);
@@ -1138,12 +1044,10 @@ void rebuild_game_lists(const State &a)
 void update_header_and_footer(const State &a)
 {
     std::string name = "Vita2Native";
-    if (a.picker)
-        name = "Choose File";
-    else if (a.screen == Screen::AllGames)
+    if (a.screen == Screen::AllGames)
         name = "All Games";
-    else if (a.screen == Screen::Import)
-        name = "Import Game";
+    else if (a.screen == Screen::WebUI)
+        name = "Web UI";
     else if (a.screen == Screen::GameInfo) {
         if (a.info_game >= 0 && a.info_game < static_cast<int>(a.games.size()))
             name = a.games[a.info_game].name;
@@ -1155,7 +1059,7 @@ void update_header_and_footer(const State &a)
         last_header_text = std::move(name);
     }
 
-    const char *back = a.picker || a.screen != Screen::Home ? "BACK" : "EXIT";
+    const char *back = a.screen != Screen::Home ? "BACK" : "EXIT";
     if (last_footer_back != back) {
         lv_point_t back_sz{}, select_sz{};
         lv_text_get_size(&back_sz, back, fonts.bold_14, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
@@ -1228,7 +1132,7 @@ void sync_home(const State &a, Uint32 now)
                       : 1.0f;
     for (int i = 0; i < 2; ++i) {
         const float show = entrance(a, now, 240 + i * 80);
-        const HomeFocus target = i == 0 ? HomeFocus::AllGames : HomeFocus::Import;
+        const HomeFocus target = i == 0 ? HomeFocus::AllGames : HomeFocus::WebUI;
         const float focused =
             (a.home_focus == target ? fp : 0.0f) + (a.previous_home_focus == target ? 1.0f - fp : 0.0f);
         auto &card = ui_objs.action_cards[i];
@@ -1309,143 +1213,37 @@ void sync_all_games(const State &a, Uint32 now)
     last_all_focus = a.all_focus;
 }
 
-void sync_import(const State &a, Uint32 now)
+void sync_web_ui(const State &a, Uint32 now)
 {
     const float heading = entrance(a, now);
     const float head_off = 10.0f * (1.0f - heading);
-    set_opa_if_changed(ui_objs.import_subtitle, opa_from_float(heading));
-    set_pos_if_changed(ui_objs.import_subtitle, sc(25), sc(68.0f + head_off));
+    set_opa_if_changed(ui_objs.web_subtitle, opa_from_float(heading));
+    set_pos_if_changed(ui_objs.web_subtitle, sc(25), sc(68.0f + head_off));
 
     const bool web_on = a.web_server_running();
     const std::string web_url = a.web_server_url();
-    const bool mode_entered = (last_mode != ViewMode::Import);
+    const bool mode_entered = (last_mode != ViewMode::WebUI);
 
-    for (int i = 0; i < 2; ++i) {
-        const float show = entrance(a, now, 80 + i * 90);
-        const float x = 25 + i * 301;
-        const float y = 104 + 12.0f * (1.0f - show);
-        auto &card = ui_objs.import_cards[i];
-        set_pos_if_changed(card.root, sc(x), sc(y));
-        set_opa_if_changed(card.root, opa_from_float(show));
-
-        const bool focused = (a.import_focus == (i == 0 ? ImportFocus::Local : ImportFocus::Web));
-        const bool turned_on = (i == 1 && web_on);
-
-        if (last_import_focus != a.import_focus || last_web_running != web_on || mode_entered) {
-            lv_obj_set_style_bg_color(card.root,
-                                      turned_on ? rgb(20, 62, 72) : rgb(24, 40, 51), 0);
-            lv_obj_set_style_border_color(
-                card.border,
-                focused ? rgb(241, 248, 250)
-                        : (turned_on ? rgb(45, 212, 191) : rgb(119, 150, 162)),
-                0);
-            lv_obj_set_style_border_opa(card.border, focused ? 255 : (turned_on ? 200 : 90), 0);
-            lv_obj_set_style_border_width(card.border, sc_border(focused ? 2 : 1), 0);
-        }
-    }
+    const float show = entrance(a, now, 90);
+    auto &card = ui_objs.web_card;
+    set_pos_if_changed(card.root, sc(25), sc(112.0f + 12.0f * (1.0f - show)));
+    set_opa_if_changed(card.root, opa_from_float(show));
 
     if (last_web_running != web_on || last_web_url != web_url || mode_entered) {
-        auto &web_card = ui_objs.import_cards[1];
-        set_visible(web_card.detail, web_on && !web_url.empty());
+        lv_obj_set_style_bg_color(card.root, web_on ? rgb(20, 62, 72) : rgb(24, 40, 51), 0);
+        lv_obj_set_style_border_color(card.border,
+                                      web_on ? rgb(45, 212, 191) : rgb(241, 248, 250), 0);
+        set_visible(card.url, web_on && !web_url.empty());
         if (web_on && !web_url.empty())
-            lv_label_set_text(web_card.detail, web_url.c_str());
-        lv_obj_set_style_bg_color(web_card.badge,
-                                  web_on ? rgb(45, 212, 191) : rgb(255, 255, 255), 0);
-        lv_obj_set_style_bg_opa(web_card.badge, web_on ? 255 : 24, 0);
-        lv_label_set_text(web_card.badge_label, web_on ? "ON" : "OFF");
-        lv_obj_set_style_text_color(web_card.badge_label,
+            lv_label_set_text(card.url, web_url.c_str());
+        lv_obj_set_style_bg_color(card.badge, web_on ? rgb(45, 212, 191) : rgb(255, 255, 255), 0);
+        lv_obj_set_style_bg_opa(card.badge, web_on ? 255 : 24, 0);
+        lv_label_set_text(card.badge_label, web_on ? "ON" : "OFF");
+        lv_obj_set_style_text_color(card.badge_label,
                                     web_on ? rgb(7, 34, 31) : rgb(199, 218, 224), 0);
         last_web_running = web_on;
         last_web_url = web_url;
     }
-
-    const float details = entrance(a, now, 260);
-    set_opa_if_changed(ui_objs.import_details, opa_from_float(details));
-    set_pos_if_changed(ui_objs.import_details, 0, sc(222.0f + 10.0f * (1.0f - details)));
-
-    if (last_import_history_rev != a.import_history_revision || mode_entered) {
-        const size_t total = a.import_history.size();
-        char count_buf[32];
-        std::snprintf(count_buf, sizeof(count_buf), "%zu %s", total,
-                      total == 1 ? "ITEM" : "ITEMS");
-        lv_label_set_text(ui_objs.import_history_count, count_buf);
-        set_visible(ui_objs.import_history_empty, total == 0);
-
-        for (int i = 0; i < import_history_visible; ++i) {
-            auto &r = ui_objs.import_history_rows[i];
-            if (static_cast<size_t>(i) >= total) {
-                set_visible(r.root, false);
-                continue;
-            }
-            set_visible(r.root, true);
-            const auto &entry = a.import_history[i];
-            lv_label_set_text(r.channel_label,
-                              entry.channel == ImportChannel::Local ? "LOCAL" : "WEB");
-            lv_label_set_text(r.title, entry.title.c_str());
-            lv_label_set_text(r.status, entry.status_text.c_str());
-            lv_color_t st_color = rgb(251, 191, 36);
-            if (entry.status == ImportStatus::Success)
-                st_color = rgb(74, 222, 128);
-            else if (entry.status == ImportStatus::Failed)
-                st_color = rgb(248, 113, 113);
-            lv_obj_set_style_text_color(r.status, st_color, 0);
-        }
-        last_import_history_rev = a.import_history_revision;
-    }
-    last_import_focus = a.import_focus;
-}
-
-void sync_picker(const State &a, Uint32 now)
-{
-    const float heading = entrance(a, now);
-    const float head_off = 8.0f * (1.0f - heading);
-    set_opa_if_changed(ui_objs.picker_heading, opa_from_float(heading));
-    set_pos_if_changed(ui_objs.picker_heading, sc(25), sc(68.0f + head_off));
-    set_opa_if_changed(ui_objs.picker_dir, opa_from_float(heading));
-    set_pos_if_changed(ui_objs.picker_dir, sc(25), sc(99.0f + head_off));
-
-    const std::string dir_str = a.dir.string();
-    if (last_pick_kind != a.pick_kind || last_mode != ViewMode::Picker) {
-        lv_label_set_text(ui_objs.picker_heading,
-                          a.pick_kind == PickerKind::Package ? "Choose a package" : "Choose work.bin");
-        last_pick_kind = a.pick_kind;
-    }
-    const bool list_changed = last_picker_dir != dir_str || last_picker_scroll != a.scroll ||
-                              last_picker_index != a.pick_index ||
-                              last_picker_count != a.items.size() || last_mode != ViewMode::Picker;
-    if (last_picker_dir != dir_str || last_mode != ViewMode::Picker) {
-        lv_label_set_text(ui_objs.picker_dir, dir_str.c_str());
-        last_picker_dir = dir_str;
-    }
-    set_visible(ui_objs.picker_empty, a.items.empty());
-
-    const fs::path parent_path = a.dir.parent_path();
-    for (int row = 0; row < picker_page_size; ++row) {
-        const int idx = a.scroll + row;
-        auto &r = ui_objs.picker_rows[row];
-        if (idx >= static_cast<int>(a.items.size())) {
-            set_visible(r.root, false);
-            continue;
-        }
-        set_visible(r.root, true);
-        const float show = entrance(a, now, 50 + row * 35);
-        set_pos_if_changed(r.root, sc(25), sc(124 + row * 38 + 8.0f * (1.0f - show)));
-        set_opa_if_changed(r.root, opa_from_float(show));
-
-        if (list_changed) {
-            const auto &it = a.items[idx];
-            const bool selected = (idx == a.pick_index);
-            lv_obj_set_style_bg_opa(r.root, selected ? 24 : 0, 0);
-            lv_obj_set_style_border_width(r.border, selected ? sc_border(2) : 0, 0);
-            lv_label_set_text(r.kind, it.dir ? "DIR" : "FILE");
-            const std::string name =
-                it.path == parent_path ? ".." : it.path.filename().string();
-            lv_label_set_text(r.name, name.c_str());
-        }
-    }
-    last_picker_scroll = a.scroll;
-    last_picker_index = a.pick_index;
-    last_picker_count = a.items.size();
 }
 
 void sync_game_info(const State &a, Uint32 now)
@@ -1457,15 +1255,15 @@ void sync_game_info(const State &a, Uint32 now)
     const bool rebuilt = (last_info_game != a.info_game || last_info_revision != a.games_revision ||
                           last_mode != ViewMode::GameInfo);
     if (rebuilt) {
-        ui_objs.info_boxart_ref = get_cached_image(game_card_art(game), sc(120), sc(152));
-        if (ui_objs.info_boxart_ref && ui_objs.info_boxart_ref->valid()) {
-            lv_image_set_src(ui_objs.info_boxart_img, &ui_objs.info_boxart_ref->dsc);
-            set_visible(ui_objs.info_boxart_img, true);
-            set_visible(ui_objs.info_boxart_fallback, false);
+        ui_objs.info_icon_ref = get_cached_image(game_card_art(game), sc(120), sc(152));
+        if (ui_objs.info_icon_ref && ui_objs.info_icon_ref->valid()) {
+            lv_image_set_src(ui_objs.info_icon_img, &ui_objs.info_icon_ref->dsc);
+            set_visible(ui_objs.info_icon_img, true);
+            set_visible(ui_objs.info_icon_fallback, false);
         } else {
-            set_visible(ui_objs.info_boxart_img, false);
-            lv_label_set_text(ui_objs.info_boxart_fallback, game.title_id.c_str());
-            set_visible(ui_objs.info_boxart_fallback, true);
+            set_visible(ui_objs.info_icon_img, false);
+            lv_label_set_text(ui_objs.info_icon_fallback, game.title_id.c_str());
+            set_visible(ui_objs.info_icon_fallback, true);
         }
 
         lv_label_set_text(ui_objs.info_badge_id_label, game.title_id.c_str());
@@ -1511,8 +1309,8 @@ void sync_game_info(const State &a, Uint32 now)
     }
 
     const float top_ent = entrance(a, now);
-    set_opa_if_changed(ui_objs.info_boxart_card, opa_from_float(top_ent));
-    set_pos_if_changed(ui_objs.info_boxart_card, sc(25), sc(70.0f + 8.0f * (1.0f - top_ent)));
+    set_opa_if_changed(ui_objs.info_icon_card, opa_from_float(top_ent));
+    set_pos_if_changed(ui_objs.info_icon_card, sc(25), sc(70.0f + 8.0f * (1.0f - top_ent)));
 
     if (rebuilt || last_info_focus != a.info_focus) {
         const bool play_focused = (a.info_focus == GameInfoFocus::Play);
@@ -1681,7 +1479,7 @@ void shutdown()
     ui_objs.recent_cards.clear();
     ui_objs.all_cards.clear();
     ui_objs.info_shots.clear();
-    ui_objs.info_boxart_ref.reset();
+    ui_objs.info_icon_ref.reset();
     image_cache.clear();
     image_lru.clear();
     custom_logo_header.reset();
@@ -1703,12 +1501,10 @@ void sync(const State &a)
         mode = ViewMode::Error;
     else if (now - a.start < splash_duration)
         mode = ViewMode::Splash;
-    else if (a.picker)
-        mode = ViewMode::Picker;
     else if (a.screen == Screen::AllGames)
         mode = ViewMode::AllGames;
-    else if (a.screen == Screen::Import)
-        mode = ViewMode::Import;
+    else if (a.screen == Screen::WebUI)
+        mode = ViewMode::WebUI;
     else if (a.screen == Screen::GameInfo)
         mode = ViewMode::GameInfo;
 
@@ -1719,8 +1515,7 @@ void sync(const State &a)
         set_visible(ui_objs.main_layer, show_main);
         set_visible(ui_objs.home_layer, mode == ViewMode::Home);
         set_visible(ui_objs.all_layer, mode == ViewMode::AllGames);
-        set_visible(ui_objs.import_layer, mode == ViewMode::Import);
-        set_visible(ui_objs.picker_layer, mode == ViewMode::Picker);
+        set_visible(ui_objs.web_layer, mode == ViewMode::WebUI);
         set_visible(ui_objs.info_layer, mode == ViewMode::GameInfo);
     }
 
@@ -1755,10 +1550,8 @@ void sync(const State &a)
         sync_home(a, now);
     else if (mode == ViewMode::AllGames)
         sync_all_games(a, now);
-    else if (mode == ViewMode::Import)
-        sync_import(a, now);
-    else if (mode == ViewMode::Picker)
-        sync_picker(a, now);
+    else if (mode == ViewMode::WebUI)
+        sync_web_ui(a, now);
     if (mode == ViewMode::GameInfo)
         sync_game_info(a, now);
 

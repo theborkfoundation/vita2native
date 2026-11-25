@@ -19,25 +19,16 @@ namespace fs = std::filesystem;
 
 enum class Screen {
     Home,
-    Import,
+    WebUI,
     AllGames,
     GameInfo
 };
 enum class HomeFocus {
     RecentGames,
     AllGames,
-    Import
-};
-enum class PickerKind {
-    Package,
-    License
-};
-enum class ImportFocus {
-    Local,
-    Web
+    WebUI
 };
 enum class ImportChannel {
-    Local,
     Web
 };
 enum class ImportStatus {
@@ -47,7 +38,7 @@ enum class ImportStatus {
 };
 struct ImportHistoryEntry {
     uint64_t id = 0;
-    ImportChannel channel = ImportChannel::Local;
+    ImportChannel channel = ImportChannel::Web;
     std::string title;
     std::string status_text;
     ImportStatus status = ImportStatus::Running;
@@ -77,14 +68,8 @@ enum class Action {
 
 inline constexpr Uint32 splash_duration = 1600;
 inline constexpr Uint32 focus_duration = 220;
-inline constexpr int picker_page_size = 8;
 inline constexpr int screen_width = 640;
 inline constexpr int screen_height = 480;
-
-struct PickerItem {
-    fs::path path;
-    bool dir;
-};
 
 // All visible state lives here, so navigation can be exercised without a window.
 class ImportWorker;
@@ -107,19 +92,14 @@ struct State {
     std::vector<GameEntry> games;
     int games_revision = 0;
     bool running = true;
-    bool picker = false;
     ConfirmKind confirm = ConfirmKind::None;
     ConfirmKind previous_confirm = ConfirmKind::None;
     Screen screen = Screen::Home;
     Screen info_return_screen = Screen::Home;
     HomeFocus home_focus = HomeFocus::RecentGames;
     HomeFocus previous_home_focus = HomeFocus::RecentGames;
-    PickerKind pick_kind = PickerKind::Package;
-    ImportFocus import_focus = ImportFocus::Local;
     GameInfoFocus info_focus = GameInfoFocus::Play;
     int selected = 0;
-    int pick_index = 0;
-    int scroll = 0;
     int all_focus = 0;
     int info_game = 0;
     int screenshot_index = 0;
@@ -136,12 +116,8 @@ struct State {
     static constexpr Uint32 toast_duration = 2600;
     static constexpr Uint32 toast_anim_duration = 180;
     bool moving = false;
-    fs::path pkg;
-    fs::path license;
-    fs::path dir = fs::current_path();
     fs::path stage;
     fs::path upload_cleanup_dir;
-    std::vector<PickerItem> items;
     std::vector<ImportHistoryEntry> import_history;
     int import_history_revision = 0;
     uint64_t next_import_id = 1;
@@ -156,6 +132,7 @@ struct State {
     std::unique_ptr<WebServer> web_server;
     mutable std::mutex web_mutex;
     std::optional<PendingWebImport> pending_web_import;
+    bool pending_games_refresh = false;
     Uint32 start = SDL_GetTicks();
 
     int recent_count() const;
@@ -170,14 +147,11 @@ struct State {
     void update_motion();
     void update_toast();
     bool animating() const;
-    void scan();
-    void browse(PickerKind kind);
     bool import_running() const { return worker != nullptr; }
     bool web_server_running() const;
     std::string web_server_url() const;
     void toggle_web_server();
     void stop_web_server();
-    void start_import();
     void poll();
     void action(Action action);
 
@@ -185,21 +159,20 @@ struct State {
     // between events without repeatedly rendering on software-backed devices.
     auto visible_state() const
     {
-        return std::make_tuple(games_revision, screen, home_focus, all_focus, import_focus,
-                               info_focus, info_game, screenshot_index, selected, picker,
-                               confirm, pick_index, scroll, dir, pkg, license, message, toast,
+        return std::make_tuple(games_revision, screen, home_focus, all_focus, info_focus,
+                               info_game, screenshot_index, selected, confirm, message, toast,
                                toast_kind, toast_hide_start != 0, import_running(),
-                               import_history_revision, web_server_running(), web_server_url());
+                               web_server_running(), web_server_url());
     }
 
   private:
     void begin_import(const fs::path &pkg_path, const fs::path &lic_path, ImportChannel channel,
                       std::string display_name, fs::path cleanup_dir = {});
     std::string web_status_json() const;
-    void handle_picker(Action action);
+    std::string web_games_json() const;
     void handle_home(Action action);
     void handle_all_games(Action action);
-    void handle_import(Action action);
+    void handle_web_ui(Action action);
     void handle_game_info(Action action);
 };
 } // namespace launcher

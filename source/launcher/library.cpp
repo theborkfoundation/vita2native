@@ -234,7 +234,7 @@ void load_metadata(GameEntry &entry)
         };
 
         entry.art = pick_single("art", "hero");
-        entry.boxart = pick_single("boxart", "cover");
+        entry.icon = pick_single("icon", "boxart");
         append_media_field(entry.dir, find_key(root, "media", "game", "screenshots"),
                            entry.screenshots);
     } catch (const std::exception &err) {

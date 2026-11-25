@@ -23,8 +23,8 @@ void State::refresh_games()
         moving = false;
         motion_from = 0.0f;
         if (home_focus == HomeFocus::RecentGames) {
-            home_focus = HomeFocus::Import;
-            previous_home_focus = HomeFocus::Import;
+            home_focus = HomeFocus::WebUI;
+            previous_home_focus = HomeFocus::WebUI;
         }
     } else {
         selected = std::clamp(selected, 0, rc - 1);
@@ -41,10 +41,9 @@ void State::refresh_games()
 
 void State::change_screen(Screen next)
 {
-    if (next != Screen::Import)
+    if (next != Screen::WebUI)
         stop_web_server();
     screen = next;
-    import_focus = ImportFocus::Local;
     message.clear();
     screen_start = SDL_GetTicks();
 }
@@ -152,79 +151,6 @@ bool State::animating() const
            (confirm_start && now - confirm_start < confirm_duration);
 }
 
-void State::scan()
-{
-    items.clear();
-    std::error_code ec;
-    if (dir.has_parent_path() && dir.parent_path() != dir)
-        items.push_back({ dir.parent_path(), true });
-    std::vector<PickerItem> found;
-    fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end;
-    while (!ec && it != end) {
-        auto p = it->path();
-        std::error_code e;
-        bool d = it->is_directory(e);
-        bool file = it->is_regular_file(e);
-        std::string ext = p.extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(),
-                       [](unsigned char c) { return (char)std::tolower(c); });
-        if (d || (file &&
-                  (pick_kind == PickerKind::Package ? ext == ".pkg" : p.filename() == "work.bin")))
-            found.push_back({ p, d });
-        it.increment(ec);
-    }
-    std::sort(found.begin(), found.end(), [](const PickerItem &a, const PickerItem &b) {
-        return a.dir != b.dir ? a.dir > b.dir
-                              : a.path.filename().string() < b.path.filename().string();
-    });
-    items.insert(items.end(), found.begin(), found.end());
-    pick_index = scroll = 0;
-    if (ec)
-        show_toast("Could not read this directory.", ToastKind::Error);
-}
-
-void State::browse(PickerKind kind)
-{
-    pick_kind = kind;
-    picker = true;
-    message.clear();
-    screen_start = SDL_GetTicks();
-    scan();
-}
-
-void State::handle_picker(Action action)
-{
-    if (action == Action::Back) {
-        picker = false;
-        screen_start = SDL_GetTicks();
-        return;
-    }
-    if (action == Action::Up && !items.empty())
-        pick_index = std::max(0, pick_index - 1);
-    if (action == Action::Down && !items.empty())
-        pick_index = std::min(static_cast<int>(items.size()) - 1, pick_index + 1);
-    if (action == Action::Select && !items.empty()) {
-        const auto &item = items[pick_index];
-        if (item.dir) {
-            dir = item.path;
-            scan();
-        } else if (pick_kind == PickerKind::Package) {
-            pkg = item.path;
-            browse(PickerKind::License);
-        } else {
-            license = item.path;
-            picker = false;
-            screen_start = SDL_GetTicks();
-            message.clear();
-            start_import();
-        }
-    }
-    if (pick_index < scroll)
-        scroll = pick_index;
-    if (pick_index >= scroll + picker_page_size)
-        scroll = pick_index - picker_page_size + 1;
-}
-
 void State::handle_home(Action action)
 {
     const int rc = recent_count();
@@ -238,17 +164,17 @@ void State::handle_home(Action action)
     else if (home_focus != HomeFocus::RecentGames && action == Action::Left)
         set_home_focus(HomeFocus::AllGames);
     else if (home_focus != HomeFocus::RecentGames && action == Action::Right)
-        set_home_focus(HomeFocus::Import);
+        set_home_focus(HomeFocus::WebUI);
     else if (action == Action::Select) {
         if (home_focus == HomeFocus::AllGames) {
             moving = false;
             motion_from = 0.0f;
             all_focus = games.empty() ? 0 : std::clamp(selected, 0, static_cast<int>(games.size()) - 1);
             change_screen(Screen::AllGames);
-        } else if (home_focus == HomeFocus::Import) {
+        } else if (home_focus == HomeFocus::WebUI) {
             moving = false;
             motion_from = 0.0f;
-            change_screen(Screen::Import);
+            change_screen(Screen::WebUI);
         } else if (rc > 0) {
             open_game_info(selected, Screen::Home);
         }
@@ -279,25 +205,10 @@ void State::handle_all_games(Action action)
     }
 }
 
-void State::handle_import(Action action)
+void State::handle_web_ui(Action action)
 {
-    if (action == Action::Left) {
-        import_focus = ImportFocus::Local;
-    } else if (action == Action::Right) {
-        import_focus = ImportFocus::Web;
-    } else if (action == Action::Select) {
-        if (import_focus == ImportFocus::Local) {
-            if (import_running()) {
-                show_toast("Import is running; please wait.", ToastKind::Warning);
-                return;
-            }
-            pkg.clear();
-            license.clear();
-            browse(PickerKind::Package);
-        } else {
-            toggle_web_server();
-        }
-    }
+    if (action == Action::Select)
+        toggle_web_server();
 }
 
 void State::handle_game_info(Action action)
@@ -358,10 +269,6 @@ void State::action(Action action)
         }
         return;
     }
-    if (picker) {
-        handle_picker(action);
-        return;
-    }
     if (action == Action::Back) {
         if (screen == Screen::Home) {
             set_confirm(ConfirmKind::Quit);
@@ -375,7 +282,7 @@ void State::action(Action action)
         } else {
             Screen from = screen;
             change_screen(Screen::Home);
-            home_focus = from == Screen::AllGames ? HomeFocus::AllGames : HomeFocus::Import;
+            home_focus = from == Screen::AllGames ? HomeFocus::AllGames : HomeFocus::WebUI;
             previous_home_focus = home_focus;
             focus_start = 0;
         }
@@ -388,8 +295,8 @@ void State::action(Action action)
     case Screen::AllGames:
         handle_all_games(action);
         break;
-    case Screen::Import:
-        handle_import(action);
+    case Screen::WebUI:
+        handle_web_ui(action);
         break;
     case Screen::GameInfo:
         handle_game_info(action);

@@ -42,6 +42,62 @@ std::string trim_ascii(const std::string &s)
     return s.substr(start, end - start);
 }
 
+std::string url_decode(const std::string &s)
+{
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size() &&
+            std::isxdigit(static_cast<unsigned char>(s[i + 1])) &&
+            std::isxdigit(static_cast<unsigned char>(s[i + 2]))) {
+            const char hex[3] = { s[i + 1], s[i + 2], '\0' };
+            out.push_back(static_cast<char>(std::strtol(hex, nullptr, 16)));
+            i += 2;
+        } else if (s[i] == '+') {
+            out.push_back(' ');
+        } else {
+            out.push_back(s[i]);
+        }
+    }
+    return out;
+}
+
+std::unordered_map<std::string, std::string> parse_query(const std::string &query)
+{
+    std::unordered_map<std::string, std::string> out;
+    size_t pos = 0;
+    while (pos < query.size()) {
+        const size_t amp = query.find('&', pos);
+        const std::string pair =
+            query.substr(pos, amp == std::string::npos ? query.size() - pos : amp - pos);
+        const size_t eq = pair.find('=');
+        if (eq != std::string::npos)
+            out[url_decode(pair.substr(0, eq))] = url_decode(pair.substr(eq + 1));
+        else if (!pair.empty())
+            out[url_decode(pair)] = {};
+        if (amp == std::string::npos)
+            break;
+        pos = amp + 1;
+    }
+    return out;
+}
+
+const char *mime_type_for_path(const std::filesystem::path &p)
+{
+    const std::string ext = to_lower_ascii(p.extension().string());
+    if (ext == ".png")
+        return "image/png";
+    if (ext == ".jpg" || ext == ".jpeg")
+        return "image/jpeg";
+    if (ext == ".webp")
+        return "image/webp";
+    if (ext == ".svg")
+        return "image/svg+xml";
+    if (ext == ".gif")
+        return "image/gif";
+    return "application/octet-stream";
+}
+
 std::string detect_lan_ipv4()
 {
     struct ifaddrs *ifaddr = nullptr;
@@ -115,6 +171,41 @@ void send_response(int fd, int status, const char *status_text, const char *cont
         send_all(fd, header, static_cast<size_t>(n));
     if (body && body_len > 0)
         send_all(fd, body, body_len);
+}
+
+void send_file_response(int fd, const std::filesystem::path &path)
+{
+    std::FILE *fp = std::fopen(path.c_str(), "rb");
+    if (!fp) {
+        send_response(fd, 404, "Not Found", "text/plain; charset=utf-8", "Not found", 9);
+        return;
+    }
+    std::fseek(fp, 0, SEEK_END);
+    const long size = std::ftell(fp);
+    std::fseek(fp, 0, SEEK_SET);
+    if (size < 0) {
+        std::fclose(fp);
+        send_response(fd, 500, "Internal Server Error", "text/plain; charset=utf-8", "Error", 5);
+        return;
+    }
+    char header[512];
+    const int n = std::snprintf(
+        header, sizeof(header),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %ld\r\n"
+        "Cache-Control: no-store\r\n"
+        "Connection: close\r\n\r\n",
+        mime_type_for_path(path), size);
+    if (n > 0 && send_all(fd, header, static_cast<size_t>(n))) {
+        char buf[65536];
+        size_t r = 0;
+        while ((r = std::fread(buf, 1, sizeof(buf), fp)) > 0) {
+            if (!send_all(fd, buf, r))
+                break;
+        }
+    }
+    std::fclose(fp);
 }
 
 void send_json_error(int fd, int status, const char *status_text, const std::string &msg)
@@ -228,9 +319,9 @@ class SocketReader {
         return true;
     }
 
-    // Streams bytes to `file` until `delim` is encountered. Consumes `delim`.
-    bool stream_until(const std::string &delim, std::FILE *file, size_t &remaining,
-                      size_t &bytes_written)
+    // Streams bytes to `file` or `text_out` until `delim` is encountered. Consumes `delim`.
+    bool stream_until(const std::string &delim, std::FILE *file, std::string *text_out,
+                      size_t max_text_bytes, size_t &remaining, size_t &bytes_written)
     {
         bytes_written = 0;
         while (true) {
@@ -244,6 +335,11 @@ class SocketReader {
                     if (std::fwrite(&buf_[pos_], 1, len, file) != len)
                         return false;
                     bytes_written += len;
+                } else if (text_out && len > 0) {
+                    if (text_out->size() + len > max_text_bytes)
+                        return false;
+                    text_out->append(buf_, pos_, len);
+                    bytes_written += len;
                 }
                 pos_ = found + delim.size();
                 remaining -= (len + delim.size());
@@ -256,6 +352,11 @@ class SocketReader {
                 if (file && safe_len > 0) {
                     if (std::fwrite(&buf_[pos_], 1, safe_len, file) != safe_len)
                         return false;
+                    bytes_written += safe_len;
+                } else if (text_out && safe_len > 0) {
+                    if (text_out->size() + safe_len > max_text_bytes)
+                        return false;
+                    text_out->append(buf_, pos_, safe_len);
                     bytes_written += safe_len;
                 }
                 pos_ += safe_len;
@@ -274,6 +375,117 @@ class SocketReader {
     std::string buf_;
     size_t pos_ = 0;
 };
+
+bool parse_multipart(int client_fd, const std::atomic<bool> &stop_flag,
+                     const std::string &leftover, size_t content_length,
+                     const std::string &boundary, const std::filesystem::path &staging_root,
+                     MultipartForm &form, std::string &error_out)
+{
+    std::error_code ec;
+    std::filesystem::create_directories(staging_root, ec);
+    if (ec) {
+        error_out = "Could not prepare upload staging directory.";
+        return false;
+    }
+    std::string tmpl = (staging_root / ".v2n-web-XXXXXX").string();
+    std::vector<char> tmpl_buf(tmpl.begin(), tmpl.end());
+    tmpl_buf.push_back('\0');
+    char *dir_ptr = mkdtemp(tmpl_buf.data());
+    if (!dir_ptr) {
+        error_out = "Could not create temporary upload directory.";
+        return false;
+    }
+    form.upload_dir = dir_ptr;
+    auto cleanup = [&] {
+        std::error_code rm_ec;
+        std::filesystem::remove_all(form.upload_dir, rm_ec);
+        form.upload_dir.clear();
+    };
+
+    SocketReader reader(client_fd, stop_flag, leftover);
+    size_t remaining = content_length;
+    const std::string first_boundary = "--" + boundary;
+    const std::string next_boundary = "\r\n--" + boundary;
+
+    std::string preamble;
+    if (!reader.read_until(first_boundary, preamble, 4096, remaining)) {
+        cleanup();
+        error_out = "Malformed multipart body.";
+        return false;
+    }
+
+    int file_counter = 0;
+    while (remaining > 0 && !stop_flag.load()) {
+        std::string marker;
+        if (!reader.read_exact(2, marker, remaining)) {
+            cleanup();
+            error_out = "Truncated multipart stream.";
+            return false;
+        }
+        if (marker == "--")
+            break;
+        if (marker != "\r\n") {
+            cleanup();
+            error_out = "Invalid multipart boundary suffix.";
+            return false;
+        }
+
+        std::string part_headers;
+        if (!reader.read_until("\r\n\r\n", part_headers, 16384, remaining)) {
+            cleanup();
+            error_out = "Invalid multipart part headers.";
+            return false;
+        }
+
+        std::string field_name;
+        std::string file_name;
+        size_t hpos = 0;
+        while (hpos < part_headers.size()) {
+            const size_t hend = part_headers.find("\r\n", hpos);
+            const std::string hline = part_headers.substr(
+                hpos, hend == std::string::npos ? part_headers.size() - hpos : hend - hpos);
+            hpos = hend == std::string::npos ? part_headers.size() : hend + 2;
+            const size_t cpos = hline.find(':');
+            if (cpos == std::string::npos)
+                continue;
+            if (to_lower_ascii(trim_ascii(hline.substr(0, cpos))) == "content-disposition") {
+                const std::string val = hline.substr(cpos + 1);
+                field_name = extract_param(val, "name");
+                file_name = extract_param(val, "filename");
+            }
+        }
+
+        if (!file_name.empty()) {
+            const std::string base = std::filesystem::path(file_name).filename().string();
+            const std::string ext = std::filesystem::path(base).extension().string();
+            const std::filesystem::path out_path =
+                form.upload_dir / ("upload_" + std::to_string(file_counter++) + ext);
+            std::FILE *out_file = std::fopen(out_path.c_str(), "wb");
+            size_t written = 0;
+            const bool ok =
+                out_file && reader.stream_until(next_boundary, out_file, nullptr, 0, remaining, written);
+            if (out_file)
+                std::fclose(out_file);
+            if (!ok) {
+                cleanup();
+                error_out = "Failed reading uploaded file.";
+                return false;
+            }
+            if (written > 0)
+                form.files[field_name].push_back({ out_path, base });
+        } else {
+            std::string val;
+            size_t written = 0;
+            if (!reader.stream_until(next_boundary, nullptr, &val, 65536, remaining, written)) {
+                cleanup();
+                error_out = "Failed reading form field.";
+                return false;
+            }
+            form.fields[field_name] = std::move(val);
+        }
+    }
+    return true;
+}
 } // namespace
 
 std::string json_escape(const std::string &input)
@@ -476,9 +688,12 @@ void WebServer::handle_client(int client_fd)
     }
     const std::string method = req_line.substr(0, sp1);
     std::string path = req_line.substr(sp1 + 1, sp2 - sp1 - 1);
+    std::string query_str;
     const size_t q = path.find('?');
-    if (q != std::string::npos)
+    if (q != std::string::npos) {
+        query_str = path.substr(q + 1);
         path.resize(q);
+    }
 
     size_t content_length = 0;
     bool has_content_length = false;
@@ -521,32 +736,70 @@ void WebServer::handle_client(int client_fd)
                 callbacks_.status_json ? callbacks_.status_json() : "{\"busy\":false,\"history\":[]}";
             send_response(client_fd, 200, "OK", "application/json; charset=utf-8", json.data(),
                           json.size());
+        } else if (path == "/api/games") {
+            const std::string json = callbacks_.games_json ? callbacks_.games_json() : "[]";
+            send_response(client_fd, 200, "OK", "application/json; charset=utf-8", json.data(),
+                          json.size());
+        } else if (path.rfind("/api/games/", 0) == 0 && path.size() > 17 &&
+                   path.compare(path.size() - 6, 6, "/asset") == 0) {
+            const std::string title_id = url_decode(path.substr(11, path.size() - 17));
+            const auto params = parse_query(query_str);
+            const auto kind_it = params.find("kind");
+            const auto name_it = params.find("name");
+            std::filesystem::path asset_path;
+            if (callbacks_.game_asset && kind_it != params.end() &&
+                callbacks_.game_asset(title_id, kind_it->second,
+                                      name_it != params.end() ? name_it->second : std::string{},
+                                      asset_path)) {
+                send_file_response(client_fd, asset_path);
+            } else {
+                send_json_error(client_fd, 404, "Not Found", "Asset not found.");
+            }
         } else {
             send_json_error(client_fd, 404, "Not Found", "Not found.");
         }
         return;
     }
 
-    if (method != "POST" || path != "/api/import") {
-        send_json_error(client_fd, 405, "Method Not Allowed", "Unsupported method or path.");
+    if (method == "DELETE" && path.rfind("/api/games/", 0) == 0) {
+        const std::string title_id = url_decode(path.substr(11));
+        std::string err;
+        if (callbacks_.delete_game && callbacks_.delete_game(title_id, err)) {
+            static constexpr char kOk[] = "{\"ok\":true}";
+            send_response(client_fd, 200, "OK", "application/json; charset=utf-8", kOk,
+                          sizeof(kOk) - 1);
+        } else {
+            send_json_error(client_fd, 400, "Bad Request",
+                            err.empty() ? "Could not delete game." : err);
+        }
         return;
     }
 
-    if (callbacks_.is_busy && callbacks_.is_busy()) {
+    if (method != "POST") {
+        send_json_error(client_fd, 405, "Method Not Allowed", "Unsupported method.");
+        return;
+    }
+
+    const bool is_import = (path == "/api/import");
+    const bool is_meta = (path.rfind("/api/games/", 0) == 0 && path.size() > 16 &&
+                          path.compare(path.size() - 5, 5, "/meta") == 0);
+    if (!is_import && !is_meta) {
+        send_json_error(client_fd, 404, "Not Found", "Not found.");
+        return;
+    }
+
+    if (is_import && callbacks_.is_busy && callbacks_.is_busy()) {
         send_json_error(client_fd, 409, "Conflict", "An import is already in progress.");
         return;
     }
-
     if (!has_content_length || content_length == 0) {
         send_json_error(client_fd, 411, "Length Required", "Content-Length is required.");
         return;
     }
-
     if (to_lower_ascii(content_type).find("multipart/form-data") == std::string::npos) {
         send_json_error(client_fd, 400, "Bad Request", "Expected multipart/form-data.");
         return;
     }
-
     const std::string boundary = extract_param(content_type, "boundary");
     if (boundary.empty()) {
         send_json_error(client_fd, 400, "Bad Request", "Missing multipart boundary.");
@@ -559,133 +812,63 @@ void WebServer::handle_client(int client_fd)
             return;
     }
 
-    std::error_code ec;
-    std::filesystem::create_directories(staging_root_, ec);
-    if (ec) {
-        send_json_error(client_fd, 500, "Internal Server Error",
-                        "Could not prepare upload staging directory.");
+    MultipartForm form;
+    std::string parse_err;
+    if (!parse_multipart(client_fd, stop_requested_, leftover, content_length, boundary,
+                         staging_root_, form, parse_err)) {
+        send_json_error(client_fd, 400, "Bad Request", parse_err);
         return;
     }
 
-    std::string tmpl = (staging_root_ / ".v2n-web-XXXXXX").string();
-    std::vector<char> tmpl_buf(tmpl.begin(), tmpl.end());
-    tmpl_buf.push_back('\0');
-    char *dir_ptr = mkdtemp(tmpl_buf.data());
-    if (!dir_ptr) {
-        send_json_error(client_fd, 500, "Internal Server Error",
-                        "Could not create temporary upload directory.");
-        return;
-    }
-    const std::filesystem::path upload_dir(dir_ptr);
-    auto cleanup_upload_dir = [&] {
-        std::error_code rm_ec;
-        std::filesystem::remove_all(upload_dir, rm_ec);
+    auto cleanup_form = [&] {
+        if (!form.upload_dir.empty()) {
+            std::error_code rm_ec;
+            std::filesystem::remove_all(form.upload_dir, rm_ec);
+        }
     };
 
-    const std::filesystem::path pkg_path = upload_dir / "package.pkg";
-    const std::filesystem::path lic_path = upload_dir / "work.bin";
-    bool has_pkg = false;
-    bool has_lic = false;
-    std::string pkg_display_name;
+    if (is_import) {
+        const auto pkg_it = form.files.find("pkg");
+        auto lic_it = form.files.find("license");
+        if (lic_it == form.files.end())
+            lic_it = form.files.find("work_bin");
 
-    SocketReader reader(client_fd, stop_requested_, leftover);
-    size_t remaining = content_length;
+        if (pkg_it == form.files.end() || pkg_it->second.empty() || lic_it == form.files.end() ||
+            lic_it->second.empty()) {
+            cleanup_form();
+            send_json_error(client_fd, 400, "Bad Request",
+                            "Both a .pkg file and work.bin file are required.");
+            return;
+        }
+        const auto &pkg_file = pkg_it->second.front();
+        const auto &lic_file = lic_it->second.front();
+        const std::string display_name =
+            pkg_file.filename.empty() ? "Web package" : pkg_file.filename;
 
-    const std::string first_boundary = "--" + boundary;
-    const std::string next_boundary = "\r\n--" + boundary;
-
-    std::string preamble;
-    if (!reader.read_until(first_boundary, preamble, 4096, remaining)) {
-        cleanup_upload_dir();
-        send_json_error(client_fd, 400, "Bad Request", "Malformed multipart body.");
+        if (!callbacks_.submit_import ||
+            !callbacks_.submit_import(pkg_file.path, lic_file.path, form.upload_dir, display_name)) {
+            cleanup_form();
+            send_json_error(client_fd, 409, "Conflict", "An import is already in progress.");
+            return;
+        }
+        static constexpr char kAccepted[] = "{\"ok\":true}";
+        send_response(client_fd, 202, "Accepted", "application/json; charset=utf-8", kAccepted,
+                      sizeof(kAccepted) - 1);
         return;
     }
 
-    while (remaining > 0 && !stop_requested_.load()) {
-        std::string marker;
-        if (!reader.read_exact(2, marker, remaining)) {
-            cleanup_upload_dir();
-            send_json_error(client_fd, 400, "Bad Request", "Truncated multipart stream.");
-            return;
-        }
-        if (marker == "--") {
-            break; // End of multipart stream.
-        }
-        if (marker != "\r\n") {
-            cleanup_upload_dir();
-            send_json_error(client_fd, 400, "Bad Request", "Invalid multipart boundary suffix.");
-            return;
-        }
-
-        std::string part_headers;
-        if (!reader.read_until("\r\n\r\n", part_headers, 16384, remaining)) {
-            cleanup_upload_dir();
-            send_json_error(client_fd, 400, "Bad Request", "Invalid multipart part headers.");
-            return;
-        }
-
-        std::string field_name;
-        std::string file_name;
-        size_t hpos = 0;
-        while (hpos < part_headers.size()) {
-            const size_t hend = part_headers.find("\r\n", hpos);
-            const std::string hline = part_headers.substr(
-                hpos, hend == std::string::npos ? part_headers.size() - hpos : hend - hpos);
-            hpos = hend == std::string::npos ? part_headers.size() : hend + 2;
-            const size_t cpos = hline.find(':');
-            if (cpos == std::string::npos)
-                continue;
-            if (to_lower_ascii(trim_ascii(hline.substr(0, cpos))) == "content-disposition") {
-                const std::string val = hline.substr(cpos + 1);
-                field_name = extract_param(val, "name");
-                file_name = extract_param(val, "filename");
-            }
-        }
-
-        std::FILE *out_file = nullptr;
-        if (field_name == "pkg") {
-            out_file = std::fopen(pkg_path.c_str(), "wb");
-            if (!file_name.empty())
-                pkg_display_name = std::filesystem::path(file_name).filename().string();
-        } else if (field_name == "license" || field_name == "work_bin") {
-            out_file = std::fopen(lic_path.c_str(), "wb");
-        }
-
-        size_t written = 0;
-        const bool ok = reader.stream_until(next_boundary, out_file, remaining, written);
-        if (out_file)
-            std::fclose(out_file);
-        if (!ok) {
-            cleanup_upload_dir();
-            send_json_error(client_fd, 400, "Bad Request", "Failed reading multipart payload.");
-            return;
-        }
-        if (field_name == "pkg" && written > 0)
-            has_pkg = true;
-        if ((field_name == "license" || field_name == "work_bin") && written > 0)
-            has_lic = true;
-    }
-
-    if (!has_pkg || !has_lic) {
-        cleanup_upload_dir();
+    const std::string title_id = url_decode(path.substr(11, path.size() - 16));
+    std::string meta_err;
+    const bool ok =
+        callbacks_.update_game_meta && callbacks_.update_game_meta(title_id, form, meta_err);
+    cleanup_form();
+    if (!ok) {
         send_json_error(client_fd, 400, "Bad Request",
-                        "Both a .pkg file and work.bin file are required.");
+                        meta_err.empty() ? "Could not update metadata." : meta_err);
         return;
     }
-
-    if (pkg_display_name.empty())
-        pkg_display_name = "Web package";
-
-    if (!callbacks_.submit_import ||
-        !callbacks_.submit_import(pkg_path, lic_path, upload_dir, std::move(pkg_display_name))) {
-        cleanup_upload_dir();
-        send_json_error(client_fd, 409, "Conflict", "An import is already in progress.");
-        return;
-    }
-
-    static constexpr char kAccepted[] = "{\"ok\":true}";
-    send_response(client_fd, 202, "Accepted", "application/json; charset=utf-8", kAccepted,
-                  sizeof(kAccepted) - 1);
+    static constexpr char kOk[] = "{\"ok\":true}";
+    send_response(client_fd, 200, "OK", "application/json; charset=utf-8", kOk, sizeof(kOk) - 1);
 }
 
 } // namespace launcher

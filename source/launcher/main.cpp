@@ -25,8 +25,8 @@ void configure_snapshot(State &state)
 {
     state.start = SDL_GetTicks() - 2000;
     const char *screen = getenv("V2N_LAUNCHER_SCREEN");
-    if (screen && strcmp(screen, "import") == 0)
-        state.screen = Screen::Import;
+    if (screen && (strcmp(screen, "webui") == 0 || strcmp(screen, "import") == 0))
+        state.screen = Screen::WebUI;
     if (screen && strcmp(screen, "all") == 0)
         state.screen = Screen::AllGames;
     if (screen && strcmp(screen, "game-info") == 0 && !state.games.empty())
@@ -46,10 +46,6 @@ void configure_snapshot(State &state)
     }
     if (screen && strcmp(screen, "home-focus") == 0)
         state.home_focus = state.previous_home_focus = HomeFocus::AllGames;
-    if (screen && strcmp(screen, "picker") == 0) {
-        state.screen = Screen::Import;
-        state.browse(PickerKind::Package);
-    }
     state.screen_start = SDL_GetTicks() - 1000;
     if (screen && strcmp(screen, "motion-right") == 0) {
         state.move_game(1);
