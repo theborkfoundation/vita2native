@@ -1,37 +1,15 @@
-#define GL_SILENCE_DEPRECATION
 #include <SDL.h>
 
 #include "input.h"
 #include "state.h"
 #include "ui.h"
-#ifdef __APPLE__
-#include <OpenGL/gl3.h>
-#else
-#include <GLES2/gl2.h>
-#endif
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <vector>
 
 namespace
 {
 using namespace launcher;
-
-void configure_context()
-{
-#ifdef __APPLE__
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
-#else
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
-#endif
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
-}
 
 // Snapshot mode makes it possible to inspect each screen without input devices.
 void configure_snapshot(State &state)
@@ -59,23 +37,35 @@ void configure_snapshot(State &state)
     }
 }
 
-void save_snapshot(const char *path, int width, int height)
+void save_snapshot(const char *path, const uint8_t *xrgb_pixels, int width, int height)
 {
-    std::vector<unsigned char> pixels(static_cast<size_t>(width) * height * 4);
-    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
     FILE *file = fopen(path, "wb");
     if (!file) {
         fprintf(stderr, "Could not save screenshot\n");
         return;
     }
     fprintf(file, "P6\n%d %d\n255\n", width, height);
-    for (int y = height - 1; y >= 0; --y)
-        for (int x = 0; x < width; ++x)
-            fwrite(&pixels[(static_cast<size_t>(y) * width + x) * 4], 1, 3, file);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const uint8_t *px = &xrgb_pixels[(static_cast<size_t>(y) * width + x) * 4];
+            const uint8_t rgb_px[3] = { px[2], px[1], px[0] };
+            fwrite(rgb_px, 1, 3, file);
+        }
+    }
     fclose(file);
 }
 
-void run(SDL_Window *window, const ConfigResult &settings, const std::string &warning)
+void present(SDL_Renderer *renderer, SDL_Texture *texture, bool upload)
+{
+    if (upload)
+        SDL_UpdateTexture(texture, nullptr, ui::framebuffer(), screen_width * 4);
+    SDL_RenderClear(renderer);
+    SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+    SDL_RenderPresent(renderer);
+}
+
+void run(SDL_Renderer *renderer, SDL_Texture *texture, const ConfigResult &settings,
+         const std::string &warning)
 {
     State state(settings.config, settings.error);
     state.message = warning;
@@ -84,6 +74,7 @@ void run(SDL_Window *window, const ConfigResult &settings, const std::string &wa
         configure_snapshot(state);
     Input input;
     bool dirty = true;
+    bool need_present = true;
     bool was_splash = true;
     bool was_animating = false;
     while (state.running) {
@@ -94,7 +85,7 @@ void run(SDL_Window *window, const ConfigResult &settings, const std::string &wa
                 (event.window.event == SDL_WINDOWEVENT_EXPOSED ||
                  event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
                  event.window.event == SDL_WINDOWEVENT_SHOWN))
-                dirty = true;
+                need_present = true;
             if (event.type == SDL_QUIT && !state.import_running())
                 state.running = false;
             input.handle(event, state);
@@ -109,24 +100,24 @@ void run(SDL_Window *window, const ConfigResult &settings, const std::string &wa
             dirty = true;
         was_splash = splash;
         was_animating = animating;
-        if (!dirty) {
-            SDL_Delay(16);
-            continue;
+
+        if (dirty) {
+            dirty = false;
+            ui::sync(state);
+            const bool flushed = ui::render(capture != nullptr);
+            if (capture) {
+                save_snapshot(capture, ui::framebuffer(), screen_width, screen_height);
+                state.running = false;
+            }
+            if (flushed)
+                present(renderer, texture, true);
+            else if (need_present)
+                present(renderer, texture, false);
+            need_present = false;
+        } else if (need_present) {
+            need_present = false;
+            present(renderer, texture, false);
         }
-        dirty = false;
-        int width, height;
-        SDL_GL_GetDrawableSize(window, &width, &height);
-        glViewport(0, 0, width, height);
-        glClearColor(0, 0, 0, 1);
-        glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-        ui::begin_frame(width);
-        ui::draw(state);
-        ui::end_frame();
-        if (capture) {
-            save_snapshot(capture, width, height);
-            state.running = false;
-        }
-        SDL_GL_SwapWindow(window);
         SDL_Delay(16);
     }
 }
@@ -142,34 +133,47 @@ int main(int, char **)
         fprintf(stderr, "SDL: %s\n", SDL_GetError());
         return 1;
     }
-    configure_context();
     SDL_Window *window = SDL_CreateWindow(
         "V2N Launcher", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, screen_width, screen_height,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI);
+        SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) {
         fprintf(stderr, "SDL window: %s\n", SDL_GetError());
         SDL_Quit();
         return 1;
     }
-    SDL_GLContext context = SDL_GL_CreateContext(window);
-    if (!context) {
-        fprintf(stderr, "SDL GL: %s\n", SDL_GetError());
+    SDL_Renderer *renderer =
+        SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if (!renderer)
+        renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
+    if (!renderer) {
+        fprintf(stderr, "SDL renderer: %s\n", SDL_GetError());
         SDL_DestroyWindow(window);
         SDL_Quit();
         return 1;
     }
-    SDL_GL_SetSwapInterval(1);
+    SDL_RenderSetLogicalSize(renderer, screen_width, screen_height);
+    SDL_Texture *texture =
+        SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
+                          screen_width, screen_height);
+    if (!texture) {
+        fprintf(stderr, "SDL texture: %s\n", SDL_GetError());
+        SDL_DestroyRenderer(renderer);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 1;
+    }
     int result = 0;
     std::string logo_warning;
     if (!launcher::ui::initialize(settings.error.empty() ? settings.config.logo_path :
                                                           std::filesystem::path{}, logo_warning)) {
-        fprintf(stderr, "Failed to initialize NanoVG or font\n");
+        fprintf(stderr, "Failed to initialize LVGL or font\n");
         result = 1;
     } else {
-        run(window, settings, logo_warning);
+        run(renderer, texture, settings, logo_warning);
         launcher::ui::shutdown();
     }
-    SDL_GL_DeleteContext(context);
+    SDL_DestroyTexture(texture);
+    SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
     return result;

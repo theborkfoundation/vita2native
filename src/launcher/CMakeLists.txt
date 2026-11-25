@@ -7,21 +7,31 @@ endif()
 # Pinned submodules keep native and cross builds reproducible and offline.
 set(TOMLPLUSPLUS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../external/tomlplusplus")
 set(LUNASVG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../external/lunasvg")
+set(LVGL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../external/lvgl")
+set(STB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../external/Vita3K/external/stb")
 if(NOT EXISTS "${TOMLPLUSPLUS_DIR}/include/toml++/toml.hpp" OR
-   NOT EXISTS "${LUNASVG_DIR}/CMakeLists.txt")
+   NOT EXISTS "${LUNASVG_DIR}/CMakeLists.txt" OR
+   NOT EXISTS "${LVGL_DIR}/CMakeLists.txt" OR
+   NOT EXISTS "${STB_DIR}/stb_image.h")
     message(FATAL_ERROR "Launcher dependencies missing; run git submodule update --init --recursive")
 endif()
 set(LUNASVG_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory("${LUNASVG_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/lunasvg" EXCLUDE_FROM_ALL)
+
+set(LV_BUILD_CONF_PATH "${CMAKE_CURRENT_SOURCE_DIR}/lv_conf.h" CACHE PATH "" FORCE)
+set(CONFIG_LV_BUILD_DEMOS OFF CACHE BOOL "" FORCE)
+set(CONFIG_LV_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(CONFIG_LV_USE_THORVG_INTERNAL OFF CACHE BOOL "" FORCE)
+add_subdirectory("${LVGL_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/lvgl" EXCLUDE_FROM_ALL)
+if(NOT CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+    target_compile_options(lvgl PRIVATE -w)
+endif()
+
 # Link the shared package extraction pipeline into the launcher.
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../package"
                  "${CMAKE_CURRENT_BINARY_DIR}/package")
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 find_package(Threads REQUIRED)
-set(NANOVG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../external/nanovg/src")
-if(NOT EXISTS "${NANOVG_DIR}/nanovg.c")
-    message(FATAL_ERROR "NanoVG submodule missing; run git submodule update --init --recursive")
-endif()
 function(embed_asset file name)
     set(header "${CMAKE_CURRENT_BINARY_DIR}/${name}.h")
     add_custom_command(OUTPUT "${header}"
@@ -43,17 +53,12 @@ add_executable(v2n-launcher
     input.cpp
     import.cpp
     ui.cpp
-    nanovg_backend.cpp
-    "${NANOVG_DIR}/nanovg.c"
+    stb_impl.c
     ${EMBEDDED_ASSETS})
+set_source_files_properties(stb_impl.c PROPERTIES COMPILE_OPTIONS "-w")
 target_compile_features(v2n-launcher PRIVATE cxx_std_17)
-target_include_directories(v2n-launcher PRIVATE ${SDL2_INCLUDE_DIRS} "${CMAKE_CURRENT_BINARY_DIR}" "${NANOVG_DIR}")
-target_include_directories(v2n-launcher SYSTEM PRIVATE "${TOMLPLUSPLUS_DIR}/include")
+target_include_directories(v2n-launcher PRIVATE ${SDL2_INCLUDE_DIRS} "${CMAKE_CURRENT_BINARY_DIR}")
+target_include_directories(v2n-launcher SYSTEM PRIVATE "${TOMLPLUSPLUS_DIR}/include" "${STB_DIR}")
 target_link_directories(v2n-launcher PRIVATE ${SDL2_LIBRARY_DIRS})
-target_link_libraries(v2n-launcher PRIVATE ${SDL2_LIBRARIES} v2n_extract_core Threads::Threads lunasvg::lunasvg)
-if(APPLE)
-    target_link_libraries(v2n-launcher PRIVATE "-framework OpenGL")
-else()
-    target_link_libraries(v2n-launcher PRIVATE GLESv2 m)
-endif()
+target_link_libraries(v2n-launcher PRIVATE ${SDL2_LIBRARIES} v2n_extract_core Threads::Threads lunasvg::lunasvg lvgl::lvgl)
 target_compile_options(v2n-launcher PRIVATE -Wall -Wextra -Wno-unused-function)

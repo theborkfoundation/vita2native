@@ -1,16 +1,16 @@
 # V2N Launcher
 
-A 640×480 SDL2 and NanoVG launcher with a mock library and a working package import flow.
+A 640×480 SDL2 and LVGL launcher with a mock library and a working package import flow.
 The Recent Games and All Games views use placeholder entries; games are not scanned or started.
 The startup progress is simulated.
 
 ## Build
 
 Initialize the submodules with `git submodule update --init --recursive`.
-The launcher needs an OpenGL ES 2.0 context on Linux (OpenGL 3 on macOS).
+The launcher renders with LVGL's software renderer and presents through an SDL2 renderer.
 
 The primary target is 64-bit ARM Linux (aarch64). On the target, install SDL2,
-OpenGL ES 2, OpenSSL 3 and zlib development files (including the static
+OpenSSL 3 and zlib development files (including the static
 libcrypto archive), pkg-config, CMake 3.18+, a C/C++ compiler and Python 3:
 
 ```sh
@@ -22,8 +22,7 @@ The resulting executable is `build/launcher-arm64/v2n-launcher`.
 
 ## Native macOS build
 
-`CMakePresets.json` also has a `macos` preset, handy for working on the UI
-because it renders with real GL instead of the test beds' software rasteriser.
+`CMakePresets.json` also has a `macos` preset, handy for working on the UI locally.
 SDL2 and OpenSSL 3 must be installed (`brew install sdl2 openssl@3`):
 
 ```sh
@@ -139,6 +138,6 @@ mappings vary; a platform SDL game-controller mapping may be needed.
 - `input.cpp` maps keyboard, controller and joystick events to navigation actions.
 - `import.cpp` starts the import thread and receives its channel messages.
 - `../package/` implements the package, PFS and SELF extraction pipeline.
-- `ui.cpp` draws the screens with NanoVG; `library.h` holds the mock games.
+- `ui.cpp` builds and updates the screens with LVGL; `library.h` holds the mock games.
 
 The launcher is excluded from the project test suite.

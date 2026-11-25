@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 
@@ -10,8 +11,8 @@ namespace ui
 {
 bool initialize(const std::filesystem::path &logo_path, std::string &warning);
 void shutdown();
-void begin_frame(int drawable_width);
-void draw(const State &state);
-void end_frame();
+void sync(const State &state);
+bool render(bool force = false);
+const uint8_t *framebuffer();
 } // namespace ui
 } // namespace launcher
