@@ -61,7 +61,9 @@ cmake --preset release
 cmake --build --preset release --target v2n-launcher
 ```
 
-Inter is embedded in the executable; its license is in `assets/INTER-LICENSE.txt`. The four sample images in `assets/` were generated with OpenAI image generation:
+Inter and the Lucide icon font (`lucide.ttf`) are embedded in the executable;
+their licenses are in `assets/INTER-LICENSE.txt` and `assets/LUCIDE-LICENSE.txt`.
+The four sample images in `assets/` were generated with OpenAI image generation:
 
 - `cover-0.jpg`: cloaked explorer, twilight valley and luminous arch.
 - `cover-1.jpg`: silver-armored explorer and floating ruins in space.

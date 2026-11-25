@@ -42,6 +42,12 @@ enum class ConfirmKind {
     None,
     Quit
 };
+enum class ToastKind {
+    Info,
+    Success,
+    Warning,
+    Error
+};
 enum class Action {
     Up,
     Down,
@@ -93,14 +99,16 @@ struct State {
     int screenshot_index = 0;
     int previous = 0;
     int direction = 0;
-    int queued = 0;
+    float motion_from = 0.0f;
     Uint32 motion_start = 0;
     Uint32 focus_start = 0;
     Uint32 confirm_start = 0;
     Uint32 screen_start = SDL_GetTicks() + splash_duration;
-    static constexpr Uint32 motion_duration = 300;
+    static constexpr Uint32 motion_duration = 260;
     static constexpr Uint32 confirm_duration = 200;
     static constexpr Uint32 entrance_duration = 600;
+    static constexpr Uint32 toast_duration = 2600;
+    static constexpr Uint32 toast_anim_duration = 180;
     bool moving = false;
     fs::path pkg;
     fs::path license;
@@ -108,6 +116,10 @@ struct State {
     fs::path stage;
     std::vector<PickerItem> items;
     std::string message;
+    std::string toast;
+    ToastKind toast_kind = ToastKind::Info;
+    Uint32 toast_start = 0;
+    Uint32 toast_hide_start = 0;
     std::unique_ptr<ImportWorker> worker;
     Uint32 start = SDL_GetTicks();
 
@@ -117,8 +129,11 @@ struct State {
     void open_game_info(int index, Screen return_to);
     void set_home_focus(HomeFocus next);
     void set_confirm(ConfirmKind next);
+    void show_toast(std::string text, ToastKind kind = ToastKind::Info);
     void move_game(int step);
+    float motion_offset(Uint32 now) const;
     void update_motion();
+    void update_toast();
     bool animating() const;
     void scan();
     void browse(PickerKind kind);
@@ -133,8 +148,8 @@ struct State {
     {
         return std::make_tuple(games_revision, screen, home_focus, all_focus, import_focus,
                                info_focus, info_game, screenshot_index, selected, picker,
-                               confirm, pick_index, scroll, dir, pkg, license, message,
-                               import_running());
+                               confirm, pick_index, scroll, dir, pkg, license, message, toast,
+                               toast_kind, toast_hide_start != 0, import_running());
     }
 
   private:

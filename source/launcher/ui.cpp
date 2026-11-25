@@ -18,6 +18,7 @@
 
 #include "inter_bold.h"
 #include "inter_font.h"
+#include "lucide_font.h"
 
 namespace launcher::ui
 {
@@ -58,6 +59,7 @@ struct Fonts {
     lv_font_t *bold_20 = nullptr;
     lv_font_t *bold_22 = nullptr;
     lv_font_t *bold_24 = nullptr;
+    lv_font_t *icon_15 = nullptr;
 };
 Fonts fonts;
 
@@ -149,12 +151,17 @@ struct ConfirmModal {
     lv_obj_t *card = nullptr;
     lv_obj_t *title = nullptr;
     lv_obj_t *message = nullptr;
-    lv_obj_t *confirm_pill = nullptr;
     lv_obj_t *confirm_icon = nullptr;
     lv_obj_t *confirm_label = nullptr;
-    lv_obj_t *cancel_pill = nullptr;
     lv_obj_t *cancel_icon = nullptr;
     lv_obj_t *cancel_label = nullptr;
+};
+
+struct ToastOverlay {
+    lv_obj_t *root = nullptr;
+    lv_obj_t *icon = nullptr;
+    lv_obj_t *label = nullptr;
+    int32_t width = 0;
 };
 
 struct Widgets {
@@ -185,8 +192,6 @@ struct Widgets {
     lv_obj_t *home_carousel = nullptr;
     lv_obj_t *home_empty = nullptr;
     std::vector<GameCardWidgets> recent_cards;
-    lv_obj_t *home_toast = nullptr;
-    lv_obj_t *home_toast_label = nullptr;
     std::array<ActionCard, 2> action_cards;
 
     lv_obj_t *all_layer = nullptr;
@@ -197,8 +202,6 @@ struct Widgets {
     lv_obj_t *all_scrollbar_track = nullptr;
     lv_obj_t *all_scrollbar_thumb = nullptr;
     std::vector<GameCardWidgets> all_cards;
-    lv_obj_t *all_toast = nullptr;
-    lv_obj_t *all_toast_label = nullptr;
 
     lv_obj_t *import_layer = nullptr;
     lv_obj_t *import_heading = nullptr;
@@ -231,8 +234,6 @@ struct Widgets {
     lv_obj_t *info_desc = nullptr;
     lv_obj_t *info_play_btn = nullptr;
     lv_obj_t *info_play_label = nullptr;
-    lv_obj_t *info_toast = nullptr;
-    lv_obj_t *info_toast_label = nullptr;
     lv_obj_t *info_shot_heading = nullptr;
     lv_obj_t *info_shot_count = nullptr;
     lv_obj_t *info_shot_empty = nullptr;
@@ -245,6 +246,7 @@ struct Widgets {
     lv_obj_t *footer_back_icon = nullptr;
     lv_obj_t *footer_back_label = nullptr;
 
+    ToastOverlay toast;
     ConfirmModal confirm_modal;
 
     std::deque<lv_grad_dsc_t> gradients;
@@ -258,13 +260,11 @@ int last_games_revision = -1;
 std::string last_config_error;
 int last_bg_selected = -1;
 int last_bg_previous = -1;
-bool last_bg_moving = false;
+Uint32 bg_fade_start = 0;
 int last_bg_revision = -1;
 std::string last_header_text;
-std::string last_home_msg;
 int last_all_focus = -1;
 int all_scroll_row = 0;
-std::string last_all_msg;
 ImportFocus last_import_focus = ImportFocus::Package;
 std::string last_import_pkg;
 std::string last_import_lic;
@@ -280,7 +280,8 @@ int last_info_revision = -1;
 GameInfoFocus last_info_focus = GameInfoFocus::Play;
 int last_info_shot_idx = -1;
 int info_shot_scroll = 0;
-std::string last_info_msg;
+std::string last_toast_text;
+ToastKind last_toast_kind = ToastKind::Info;
 std::string last_footer_back;
 
 lv_color_t rgb(int r, int g, int b)
@@ -677,7 +678,7 @@ GameCardWidgets build_game_card(lv_obj_t *parent, float x, float y, float w, flo
 void create_confirm_modal(ConfirmModal &m, lv_obj_t *parent)
 {
     m.backdrop = make_box(parent, 0, 0, screen_width, screen_height, rgb(6, 13, 19), 185);
-    m.card = make_box(m.backdrop, 130, 152, 380, 176, rgb(20, 35, 45), 250, 8);
+    m.card = make_box(m.backdrop, 130, 163, 380, 154, rgb(20, 35, 45), 250, 8);
     lv_obj_set_style_border_color(m.card, rgb(195, 222, 230), 0);
     lv_obj_set_style_border_opa(m.card, 110, 0);
     lv_obj_set_style_border_width(m.card, sc_border(1), 0);
@@ -685,40 +686,43 @@ void create_confirm_modal(ConfirmModal &m, lv_obj_t *parent)
     m.title = make_label(m.card, 24, 22, "", fonts.bold_19, rgb(248, 251, 253), 332);
     m.message = make_label(m.card, 24, 54, "", fonts.reg_12, rgb(174, 193, 201), 332);
     lv_label_set_long_mode(m.message, LV_LABEL_LONG_MODE_WRAP);
-    make_box(m.card, 24, 108, 332, 1, rgb(159, 190, 201), 35);
 
-    m.confirm_pill = make_box(m.card, 24, 122, 158, 34, rgb(32, 52, 64), 255, 5);
-    lv_obj_set_style_border_color(m.confirm_pill, rgb(140, 173, 184), 0);
-    lv_obj_set_style_border_opa(m.confirm_pill, 90, 0);
-    lv_obj_set_style_border_width(m.confirm_pill, sc_border(1), 0);
-    m.confirm_icon = lv_image_create(m.confirm_pill);
-    init_clean_obj(m.confirm_icon, 0, 6, 22, 22);
+    m.confirm_icon = lv_image_create(m.card);
+    init_clean_obj(m.confirm_icon, 0, 108, 22, 22);
     lv_image_set_src(m.confirm_icon, &icon_key_a.dsc);
-    m.confirm_label = make_label(m.confirm_pill, 0, 10, "", fonts.bold_11, rgb(225, 237, 240));
+    m.confirm_label = make_label(m.card, 0, 114, "", fonts.bold_11, rgb(225, 237, 240));
 
-    m.cancel_pill = make_box(m.card, 198, 122, 158, 34, rgb(32, 52, 64), 255, 5);
-    lv_obj_set_style_border_color(m.cancel_pill, rgb(140, 173, 184), 0);
-    lv_obj_set_style_border_opa(m.cancel_pill, 90, 0);
-    lv_obj_set_style_border_width(m.cancel_pill, sc_border(1), 0);
-    m.cancel_icon = lv_image_create(m.cancel_pill);
-    init_clean_obj(m.cancel_icon, 0, 6, 22, 22);
+    m.cancel_icon = lv_image_create(m.card);
+    init_clean_obj(m.cancel_icon, 0, 108, 22, 22);
     lv_image_set_src(m.cancel_icon, &icon_key_b.dsc);
-    m.cancel_label = make_label(m.cancel_pill, 0, 10, "", fonts.bold_11, rgb(225, 237, 240));
+    m.cancel_label = make_label(m.card, 0, 114, "", fonts.bold_11, rgb(225, 237, 240));
 
     lv_obj_add_flag(m.backdrop, LV_OBJ_FLAG_HIDDEN);
 }
 
-void layout_modal_pill(lv_obj_t *icon, lv_obj_t *label, const char *text)
+void layout_modal_actions(ConfirmModal &m, const char *confirm_text, const char *cancel_text)
 {
-    lv_label_set_text(label, text);
-    lv_point_t sz{};
-    lv_text_get_size(&sz, text, fonts.bold_11, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-    const int32_t pill_w = sc(158);
+    lv_label_set_text(m.confirm_label, confirm_text);
+    lv_label_set_text(m.cancel_label, cancel_text);
+    lv_point_t confirm_sz{}, cancel_sz{};
+    lv_text_get_size(&confirm_sz, confirm_text, fonts.bold_11, 0, 0, LV_COORD_MAX,
+                     LV_TEXT_FLAG_NONE);
+    lv_text_get_size(&cancel_sz, cancel_text, fonts.bold_11, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+
     const int32_t icon_w = sc(22);
-    const int32_t gap = sc(8);
-    const int32_t start_x = std::max<int32_t>(sc(12), (pill_w - (icon_w + gap + sz.x)) / 2);
-    lv_obj_set_pos(icon, start_x, sc(6));
-    lv_obj_set_pos(label, start_x + icon_w + gap, sc(11));
+    const int32_t icon_gap = sc(7);
+    const int32_t pair_gap = sc(20);
+    const int32_t right_edge = sc(356);
+    const int32_t y_icon = sc(108);
+    const int32_t y_label = sc(114);
+
+    const int32_t cancel_x = right_edge - (icon_w + icon_gap + cancel_sz.x);
+    const int32_t confirm_x = cancel_x - pair_gap - (icon_w + icon_gap + confirm_sz.x);
+
+    lv_obj_set_pos(m.confirm_icon, confirm_x, y_icon);
+    lv_obj_set_pos(m.confirm_label, confirm_x + icon_w + icon_gap, y_label);
+    lv_obj_set_pos(m.cancel_icon, cancel_x, y_icon);
+    lv_obj_set_pos(m.cancel_label, cancel_x + icon_w + icon_gap, y_label);
 }
 
 void set_confirm_modal(ConfirmModal &m, bool visible, const char *title, const char *message,
@@ -730,9 +734,41 @@ void set_confirm_modal(ConfirmModal &m, bool visible, const char *title, const c
     }
     lv_label_set_text(m.title, title);
     lv_label_set_text(m.message, message);
-    layout_modal_pill(m.confirm_icon, m.confirm_label, confirm_text);
-    layout_modal_pill(m.cancel_icon, m.cancel_label, cancel_text);
+    layout_modal_actions(m, confirm_text, cancel_text);
     lv_obj_clear_flag(m.backdrop, LV_OBJ_FLAG_HIDDEN);
+}
+
+struct ToastAppearance {
+    const char *glyph;
+    lv_color_t accent;
+};
+
+ToastAppearance toast_appearance(ToastKind kind)
+{
+    switch (kind) {
+    case ToastKind::Success:
+        return { "\xee\x88\xa6", rgb(98, 212, 148) }; // Lucide circle-check (U+E226)
+    case ToastKind::Warning:
+        return { "\xee\x86\x93", rgb(240, 194, 92) }; // Lucide triangle-alert (U+E193)
+    case ToastKind::Error:
+        return { "\xee\x82\x84", rgb(236, 114, 114) }; // Lucide circle-x (U+E084)
+    case ToastKind::Info:
+    default:
+        return { "\xee\x83\xb9", rgb(106, 198, 222) }; // Lucide info (U+E0F9)
+    }
+}
+
+void create_toast(ToastOverlay &t, lv_obj_t *parent)
+{
+    t.root = make_box(parent, 0, 388, 180, 32, rgb(16, 30, 40), 245, 16);
+    lv_obj_set_style_border_color(t.root, rgb(106, 198, 222), 0);
+    lv_obj_set_style_border_opa(t.root, 185, 0);
+    lv_obj_set_style_border_width(t.root, sc_border(1), 0);
+    t.icon = make_label(t.root, 13, 8, "", fonts.icon_15, rgb(106, 198, 222));
+    t.label = make_label(t.root, 35, 9, "", fonts.reg_11, rgb(236, 245, 248), 490);
+    lv_obj_set_height(t.label, lv_font_get_line_height(fonts.reg_11));
+    lv_label_set_long_mode(t.label, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_add_flag(t.root, LV_OBJ_FLAG_HIDDEN);
 }
 
 void create_ui_tree()
@@ -816,11 +852,6 @@ void create_ui_tree()
                fonts.reg_11, rgb(164, 188, 196), 542);
     lv_obj_add_flag(ui_objs.home_empty, LV_OBJ_FLAG_HIDDEN);
 
-    ui_objs.home_toast = make_box(ui_objs.home_layer, 25, 282, 430, 23, rgb(16, 27, 34), 245, 4);
-    ui_objs.home_toast_label =
-        make_label(ui_objs.home_toast, 8, 6, "", fonts.reg_10, rgb(232, 239, 241), 410);
-    lv_obj_add_flag(ui_objs.home_toast, LV_OBJ_FLAG_HIDDEN);
-
     for (int i = 0; i < 2; ++i) {
         auto &card = ui_objs.action_cards[i];
         const float x = 25 + i * 301;
@@ -876,11 +907,6 @@ void create_ui_tree()
         make_box(ui_objs.all_layer, 626, 111, 3, 80, rgb(225, 237, 239), 180, 2);
     lv_obj_add_flag(ui_objs.all_scrollbar_track, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(ui_objs.all_scrollbar_thumb, LV_OBJ_FLAG_HIDDEN);
-
-    ui_objs.all_toast = make_box(ui_objs.all_layer, 25, 411, 480, 21, rgb(16, 27, 34), 245, 4);
-    ui_objs.all_toast_label =
-        make_label(ui_objs.all_toast, 8, 5, "", fonts.reg_10, rgb(232, 239, 241), 460);
-    lv_obj_add_flag(ui_objs.all_toast, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(ui_objs.all_layer, LV_OBJ_FLAG_HIDDEN);
 
     // Import screen
@@ -1008,12 +1034,6 @@ void create_ui_tree()
     ui_objs.info_play_label =
         make_centered_label(ui_objs.info_play_btn, "PLAY", fonts.bold_11, rgb(14, 28, 35));
 
-    ui_objs.info_toast =
-        make_box(ui_objs.info_layer, 344, 192, 271, 24, rgb(16, 27, 34), 245, 4);
-    ui_objs.info_toast_label =
-        make_label(ui_objs.info_toast, 10, 6, "", fonts.reg_10, rgb(232, 239, 241), 251);
-    lv_obj_add_flag(ui_objs.info_toast, LV_OBJ_FLAG_HIDDEN);
-
     ui_objs.info_shot_heading =
         make_label(ui_objs.info_layer, 25, 240, "Screenshots", fonts.bold_15, rgb(248, 251, 253));
     ui_objs.info_shot_count =
@@ -1054,6 +1074,7 @@ void create_ui_tree()
     ui_objs.footer_back_label =
         make_label(ui_objs.footer_layer, 0, 17, "EXIT", fonts.bold_10, rgb(191, 210, 217));
 
+    create_toast(ui_objs.toast, ui_objs.main_layer);
     create_confirm_modal(ui_objs.confirm_modal, ui_objs.main_layer);
 }
 
@@ -1142,30 +1163,47 @@ void update_background(const State &a, Uint32 now)
             curr_idx = a.selected;
     }
 
-    if (a.screen == Screen::Home && !a.picker && a.moving && a.recent_count() > 1) {
-        const float t = ease_out(static_cast<float>(now - a.motion_start) /
-                                 static_cast<float>(State::motion_duration));
-        if (last_bg_previous != a.previous || last_bg_revision != a.games_revision ||
-            !last_bg_moving) {
-            set_bg_image(ui_objs.bg_prev, ui_objs.bg_prev_ref, a, a.previous);
-            last_bg_previous = a.previous;
-        }
+    if (last_bg_revision != a.games_revision || last_bg_selected == -1 ||
+        a.screen != Screen::Home || a.picker || a.recent_count() <= 1) {
         if (last_bg_selected != curr_idx || last_bg_revision != a.games_revision ||
-            !last_bg_moving) {
-            set_bg_image(ui_objs.bg_curr, ui_objs.bg_curr_ref, a, curr_idx);
-            last_bg_selected = curr_idx;
-        }
-        if (ui_objs.bg_curr_ref && ui_objs.bg_curr_ref->valid())
-            lv_obj_set_style_image_opa(ui_objs.bg_curr, opa_from_float(0.48f * t), 0);
-        last_bg_moving = true;
-    } else {
-        if (last_bg_selected != curr_idx || last_bg_revision != a.games_revision || last_bg_moving) {
+            bg_fade_start != 0) {
             set_bg_image(ui_objs.bg_prev, ui_objs.bg_prev_ref, a, curr_idx);
             set_visible(ui_objs.bg_curr, false);
             ui_objs.bg_curr_ref.reset();
             last_bg_selected = curr_idx;
             last_bg_previous = curr_idx;
-            last_bg_moving = false;
+            bg_fade_start = 0;
+        }
+        last_bg_revision = a.games_revision;
+        return;
+    }
+
+    if (curr_idx != last_bg_selected) {
+        int from_idx = last_bg_selected;
+        if (bg_fade_start != 0) {
+            const float prev_t = ease_out(static_cast<float>(now - bg_fade_start) /
+                                          static_cast<float>(State::motion_duration));
+            if (prev_t < 0.5f)
+                from_idx = last_bg_previous;
+        }
+        last_bg_previous = from_idx;
+        last_bg_selected = curr_idx;
+        set_bg_image(ui_objs.bg_prev, ui_objs.bg_prev_ref, a, from_idx);
+        set_bg_image(ui_objs.bg_curr, ui_objs.bg_curr_ref, a, curr_idx);
+        bg_fade_start = a.moving ? a.motion_start : now;
+    }
+
+    if (bg_fade_start != 0) {
+        const float raw = static_cast<float>(now - bg_fade_start) /
+                          static_cast<float>(State::motion_duration);
+        if (raw >= 1.0f) {
+            set_bg_image(ui_objs.bg_prev, ui_objs.bg_prev_ref, a, last_bg_selected);
+            set_visible(ui_objs.bg_curr, false);
+            ui_objs.bg_curr_ref.reset();
+            last_bg_previous = last_bg_selected;
+            bg_fade_start = 0;
+        } else if (ui_objs.bg_curr_ref && ui_objs.bg_curr_ref->valid()) {
+            lv_obj_set_style_image_opa(ui_objs.bg_curr, opa_from_float(0.48f * ease_out(raw)), 0);
         }
     }
     last_bg_revision = a.games_revision;
@@ -1220,36 +1258,26 @@ void sync_home(const State &a, Uint32 now)
         set_pos_if_changed(ui_objs.home_empty, sc(25), sc(107.0f + 12.0f * (1.0f - entry)));
         set_opa_if_changed(ui_objs.home_empty, opa_from_float(entry));
     } else {
-        const float t = a.moving ? ease_out(static_cast<float>(now - a.motion_start) /
-                                            static_cast<float>(State::motion_duration))
-                                 : 1.0f;
+        const float current_offset = a.motion_offset(now);
         constexpr float pitch = 320.0f;
-        int base = a.selected;
-        float base_x = 25.0f;
-        float w0 = 1.0f, w1 = 0.0f;
-        if (a.moving) {
-            if (a.direction > 0) {
-                base = a.previous;
-                base_x = 25.0f - pitch * t;
-                w0 = 1.0f - t;
-                w1 = t;
-            } else {
-                base = a.selected;
-                base_x = 25.0f - pitch * (1.0f - t);
-                w0 = t;
-                w1 = 1.0f - t;
-            }
-        }
-
         const bool recent_focused = (a.home_focus == HomeFocus::RecentGames);
-        const int start_slot = (rc >= 3) ? -1 : 0;
-        const int end_slot = (rc >= 3) ? rc - 1 : rc;
-        for (int slot = start_slot; slot < end_slot; ++slot) {
-            const int id = (base + slot + rc) % rc;
-            const float active = (slot == 0) ? w0 : (slot == 1) ? w1 : 0.0f;
-            const float entry = entrance(a, now, 65 + std::max(0, slot) * 50);
+        const int center_rel = static_cast<int>(std::lround(-current_offset));
+
+        for (int id = 0; id < rc; ++id) {
+            int rel = 0;
+            if (rc == 2) {
+                rel = (id == a.selected) ? 0 : (current_offset >= 0.0f ? -1 : 1);
+            } else {
+                int d = ((id - a.selected - center_rel) % rc + rc) % rc;
+                if (d > rc / 2)
+                    d -= rc;
+                rel = center_rel + d;
+            }
+            const float slot = static_cast<float>(rel) + current_offset;
+            const float active = (id == a.selected) ? 1.0f : 0.0f;
+            const float entry = entrance(a, now, 65 + std::max(0, rel) * 50);
             auto &card = ui_objs.recent_cards[id];
-            set_pos_if_changed(card.root, sc(base_x + slot * pitch),
+            set_pos_if_changed(card.root, sc(25.0f + slot * pitch),
                                sc(4.0f + 12.0f * (1.0f - entry)));
             set_opa_if_changed(card.root, opa_from_float(entry));
 
@@ -1293,13 +1321,6 @@ void sync_home(const State &a, Uint32 now)
             lv_obj_set_style_border_opa(card.border, border_opa, 0);
             lv_obj_set_style_border_width(card.border, border_w, 0);
         }
-    }
-
-    if (last_home_msg != a.message || last_mode != ViewMode::Home) {
-        set_visible(ui_objs.home_toast, !a.message.empty());
-        if (!a.message.empty())
-            lv_label_set_text(ui_objs.home_toast_label, a.message.c_str());
-        last_home_msg = a.message;
     }
 }
 
@@ -1360,13 +1381,6 @@ void sync_all_games(const State &a, Uint32 now)
         }
     }
     last_all_focus = a.all_focus;
-
-    if (last_all_msg != a.message || last_mode != ViewMode::AllGames) {
-        set_visible(ui_objs.all_toast, !a.message.empty());
-        if (!a.message.empty())
-            lv_label_set_text(ui_objs.all_toast_label, a.message.c_str());
-        last_all_msg = a.message;
-    }
 }
 
 void sync_import(const State &a, Uint32 now)
@@ -1596,13 +1610,6 @@ void sync_game_info(const State &a, Uint32 now)
         }
     }
 
-    if (last_info_msg != a.message || rebuilt) {
-        set_visible(ui_objs.info_toast, !a.message.empty());
-        if (!a.message.empty())
-            lv_label_set_text(ui_objs.info_toast_label, a.message.c_str());
-        last_info_msg = a.message;
-    }
-
     last_info_focus = a.info_focus;
     last_info_shot_idx = a.screenshot_index;
 }
@@ -1635,6 +1642,7 @@ void destroy_fonts()
     drop(fonts.bold_20);
     drop(fonts.bold_22);
     drop(fonts.bold_24);
+    drop(fonts.icon_15);
 }
 
 bool init_fonts()
@@ -1655,9 +1663,10 @@ bool init_fonts()
     fonts.bold_20 = mk(inter_bold, sizeof(inter_bold), 20);
     fonts.bold_22 = mk(inter_bold, sizeof(inter_bold), 22);
     fonts.bold_24 = mk(inter_bold, sizeof(inter_bold), 24);
+    fonts.icon_15 = mk(lucide_font, sizeof(lucide_font), 15);
     return fonts.reg_10 && fonts.reg_11 && fonts.reg_12 && fonts.reg_14 && fonts.bold_10 &&
            fonts.bold_11 && fonts.bold_13 && fonts.bold_15 && fonts.bold_16 && fonts.bold_19 &&
-           fonts.bold_20 && fonts.bold_22 && fonts.bold_24;
+           fonts.bold_20 && fonts.bold_22 && fonts.bold_24 && fonts.icon_15;
 }
 } // namespace
 
@@ -1808,8 +1817,47 @@ void sync(const State &a)
         sync_import(a, now);
     else if (mode == ViewMode::Picker)
         sync_picker(a, now);
-    else if (mode == ViewMode::GameInfo)
+    if (mode == ViewMode::GameInfo)
         sync_game_info(a, now);
+
+    float toast_p = 0.0f;
+    if (!a.toast.empty()) {
+        if (a.toast_hide_start != 0) {
+            toast_p = 1.0f - ease_out(static_cast<float>(now - a.toast_hide_start) /
+                                      static_cast<float>(State::toast_anim_duration));
+        } else {
+            toast_p = ease_out(static_cast<float>(now - a.toast_start) /
+                               static_cast<float>(State::toast_anim_duration));
+        }
+    }
+    if (toast_p <= 0.0f) {
+        set_visible(ui_objs.toast.root, false);
+        last_toast_text.clear();
+    } else {
+        if (last_toast_text != a.toast || last_toast_kind != a.toast_kind) {
+            const ToastAppearance style = toast_appearance(a.toast_kind);
+            lv_obj_set_style_border_color(ui_objs.toast.root, style.accent, 0);
+            lv_obj_set_style_text_color(ui_objs.toast.icon, style.accent, 0);
+            lv_label_set_text(ui_objs.toast.icon, style.glyph);
+
+            lv_point_t sz{};
+            lv_text_get_size(&sz, a.toast.c_str(), fonts.reg_11, 0, 0, LV_COORD_MAX,
+                             LV_TEXT_FLAG_NONE);
+            const int32_t pill_w = std::clamp(sc(51) + sz.x, sc(120), sc(540));
+            ui_objs.toast.width = pill_w;
+            lv_obj_set_width(ui_objs.toast.root, pill_w);
+            lv_obj_set_width(ui_objs.toast.label, pill_w - sc(51));
+            lv_label_set_text(ui_objs.toast.label, a.toast.c_str());
+            last_toast_text = a.toast;
+            last_toast_kind = a.toast_kind;
+        }
+        set_visible(ui_objs.toast.root, true);
+        set_opa_if_changed(ui_objs.toast.root, opa_from_float(toast_p));
+        const float y_off = (a.toast_hide_start != 0) ? 8.0f * (1.0f - toast_p)
+                                                      : 12.0f * (1.0f - toast_p);
+        set_pos_if_changed(ui_objs.toast.root, (sc(screen_width) - ui_objs.toast.width) / 2,
+                           sc(388.0f + y_off));
+    }
 
     float confirm_p = 0.0f;
     if (a.confirm != ConfirmKind::None) {
@@ -1843,7 +1891,7 @@ void sync(const State &a)
             lv_obj_set_style_bg_opa(ui_objs.confirm_modal.backdrop, back_opa, 0);
         set_opa_if_changed(ui_objs.confirm_modal.card, opa_from_float(confirm_p));
         set_pos_if_changed(ui_objs.confirm_modal.card, sc(130),
-                           sc(152.0f + 12.0f * (1.0f - confirm_p)));
+                           sc(163.0f + 12.0f * (1.0f - confirm_p)));
     }
 
     last_mode = mode;

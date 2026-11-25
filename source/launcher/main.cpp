@@ -25,6 +25,19 @@ void configure_snapshot(State &state)
         state.screen = Screen::AllGames;
     if (screen && strcmp(screen, "game-info") == 0 && !state.games.empty())
         state.open_game_info(0, Screen::Home);
+    if (screen && strcmp(screen, "game-info-toast") == 0 && !state.games.empty()) {
+        state.open_game_info(0, Screen::Home);
+        const char *kind = getenv("V2N_LAUNCHER_TOAST_KIND");
+        if (kind && strcmp(kind, "success") == 0)
+            state.show_toast("Title imported and ready to play.", ToastKind::Success);
+        else if (kind && strcmp(kind, "warning") == 0)
+            state.show_toast("Import is running; please wait.", ToastKind::Warning);
+        else if (kind && strcmp(kind, "error") == 0)
+            state.show_toast("Could not launch eboot.bin.", ToastKind::Error);
+        else
+            state.action(Action::Select);
+        state.toast_start = SDL_GetTicks() - 500;
+    }
     if (screen && strcmp(screen, "home-focus") == 0)
         state.home_focus = state.previous_home_focus = HomeFocus::AllGames;
     if (screen && strcmp(screen, "picker") == 0) {

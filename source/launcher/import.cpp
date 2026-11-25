@@ -185,6 +185,7 @@ void State::start_import()
 
 void State::poll()
 {
+    update_toast();
     if (!worker)
         return;
     ImportEvent event;

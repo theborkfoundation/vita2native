@@ -20,7 +20,7 @@ void State::refresh_games()
         selected = 0;
         previous = 0;
         moving = false;
-        queued = 0;
+        motion_from = 0.0f;
         if (home_focus == HomeFocus::RecentGames) {
             home_focus = HomeFocus::Import;
             previous_home_focus = HomeFocus::Import;
@@ -51,7 +51,7 @@ void State::open_game_info(int index, Screen return_to)
     if (index < 0 || index >= static_cast<int>(games.size()))
         return;
     moving = false;
-    queued = 0;
+    motion_from = 0.0f;
     info_game = index;
     info_return_screen = return_to;
     info_focus = GameInfoFocus::Play;
@@ -77,39 +77,74 @@ void State::set_confirm(ConfirmKind next)
     }
 }
 
+void State::show_toast(std::string text, ToastKind kind)
+{
+    toast = std::move(text);
+    toast_kind = kind;
+    toast_start = SDL_GetTicks();
+    toast_hide_start = 0;
+}
+
+float State::motion_offset(Uint32 now) const
+{
+    if (!moving)
+        return 0.0f;
+    float t = std::clamp(
+        static_cast<float>(now - motion_start) / static_cast<float>(motion_duration), 0.0f, 1.0f);
+    const float inv = 1.0f - t;
+    const float ease = 1.0f - inv * inv * inv;
+    return motion_from * (1.0f - ease);
+}
+
 void State::move_game(int step)
 {
     const int rc = recent_count();
     if (rc <= 1)
         return;
-    if (moving) {
-        queued = std::clamp(queued + step, -8, 8);
-        return;
-    }
+    const Uint32 now = SDL_GetTicks();
+    const float current = motion_offset(now);
     previous = selected;
     selected = (selected + step + rc) % rc;
     direction = step;
-    motion_start = SDL_GetTicks();
+    if (rc == 2 && current * step >= 0.0f)
+        motion_from = static_cast<float>(step);
+    else
+        motion_from = std::clamp(current + static_cast<float>(step), -3.5f, 3.5f);
+    motion_start = now;
     moving = true;
-    message.clear();
 }
 
 void State::update_motion()
 {
     if (moving && SDL_GetTicks() - motion_start >= motion_duration) {
         moving = false;
-        if (queued) {
-            int step = queued > 0 ? 1 : -1;
-            queued -= step;
-            move_game(step);
-        }
+        motion_from = 0.0f;
+    }
+}
+
+void State::update_toast()
+{
+    if (toast.empty())
+        return;
+    const Uint32 now = SDL_GetTicks();
+    if (toast_hide_start == 0) {
+        if (now - toast_start >= toast_duration)
+            toast_hide_start = now;
+    } else if (now - toast_hide_start >= toast_anim_duration) {
+        toast.clear();
+        toast_start = 0;
+        toast_hide_start = 0;
     }
 }
 
 bool State::animating() const
 {
     Uint32 now = SDL_GetTicks();
-    return moving || (now - start >= splash_duration && now - screen_start < entrance_duration) ||
+    const bool toast_anim =
+        !toast.empty() && ((now - toast_start < toast_anim_duration) ||
+                           (toast_hide_start != 0 && now - toast_hide_start < toast_anim_duration));
+    return moving || toast_anim ||
+           (now - start >= splash_duration && now - screen_start < entrance_duration) ||
            (focus_start && now - focus_start < focus_duration) ||
            (confirm_start && now - confirm_start < confirm_duration);
 }
@@ -142,7 +177,7 @@ void State::scan()
     items.insert(items.end(), found.begin(), found.end());
     pick_index = scroll = 0;
     if (ec)
-        message = "Could not read this directory.";
+        show_toast("Could not read this directory.", ToastKind::Error);
 }
 
 void State::browse(PickerKind kind)
@@ -200,12 +235,12 @@ void State::handle_home(Action action)
     else if (action == Action::Select) {
         if (home_focus == HomeFocus::AllGames) {
             moving = false;
-            queued = 0;
+            motion_from = 0.0f;
             all_focus = games.empty() ? 0 : std::clamp(selected, 0, static_cast<int>(games.size()) - 1);
             change_screen(Screen::AllGames);
         } else if (home_focus == HomeFocus::Import) {
             moving = false;
-            queued = 0;
+            motion_from = 0.0f;
             change_screen(Screen::Import);
         } else if (rc > 0) {
             open_game_info(selected, Screen::Home);
@@ -276,7 +311,7 @@ void State::handle_game_info(Action action)
                shot_count > 0) {
         screenshot_index = std::min(shot_count - 1, screenshot_index + 1);
     } else if (action == Action::Select && info_focus == GameInfoFocus::Play) {
-        message = "Launching is not implemented yet.";
+        show_toast("Launching is not implemented yet.");
     }
 }
 
@@ -289,7 +324,7 @@ void State::action(Action action)
     }
     if (import_running()) {
         if (action == Action::Back)
-            message = "Import is running; please wait.";
+            show_toast("Import is running; please wait.", ToastKind::Warning);
         return;
     }
     if (confirm != ConfirmKind::None) {

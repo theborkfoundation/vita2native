@@ -71,5 +71,6 @@ ISSUES.md
 .vscode/
 
 # Launcher assets are embedded at build time.
-!src/launcher/assets/*.jpg
-!src/launcher/assets/INTER-LICENSE.txt
+!source/launcher/assets/*.jpg
+!source/launcher/assets/INTER-LICENSE.txt
+!source/launcher/assets/LUCIDE-LICENSE.txt
