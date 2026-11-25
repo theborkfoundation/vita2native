@@ -17,7 +17,7 @@ ConfigResult load_config()
         return result;
     }
     result.config.games_path = (base / "games").lexically_normal();
-    result.config.loader_path = (base / "v2n").lexically_normal();
+    result.config.loader_path = (base / "vita2native").lexically_normal();
     result.config.storage_path = (base / "storage").lexically_normal();
     const fs::path path = base / "launcher.toml";
     const fs::file_status status = fs::symlink_status(path, ec);

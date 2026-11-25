@@ -62,3 +62,6 @@ include(cmake/tests.cmake)
 
 # Handheld library and package importer.
 add_subdirectory(source/launcher)
+
+# Bundle armhf runtime + arm64 launcher into vita2native.zip.
+include(cmake/package.cmake)

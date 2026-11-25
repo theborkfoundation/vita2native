@@ -2,7 +2,7 @@
 # Imported titles are saved as <games>/<TITLE_ID>/.
 games = "./games"
 # Reserved for future game launching.
-loader = "./v2n"
+loader = "./vita2native"
 # Guest filesystem root (ux0/, savedata/, system/, cache/, log.txt).
 storage = "./storage"
 

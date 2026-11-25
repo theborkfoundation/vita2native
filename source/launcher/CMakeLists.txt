@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.18)
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    project(v2n-launcher LANGUAGES C CXX)
+    project(launcher LANGUAGES C CXX)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(SDL2 REQUIRED sdl2)
 endif()
@@ -49,7 +49,7 @@ embed_asset(web/app.js web_app_js)
 if(APPLE)
     enable_language(OBJCXX)
 endif()
-add_executable(v2n-launcher
+add_executable(launcher
     main.cpp
     config.cpp
     library.cpp
@@ -62,13 +62,13 @@ add_executable(v2n-launcher
     stb_impl.c
     ${EMBEDDED_ASSETS})
 if(APPLE)
-    target_sources(v2n-launcher PRIVATE macos_activate.mm)
-    target_link_libraries(v2n-launcher PRIVATE "-framework Cocoa")
+    target_sources(launcher PRIVATE macos_activate.mm)
+    target_link_libraries(launcher PRIVATE "-framework Cocoa")
 endif()
 set_source_files_properties(stb_impl.c PROPERTIES COMPILE_OPTIONS "-w")
-target_compile_features(v2n-launcher PRIVATE cxx_std_17)
-target_include_directories(v2n-launcher PRIVATE ${SDL2_INCLUDE_DIRS} "${CMAKE_CURRENT_BINARY_DIR}")
-target_include_directories(v2n-launcher SYSTEM PRIVATE "${TOMLPLUSPLUS_DIR}/include" "${STB_DIR}")
-target_link_directories(v2n-launcher PRIVATE ${SDL2_LIBRARY_DIRS})
-target_link_libraries(v2n-launcher PRIVATE ${SDL2_LIBRARIES} v2n_extract_core Threads::Threads lunasvg::lunasvg lvgl::lvgl)
-target_compile_options(v2n-launcher PRIVATE -Wall -Wextra -Wno-unused-function)
+target_compile_features(launcher PRIVATE cxx_std_17)
+target_include_directories(launcher PRIVATE ${SDL2_INCLUDE_DIRS} "${CMAKE_CURRENT_BINARY_DIR}")
+target_include_directories(launcher SYSTEM PRIVATE "${TOMLPLUSPLUS_DIR}/include" "${STB_DIR}")
+target_link_directories(launcher PRIVATE ${SDL2_LIBRARY_DIRS})
+target_link_libraries(launcher PRIVATE ${SDL2_LIBRARIES} v2n_extract_core Threads::Threads lunasvg::lunasvg lvgl::lvgl)
+target_compile_options(launcher PRIVATE -Wall -Wextra -Wno-unused-function)
