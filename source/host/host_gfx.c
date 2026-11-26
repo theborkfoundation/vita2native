@@ -45,10 +45,12 @@ void host_gpu_destroy(HostGpuDevice device)
     if (!device)
         return;
 
-    if (device->backend == HOST_GPU_BACKEND_GLES)
+    if (device->backend == HOST_GPU_BACKEND_GLES) {
+        host_gfx_readback_shutdown(device);
         host_gfx_gl_destroy(device);
-    else
+    } else {
         free(device);
+    }
 }
 
 HostGpuBackend host_gpu_backend(HostGpuDevice device)
@@ -173,6 +175,15 @@ void host_gpu_present_texture(HostGpuDevice device, unsigned int texture, int wi
 
     if (device->backend == HOST_GPU_BACKEND_GLES)
         host_gfx_gl_present_texture(device, texture, width, height);
+}
+
+bool host_gpu_read_target(HostGpuDevice device, unsigned int framebuffer, int width, int height,
+                          const void **pixels, unsigned int *stride)
+{
+    if (!device || device->backend != HOST_GPU_BACKEND_GLES)
+        return false;
+
+    return host_gfx_readback_read_target(device, framebuffer, width, height, pixels, stride);
 }
 
 void host_gpu_set_overlay(HostGpuDevice device, const void *rgba, int width, int height)

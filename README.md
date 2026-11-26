@@ -144,6 +144,7 @@ prints the same table with the current values.
 | `VITA2NATIVE_GL_CHECK=1` | per-draw `glGetError` checks |
 | `VITA2NATIVE_DUMP_FRAME` | write presented frames as BMP (GPU readback when a window is used) |
 | `VITA2NATIVE_READBACK=1` | copy every frame back to guest memory (only titles that read their own framebuffer need it) |
+| `VITA2NATIVE_NO_DMABUF_READBACK=1` | use `glReadPixels` instead of blitting into a linear dma-buf |
 | `VITA2NATIVE_RENDER_SCALE=0.5` | render 3D at half resolution |
 | `VITA2NATIVE_STRETCH=1` | fill the display instead of letterboxing |
 
@@ -166,6 +167,12 @@ A frame is copied out of the render target only when something needs it in guest
 memory: a capture (just the frames you asked for), a window that cannot present
 the texture, or `VITA2NATIVE_READBACK=1`. The copy measured 62 ms per frame at
 960×544 on the Orange Pi, so it is not paid by default.
+
+When it does run, the render target is blitted into a linear dma-buf and the
+guest surface is filled from its CPU mapping: 5.9 ms of blit plus ~19 ms of copy
+on that board, against 62 ms for `glReadPixels`, whose cost on a tiled GPU is the
+driver walking the surface. Software GL keeps the direct read (its readback is
+already a memcpy), and `VITA2NATIVE_NO_DMABUF_READBACK=1` forces it anywhere else.
 
 Signals grab a frame from a running session, whatever the backend:
 

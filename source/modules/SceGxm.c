@@ -5981,6 +5981,16 @@ static int gxm_readback_enabled(void)
     return enabled;
 }
 
+/* A/B control: force the direct glReadPixels path the staging target replaced. */
+static int gxm_no_dmabuf_readback(void)
+{
+    static int disabled = -1;
+
+    if (disabled < 0)
+        disabled = vita2native_env_flag("VITA2NATIVE_NO_DMABUF_READBACK");
+    return disabled;
+}
+
 /*
  * Guest memory only holds the frame when the copy ran. Warn once when a CPU
  * reader touches a colour surface while it is off: the title needs
@@ -6032,6 +6042,8 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
     const SceGxmColorSurfaceInner *surface;
     uint32_t width, height;
     uint8_t *rgba;
+    const uint8_t *pixels;
+    unsigned int pixel_stride;
     uint64_t t_resolve, t0, t1, t2;
 
     (void)vertexNotification;
@@ -6229,12 +6241,39 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
             goto convert_done;
         }
 
-        rgba = malloc((size_t)width * height * 4);
-        if (!rgba)
-            return SCE_GXM_ERROR_OUT_OF_MEMORY;
+        /*
+         * A tiled GPU runs glReadPixels through the driver's per-pixel transfer
+         * path: 99 ms here against 2.8 ms for a blit into a linear buffer. Try
+         * the dma-buf staging target first and keep glReadPixels as the fallback
+         * (software GL, no DRM node, or a driver that refuses the import).
+         */
+        rgba = NULL;
+        if (!gxm_no_dmabuf_readback() &&
+            host_gpu_read_target(g_device, target->fbo, (int)width, (int)height,
+                                 (const void **)&pixels, &pixel_stride)) {
+            static bool logged;
 
-        g_gl->glPixelStorei(GL_PACK_ALIGNMENT, 4);
-        g_gl->glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+            if (!logged) {
+                logged = true;
+                LOG("SceGxm: readback: dma-buf staging");
+            }
+        } else {
+            static bool logged;
+
+            rgba = malloc((size_t)width * height * 4);
+            if (!rgba)
+                return SCE_GXM_ERROR_OUT_OF_MEMORY;
+
+            g_gl->glPixelStorei(GL_PACK_ALIGNMENT, 4);
+            g_gl->glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+            pixels = rgba;
+            pixel_stride = width * 4;
+
+            if (!logged) {
+                logged = true;
+                LOG("SceGxm: readback: glReadPixels (dma-buf staging unavailable)");
+            }
+        }
         t2 = gxm_time_ns();
 
         if (gxm_frame_trace() && (g_gxm_frame % 60) == 0) {
@@ -6242,8 +6281,8 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
             uint32_t nonzero = 0;
 
             for (size_t i = 0; i < (size_t)width * height * 4; i += 4096) {
-                sum += rgba[i];
-                if (rgba[i])
+                sum += pixels[i];
+                if (pixels[i])
                     nonzero++;
             }
             LOG("SceGxm frame %llu: fbo=%u surf=%p %ux%u stride=%u fmt=0x%x "
@@ -6251,7 +6290,7 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
                 g_gxm_frame, context->render_target->fbo, (void *)surface->data, surface->width,
                 surface->height, surface->strideInPixels, surface->colorFormat, surface->clipXMin,
                 surface->clipYMin, surface->clipXMax, surface->clipYMax, width, height, out_width,
-                out_height, sum, nonzero, *(const uint32_t *)rgba);
+                out_height, sum, nonzero, *(const uint32_t *)pixels);
         }
 
         /* GL's origin is bottom-left; Vita surfaces are top-left. */
@@ -6283,7 +6322,7 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
                 clip_y0 == 0 && clip_x1 + 1 == out_width && clip_y1 + 1 == out_height) {
                 for (uint32_t y = 0; y < out_height; y++) {
                     memcpy((uint8_t *)surface->data + (size_t)y * stride * 4,
-                           rgba + (size_t)(height - 1 - y) * width * 4,
+                           pixels + (size_t)(height - 1 - y) * pixel_stride,
                            (size_t)out_width * 4);
                 }
                 free(rgba);
@@ -6294,7 +6333,7 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
             /* Sub-native frames need a nearest-neighbour expansion; do it as
                a plain 32-bit copy instead of the per-pixel format path. */
             if (direct_format) {
-                const uint32_t *src = (const uint32_t *)rgba;
+                const uint32_t *src = (const uint32_t *)pixels;
 
                 for (uint32_t y = clip_y0; y <= clip_y1; y++) {
                     uint32_t sy = (uint32_t)((uint64_t)y * height / out_height);
@@ -6306,7 +6345,7 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
                     if (sy >= height)
                         continue;
                     dst_row = (uint32_t *)((uint8_t *)surface->data + (size_t)y * stride * 4);
-                    src_row = src + (size_t)(height - 1 - sy) * width;
+                    src_row = src + (size_t)(height - 1 - sy) * (pixel_stride / 4);
                     sx = (uint32_t)((uint64_t)clip_x0 * width / out_width);
                     frac = (uint64_t)clip_x0 * width % out_width;
 
@@ -6335,7 +6374,7 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
 
                 if (sy >= height)
                     continue;
-                src = rgba + (size_t)(height - 1 - sy) * width * 4;
+                src = pixels + (size_t)(height - 1 - sy) * pixel_stride;
                 sx = (uint32_t)((uint64_t)clip_x0 * width / out_width);
                 frac = (uint64_t)clip_x0 * width % out_width;
 

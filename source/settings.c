@@ -127,6 +127,8 @@ static const Setting g_settings[] = {
     FLAG("VITA2NATIVE_STRETCH", "stretch the frame to fill the display"),
     FLAG("VITA2NATIVE_READBACK",
          "copy each frame back to guest memory (slow; for titles that read the framebuffer)"),
+    FLAG("VITA2NATIVE_NO_DMABUF_READBACK",
+         "use glReadPixels instead of a blit into a linear dma-buf"),
     FLAG("VITA2NATIVE_NO_PRESENT_OVERLAP", "the present overlap is on by default; set to disable"),
     FLAG("VITA2NATIVE_GL_INFO", "log the GL/EGL vendor, renderer and version"),
     FLAG("VITA2NATIVE_DIRECT_PRESENT_DEBUG", "log direct-present attach and frame handoff"),

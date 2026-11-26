@@ -139,6 +139,7 @@ set(VITA2NATIVE_HOST_GFX_SOURCES
     source/frame_profile.c
     source/host/host_gfx.c
     source/host/host_gfx_gl.c
+    source/host/host_gfx_readback.c
     source/host/host_overlay_image.c
     "${VITA2NATIVE_OVERLAY_HEADER}"
     source/host/host_kms_present.c

@@ -99,6 +99,16 @@ void host_gpu_present_framebuffer(HostGpuDevice device, const void *rgba, int wi
 void host_gpu_present_texture(HostGpuDevice device, unsigned int texture, int width, int height);
 
 /*
+ * Reads `framebuffer` back through a linear dma-buf and returns its CPU mapping.
+ * Rows are bottom-up like glReadPixels, `stride` is in bytes, and the pointer is
+ * valid until the next call. Returns false when the backend cannot do it (no
+ * render node, software GL), in which case the caller falls back to
+ * glReadPixels.
+ */
+bool host_gpu_read_target(HostGpuDevice device, unsigned int framebuffer, int width, int height,
+                          const void **pixels, unsigned int *stride);
+
+/*
  * Sets an RGBA8 debug overlay drawn on top of the next directly presented
  * frames. Pass NULL to clear it. The caller keeps ownership of the pixels; the
  * buffer must stay valid until the next present.

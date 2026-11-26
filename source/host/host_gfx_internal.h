@@ -32,4 +32,13 @@ void host_gfx_gl_present_framebuffer(HostGpuDevice device, const void *rgba, int
 void host_gfx_gl_present_texture(HostGpuDevice device, unsigned int texture, int width, int height);
 void host_gfx_gl_set_overlay(HostGpuDevice device, const void *rgba, int width, int height);
 
+/*
+ * Staged readback: blit `framebuffer` into a linear dma-buf and return its CPU
+ * mapping (rows bottom-up, `stride` in bytes, valid until the next call).
+ * False when the backend cannot, so the caller keeps glReadPixels.
+ */
+bool host_gfx_readback_read_target(HostGpuDevice device, unsigned int framebuffer, int width,
+                                   int height, const void **pixels, unsigned int *stride);
+void host_gfx_readback_shutdown(HostGpuDevice device);
+
 #endif
