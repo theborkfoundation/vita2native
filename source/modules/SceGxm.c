@@ -31,6 +31,7 @@
 #include "gxm/texture.h"
 #include "gxm/util.h"
 #include "host.h"
+#include "host_present_layout.h"
 #include "host_gfx_gl.h"
 #include "log.h"
 #include "module.h"
@@ -2815,21 +2816,53 @@ static void gxm_upload_uniforms(SceGxmContext *context, const SceGxmRegisteredPr
 /*
  * Sub-native rendering: the Vita renders at 960x544, but the handheld panel is
  * smaller and the GPU is fill-bound. VITA2NATIVE_RENDER_SCALE=0.6667 draws the
- * 3D scene at 640x362 and lets the present pass upscale it.
+ * scene at 640x362 and lets the present pass upscale it; =auto takes that ratio
+ * from the window, since drawing more pixels than the display shows only costs
+ * fill rate.
  */
+static float gxm_auto_render_scale(void)
+{
+    HostWindowInfo info;
+    int frame_width;
+    float scale;
+
+    if (!host_video_window_info(&info) || info.width <= 0 || info.height <= 0)
+        return 1.0f;
+
+    /* The presenter letterboxes the 960x544 frame, so this is the width it is
+       actually displayed at. */
+    frame_width = host_present_layout(info.width, info.height, 960, 544).width;
+    if (frame_width <= 0)
+        return 1.0f;
+
+    scale = (float)frame_width / 960.0f;
+    if (scale > 1.0f)
+        scale = 1.0f;
+    if (scale < 0.25f)
+        scale = 0.25f;
+    return scale;
+}
+
 static float gxm_render_scale(void)
 {
     static int loaded;
     static float scale = 1.0f;
 
     if (!loaded) {
-        double value = vita2native_env_double("VITA2NATIVE_RENDER_SCALE", 0.0);
+        const char *value = vita2native_env_str("VITA2NATIVE_RENDER_SCALE");
 
         loaded = 1;
-        if (value >= 0.25 && value <= 1.0)
-            scale = (float)value;
-        if (scale < 1.0f)
-            LOG("SceGxm: rendering at %.0f%% resolution", (double)(scale * 100.0f));
+        if (value && strcmp(value, "auto") == 0) {
+            scale = gxm_auto_render_scale();
+            LOG("SceGxm: rendering at %.0f%% resolution (auto)", (double)(scale * 100.0f));
+        } else {
+            double fixed = vita2native_env_double("VITA2NATIVE_RENDER_SCALE", 0.0);
+
+            if (fixed >= 0.25 && fixed <= 1.0)
+                scale = (float)fixed;
+            if (scale < 1.0f)
+                LOG("SceGxm: rendering at %.0f%% resolution", (double)(scale * 100.0f));
+        }
     }
 
     return scale;
