@@ -13,7 +13,7 @@ extern "C" {
  *
  * The table exists so a typo is visible: at startup, each VITA2NATIVE_* in the
  * environment is matched against it and an unknown name is reported with the
- * closest known one. It also feeds `VITA2NATIVE_ENV_DUMP=1`, which prints every
+ * closest known one. It also feeds `VITA2NATIVE_CLI_ENV_DUMP=1`, which prints every
  * knob with its current value and description.
  *
  * Values are read once and cached for the life of the process: the environment
@@ -55,7 +55,7 @@ double vita2native_env_double(const char *name, double fallback);
 /* Warn about VITA2NATIVE_* names that are not in the table. */
 void vita2native_settings_check(void);
 
-/* Print the table with the current values (VITA2NATIVE_ENV_DUMP=1). */
+/* Print the table with the current values (VITA2NATIVE_CLI_ENV_DUMP=1). */
 void vita2native_settings_dump(void);
 
 /* Print just the names and descriptions, one per line (`--help-settings`). */

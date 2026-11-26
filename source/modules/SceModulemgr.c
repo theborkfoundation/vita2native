@@ -59,7 +59,7 @@ static bool trace_module_lookups(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = vita2native_env_flag("VITA2NATIVE_TRACE_MODULE_LOOKUPS");
+        enabled = vita2native_env_flag("VITA2NATIVE_DEBUG_TRACE_MODULE_LOOKUPS");
 
     return enabled != 0;
 }
@@ -268,15 +268,15 @@ static void module_apply_patch_list(VitaModuleInfo *module, const char *list, bo
 
 /*
  * Debug helpers, applied once a module is mapped:
- *   VITA2NATIVE_MODULE_BKPT=<name>:<offset>[,<name>:<offset>...]
- *   VITA2NATIVE_MODULE_PATCH=<name>:<offset>=<hex16>[,...]
+ *   VITA2NATIVE_LOADER_MODULE_BKPT=<name>:<offset>[,<name>:<offset>...]
+ *   VITA2NATIVE_LOADER_MODULE_PATCH=<name>:<offset>=<hex16>[,...]
  * The name is a case-insensitive substring of the module name or path and the
  * offset is relative to the start of its mapped image.
  */
 static void module_apply_debug_patches(VitaModuleInfo *module)
 {
-    const char *breakpoints = vita2native_env_str("VITA2NATIVE_MODULE_BKPT");
-    const char *patches = vita2native_env_str("VITA2NATIVE_MODULE_PATCH");
+    const char *breakpoints = vita2native_env_str("VITA2NATIVE_LOADER_MODULE_BKPT");
+    const char *patches = vita2native_env_str("VITA2NATIVE_LOADER_MODULE_PATCH");
 
     if (!module->jit.rw || !module->jit.size)
         return;
@@ -297,7 +297,7 @@ static void module_apply_debug_patches(VitaModuleInfo *module)
 
 static void module_dump_code(const VitaModuleInfo *module)
 {
-    const char *dir = vita2native_env_str("VITA2NATIVE_DUMP_MODULE_CODE");
+    const char *dir = vita2native_env_str("VITA2NATIVE_DEBUG_DUMP_MODULE_CODE");
     char path[PATH_MAX];
     FILE *file;
 
@@ -395,13 +395,13 @@ static bool has_suprx_suffix(const char *name)
 }
 
 /*
- * VITA2NATIVE_SKIP_MODULES is a comma-separated list of module file names that
+ * VITA2NATIVE_LOADER_SKIP_MODULES is a comma-separated list of module file names that
  * must not be loaded from the application (e.g. "libc.suprx" to use the host
  * implementation only).
  */
 static bool is_skipped_module(const char *name)
 {
-    const char *list = vita2native_env_str("VITA2NATIVE_SKIP_MODULES");
+    const char *list = vita2native_env_str("VITA2NATIVE_LOADER_SKIP_MODULES");
     const char *cursor;
 
     if (!list || !name)
@@ -424,12 +424,12 @@ static bool is_skipped_module(const char *name)
 }
 
 /*
- * Names listed in VITA2NATIVE_SKIP_MODULE_START are loaded (so their exports
+ * Names listed in VITA2NATIVE_LOADER_SKIP_MODULE_START are loaded (so their exports
  * are available) but their module_start is not called.
  */
 static bool should_skip_start(const char *name)
 {
-    const char *list = vita2native_env_str("VITA2NATIVE_SKIP_MODULE_START");
+    const char *list = vita2native_env_str("VITA2NATIVE_LOADER_SKIP_MODULE_START");
     const char *cursor;
 
     if (!list || !name || !name[0])
@@ -490,7 +490,7 @@ static int load_modules_in_dir(const char *subdir)
             continue;
 
         if (is_skipped_module(entry->d_name)) {
-            LOG("Skipping \"%s/%s\": excluded by VITA2NATIVE_SKIP_MODULES", subdir,
+            LOG("Skipping \"%s/%s\": excluded by VITA2NATIVE_LOADER_SKIP_MODULES", subdir,
                 entry->d_name);
             continue;
         }
@@ -535,7 +535,7 @@ int SceModulemgr_load_app_modules(void)
     static const char *const dirs[] = { "sce_module", "Media/Modules" };
     int loaded = 0;
 
-    if (vita2native_env_flag("VITA2NATIVE_NO_MODULE_AUTOLOAD"))
+    if (vita2native_env_flag("VITA2NATIVE_LOADER_NO_AUTOLOAD"))
         return 0;
 
     for (size_t i = 0; i < ARRAY_SIZE(dirs); i++)

@@ -69,7 +69,7 @@ static int trace_sync(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = vita2native_env_flag("VITA2NATIVE_TRACE_SYNC");
+        enabled = vita2native_env_flag("VITA2NATIVE_DEBUG_TRACE_SYNC");
     return enabled;
 }
 
@@ -1134,7 +1134,7 @@ EXPORT(SceLibKernel, 0xA6A2C915, int, sceKernelTryLockLwMutex, SceKernelLwMutexW
 
     for (int i = 0; i < count; i++) {
         if (pthread_mutex_trylock(&lw->mutex) != 0) {
-            if (vita2native_env_flag("VITA2NATIVE_TRACE_SYNC"))
+            if (vita2native_env_flag("VITA2NATIVE_DEBUG_TRACE_SYNC"))
                 LOG("sceKernelTryLockLwMutex(\"%s\") failed on entry %d/%d (owner %d)",
                     lw->name, i, count, lw->owner);
             return SCE_KERNEL_ERROR_LW_MUTEX_FAILED_TO_OWN;

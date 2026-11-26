@@ -332,7 +332,7 @@ static int fill_info(int code, SceNetCtlInfo *info)
 /*
  * Report the console offline by default, which is what Vita3K does and what
  * makes titles take their "no network" fallback instead of waiting on an
- * online check. Set VITA2NATIVE_NETWORK=1 for titles that need real network
+ * online check. Set VITA2NATIVE_NET_ONLINE=1 for titles that need real network
  * status. This only affects SceNetCtl; sockets and HTTP still work.
  */
 static bool network_forced_off(void)
@@ -340,7 +340,7 @@ static bool network_forced_off(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = !vita2native_env_flag("VITA2NATIVE_NETWORK");
+        enabled = !vita2native_env_flag("VITA2NATIVE_NET_ONLINE");
     return enabled != 0;
 }
 
@@ -384,7 +384,7 @@ EXPORT(SceNetCtl, 0x6D26AC68, int, sceNetCtlInetGetState, int *state)
 
     *state = is_connected() ? SCE_NETCTL_STATE_CONNECTED : SCE_NETCTL_STATE_DISCONNECTED;
 
-    if (vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG")) {
+    if (vita2native_env_flag("VITA2NATIVE_DEBUG_INPUT")) {
         static int last = -2;
 
         if (*state != last) {

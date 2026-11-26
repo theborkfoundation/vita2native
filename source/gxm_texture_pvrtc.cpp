@@ -32,7 +32,7 @@ extern "C" int gxm_texture_decode_pvrtc(const void *data, uint32_t width, uint32
         return -1;
 
     if (fast_enabled < 0)
-        fast_enabled = !vita2native_env_flag("VITA2NATIVE_NO_PVRTC_FAST");
+        fast_enabled = !vita2native_env_flag("VITA2NATIVE_GFX_NO_PVRTC_FAST");
 
     if (fast_enabled && !two_bpp && !pvrt2 &&
         gxm_texture_decode_pvrtc4_fast(data, width, height, dest) == 0)

@@ -22,7 +22,7 @@ static unsigned int g_scenes;
 bool frame_profile_enabled(void)
 {
     if (g_enabled < 0)
-        g_enabled = vita2native_env_flag("VITA2NATIVE_PROFILE_FRAME");
+        g_enabled = vita2native_env_flag("VITA2NATIVE_DEBUG_PROFILE_FRAME");
     return g_enabled != 0;
 }
 

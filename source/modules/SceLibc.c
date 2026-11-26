@@ -374,7 +374,7 @@ static bool trace_alloc(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = vita2native_env_flag("VITA2NATIVE_TRACE_ALLOC");
+        enabled = vita2native_env_flag("VITA2NATIVE_DEBUG_TRACE_ALLOC");
 
     return enabled != 0;
 }
@@ -568,7 +568,7 @@ static int trace_fileio(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = vita2native_env_flag("VITA2NATIVE_TRACE_FILEIO");
+        enabled = vita2native_env_flag("VITA2NATIVE_DEBUG_TRACE_FILE_IO");
     return enabled;
 }
 

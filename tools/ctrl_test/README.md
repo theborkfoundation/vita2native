@@ -49,7 +49,7 @@ Copy the ELF next to `vita2native` and run it under whichever video driver the
 host provides:
 
 ```sh
-env SDL_VIDEODRIVER=wayland VITA2NATIVE_SDL_WINDOWED=1 VITA2NATIVE_SDL_SIZE=960x544 \
+env SDL_VIDEODRIVER=wayland VITA2NATIVE_VIDEO_WINDOWED=1 VITA2NATIVE_VIDEO_WINDOW_SIZE=960x544 \
     setarch armv7l -R ./vita2native ./ctrl_test.elf
 ```
 
@@ -68,11 +68,11 @@ SDL's joystick subsystem is independent of the video driver, so `dummy` video
 still opens a pad while another process owns the display:
 
 ```sh
-env SDL_VIDEODRIVER=dummy VITA2NATIVE_INPUT_DEBUG=1 \
+env SDL_VIDEODRIVER=dummy VITA2NATIVE_DEBUG_INPUT=1 \
     setarch armv7l -R ./vita2native ./ctrl_test.elf
 ```
 
-With `VITA2NATIVE_INPUT_DEBUG=1` the host adds the lines that matter:
+With `VITA2NATIVE_DEBUG_INPUT=1` the host adds the lines that matter:
 
 ```
 vita2native: SDL opened controller 0: <pad name>
@@ -103,7 +103,7 @@ ring around the corresponding stick. Pad firmware hotkey modifiers
   one bit in the `MASK` readout.
 - If pressing one face button highlights both `TRI` and `SQR`, the SDL mapping
   is wrong rather than the buttons being gated off.
-- If a press sets no bit, check `VITA2NATIVE_INPUT_DEBUG=1` for whether SDL
+- If a press sets no bit, check `VITA2NATIVE_DEBUG_INPUT=1` for whether SDL
   opened a controller (only SDL is used; there is no evdev backend).
 - If the wrong bit is set positionally (for example the left face button sets
   `TRI`), the mapping in `source/host/host_video_sdl.c` needs adjusting.

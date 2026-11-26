@@ -121,8 +121,8 @@ drops the render work of some frames so the guest loop keeps running at 60
 frames per second, at the cost of presenting fewer of them:
 
 ```sh
-VITA2NATIVE_FRAME_SKIP=auto ./vita2native game.vpk   # skip as needed
-VITA2NATIVE_FRAME_SKIP=2    ./vita2native game.vpk   # draw one frame in two
+VITA2NATIVE_VIDEO_FRAME_SKIP=auto ./vita2native game.vpk   # skip as needed
+VITA2NATIVE_VIDEO_FRAME_SKIP=2    ./vita2native game.vpk   # draw one frame in two
 ```
 
 `auto` measures a drawn frame and a skipped one, then picks the smallest ratio
@@ -162,47 +162,47 @@ Panfrost, and a Rockchip RK3326 with Mali-G31 through the vendor blob.
 ## Diagnostics
 
 Every knob lives in `include/settings.h` and is cached at startup.
-`--help-settings` lists them with their descriptions; `VITA2NATIVE_ENV_DUMP=1`
+`--help-settings` lists them with their descriptions; `VITA2NATIVE_CLI_ENV_DUMP=1`
 prints the same table with the current values.
 
 | Variable | Effect |
 | --- | --- |
-| `VITA2NATIVE_FPS=1` | frame rate, once per second |
-| `VITA2NATIVE_PROFILE_FRAME=1` | present / vblank / GXM / guest split |
-| `VITA2NATIVE_PROFILE=1` | GXM draw breakdown |
-| `VITA2NATIVE_GL_CHECK=1` | per-draw `glGetError` checks |
-| `VITA2NATIVE_DUMP_FRAME` | write presented frames as BMP (GPU readback when a window is used) |
-| `VITA2NATIVE_READBACK=1` | copy every frame back to guest memory (only titles that read their own framebuffer need it) |
-| `VITA2NATIVE_NO_DMABUF_READBACK=1` | use `glReadPixels` instead of blitting into a linear dma-buf |
-| `VITA2NATIVE_RENDER_SCALE=auto` | draw at the display's resolution (or a fixed 0.25–1.0 ratio) |
-| `VITA2NATIVE_RENDER_SCALE_SCOPE=present` | scale only the target that is presented (default `all`) |
-| `VITA2NATIVE_STRETCH=1` | fill the display instead of letterboxing |
+| `VITA2NATIVE_DEBUG_FPS=1` | frame rate, once per second |
+| `VITA2NATIVE_DEBUG_PROFILE_FRAME=1` | present / vblank / GXM / guest split |
+| `VITA2NATIVE_DEBUG_PROFILE=1` | GXM draw breakdown |
+| `VITA2NATIVE_DEBUG_GL_CHECK=1` | per-draw `glGetError` checks |
+| `VITA2NATIVE_DEBUG_DUMP_PRESENTED_FRAMES` | write presented frames as BMP (GPU readback when a window is used) |
+| `VITA2NATIVE_VIDEO_READBACK=1` | copy every frame back to guest memory (only titles that read their own framebuffer need it) |
+| `VITA2NATIVE_VIDEO_NO_DMABUF_READBACK=1` | use `glReadPixels` instead of blitting into a linear dma-buf |
+| `VITA2NATIVE_VIDEO_RENDER_SCALE=auto` | draw at the display's resolution (or a fixed 0.25–1.0 ratio) |
+| `VITA2NATIVE_VIDEO_RENDER_SCALE_SCOPE=present` | scale only the target that is presented (default `all`) |
+| `VITA2NATIVE_VIDEO_STRETCH=1` | fill the display instead of letterboxing |
 
 Headless capture and scripted input, which is how titles are validated without a
 panel:
 
 ```sh
-VITA2NATIVE_DUMP_FRAME=/tmp/frame-%04u.bmp \
-VITA2NATIVE_DUMP_FRAME_AT=0,120,240 \
-VITA2NATIVE_CTRL_SCRIPT="30:down,32:,34:cross,40:" \
+VITA2NATIVE_DEBUG_DUMP_PRESENTED_FRAMES=/tmp/frame-%04u.bmp \
+VITA2NATIVE_DEBUG_DUMP_PRESENTED_AT=0,120,240 \
+VITA2NATIVE_INPUT_PAD_SCRIPT="30:down,32:,34:cross,40:" \
 SDL_VIDEODRIVER=dummy ./vita2native ./VitaShell.vpk
 ```
 
 `..._AT` is a comma-separated list of swap indices; a `%u` in the path becomes
 the frame number. Script entries are `<frame>:<button>[+<button>...]` and apply
-until the next entry. `VITA2NATIVE_TOUCH_SCRIPT` drives the touch panel the same
+until the next entry. `VITA2NATIVE_INPUT_TOUCH_SCRIPT` drives the touch panel the same
 way, as `<frame>:<x>/<y>`.
 
 A frame is copied out of the render target only when something needs it in guest
 memory: a capture (just the frames you asked for), a window that cannot present
-the texture, or `VITA2NATIVE_READBACK=1`. The copy measured 62 ms per frame at
+the texture, or `VITA2NATIVE_VIDEO_READBACK=1`. The copy measured 62 ms per frame at
 960×544 on the Orange Pi, so it is not paid by default.
 
 When it does run, the render target is blitted into a linear dma-buf and the
 guest surface is filled from its CPU mapping: 5.9 ms of blit plus ~19 ms of copy
 on that board, against 62 ms for `glReadPixels`, whose cost on a tiled GPU is the
 driver walking the surface. Software GL keeps the direct read (its readback is
-already a memcpy), and `VITA2NATIVE_NO_DMABUF_READBACK=1` forces it anywhere else.
+already a memcpy), and `VITA2NATIVE_VIDEO_NO_DMABUF_READBACK=1` forces it anywhere else.
 
 Signals grab a frame from a running session, whatever the backend:
 
@@ -226,9 +226,9 @@ In `tools/`:
   directory, peeling the pkg, PFS and SELF layers.
 - `ctrl_test` — a guest executable that draws the live pad state, for checking
   controller mapping end to end.
-- `fps_chart.py` — serves a live FPS chart from `VITA2NATIVE_METRICS_FILE` on
+- `fps_chart.py` — serves a live FPS chart from `VITA2NATIVE_DEBUG_METRICS_FILE` on
   `127.0.0.1:8099`.
-- `img2png.py` — converts `VITA2NATIVE_DUMP_FRAME` BMPs and XWD screenshots to
+- `img2png.py` — converts `VITA2NATIVE_DEBUG_DUMP_PRESENTED_FRAMES` BMPs and XWD screenshots to
   PNG, with no dependencies beyond the standard library.
 - `gdb/live-attach.gdb` — attaches to a running process and stops on the guest's
   fatal signal, dumping registers and its stack.

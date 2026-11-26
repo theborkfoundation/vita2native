@@ -4,7 +4,7 @@
  * The LUT path in decode_linear_fast16() has to produce exactly what the
  * generic per-texel decoder produces, including the swizzle handling - getting
  * R and B the wrong way round is easy to miss by eye and would tint every
- * surface decoded through this format. VITA2NATIVE_NO_TEXTURE_LUT forces the
+ * surface decoded through this format. VITA2NATIVE_DEBUG_NO_TEXTURE_LUT forces the
  * generic path, so the same input can be decoded both ways and compared.
  *
  * The format is 1/5/5/5 bits per channel, so a full sweep of the 16-bit wire
@@ -60,10 +60,10 @@ int main(void)
         fprintf(stderr, "swizzle %u: decoding generic\n", swizzle);
         fflush(stderr);
 
-        setenv("VITA2NATIVE_NO_TEXTURE_LUT", "1", 1);
+        setenv("VITA2NATIVE_DEBUG_NO_TEXTURE_LUT", "1", 1);
         REQUIRE(gxm_texture_decode_level_at(generic, &tex, src, 0, 0) == 0,
                 "swizzle %u: generic decode failed", swizzle);
-        unsetenv("VITA2NATIVE_NO_TEXTURE_LUT");
+        unsetenv("VITA2NATIVE_DEBUG_NO_TEXTURE_LUT");
 
         fprintf(stderr, "swizzle %u: decoding LUT\n", swizzle);
         fflush(stderr);

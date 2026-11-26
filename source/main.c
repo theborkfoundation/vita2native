@@ -55,7 +55,7 @@
  * calls the original function with a return trampoline as its link register,
  * and the trampoline records the result before resuming the guest.
  *
- * VITA2NATIVE_TRACE_TARGET=<vita address>[,<address>...]
+ * VITA2NATIVE_DEBUG_TRACE_TARGET=<vita address>[,<address>...]
  */
 #define TRACE_RING_SIZE 32
 #define TRACE_STACK_SIZE 16
@@ -549,11 +549,11 @@ static void guest_signal_handler(int signal, siginfo_t *info, void *context)
 
     /* Optional guest-memory dump at crash: offsets are relative to the image. */
     trace_dump_ring();
-    if (vita2native_env_flag("VITA2NATIVE_DUMP_MAPS"))
+    if (vita2native_env_flag("VITA2NATIVE_DEBUG_DUMP_MAPS"))
         dump_big_anon_mappings("crash");
 
     {
-        const char *dump = vita2native_env_str("VITA2NATIVE_CRASH_DUMP");
+        const char *dump = vita2native_env_str("VITA2NATIVE_DEBUG_CRASH_DUMP");
 
         if (dump && g_main_image_rw) {
             const char *cursor = dump;
@@ -575,7 +575,7 @@ static void guest_signal_handler(int signal, siginfo_t *info, void *context)
     dump_maps_around(info ? (unsigned long)info->si_addr : 0UL);
 
     {
-        const char *code_dump = vita2native_env_str("VITA2NATIVE_CRASH_CODE_DUMP");
+        const char *code_dump = vita2native_env_str("VITA2NATIVE_DEBUG_CRASH_CODE_DUMP");
 
         if (code_dump && uc->uc_mcontext.arm_pc > 0x100) {
             unsigned long start = mapping_start((unsigned long)uc->uc_mcontext.arm_pc);
@@ -586,7 +586,7 @@ static void guest_signal_handler(int signal, siginfo_t *info, void *context)
     }
 
     {
-        const char *array_slot = vita2native_env_str("VITA2NATIVE_CRASH_DUMP_ARRAY");
+        const char *array_slot = vita2native_env_str("VITA2NATIVE_DEBUG_CRASH_DUMP_ARRAY");
 
         if (array_slot) {
             uint32_t array = 0;
@@ -684,12 +684,12 @@ static void guest_signal_handler(int signal, siginfo_t *info, void *context)
 
     {
         /*
-         * VITA2NATIVE_CRASH_DUMP_VEC=<offset from sp> dumps a growable pointer
+         * VITA2NATIVE_DEBUG_CRASH_DUMP_VEC=<offset from sp> dumps a growable pointer
          * vector whose {begin} lives at sp+offset. The image used by the
          * IL2CPP reflection code keeps {begin, end, capacity} at +4/+8/+0xc,
          * so the begin offset is the one to pass.
          */
-        const char *vector_slot = vita2native_env_str("VITA2NATIVE_CRASH_DUMP_VEC");
+        const char *vector_slot = vita2native_env_str("VITA2NATIVE_DEBUG_CRASH_DUMP_VEC");
 
         if (vector_slot) {
             unsigned long base = (unsigned long)uc->uc_mcontext.arm_sp +
@@ -746,7 +746,7 @@ static void guest_signal_handler(int signal, siginfo_t *info, void *context)
     /* Optional: let the kernel write a core for post-mortem analysis.  Returning
        from the handler retries the faulting instruction with SIG_DFL, which
        produces the core without needing to unblock the signal here. */
-    if (vita2native_env_flag("VITA2NATIVE_CRASH_CORE")) {
+    if (vita2native_env_flag("VITA2NATIVE_DEBUG_CRASH_CORE")) {
         struct sigaction dfl;
 
         memset(&dfl, 0, sizeof(dfl));
@@ -1000,7 +1000,7 @@ int main(int argc, char *argv[])
     signal(SIGPIPE, SIG_IGN);
 
     /*
-     * Arguments are handled before VITA2NATIVE_ENV_DUMP: an explicit --help must
+     * Arguments are handled before VITA2NATIVE_CLI_ENV_DUMP: an explicit --help must
      * win over an environment variable, and both exit before any host service,
      * so neither needs a display.
      */
@@ -1035,7 +1035,7 @@ int main(int argc, char *argv[])
             fatal_error("Storage path is too long.", "Check paths.storage in launcher.toml.");
     }
 
-    if (vita2native_env_flag("VITA2NATIVE_ENV_DUMP")) {
+    if (vita2native_env_flag("VITA2NATIVE_CLI_ENV_DUMP")) {
         vita2native_settings_dump();
         return 0;
     }
@@ -1088,7 +1088,7 @@ int main(int argc, char *argv[])
             LOG("Main executable process param at %p", process_param);
             SceProcessmgr_set_process_param(process_param);
 
-            if (vita2native_env_flag("VITA2NATIVE_TRACE_PROCESS_PARAM")) {
+            if (vita2native_env_flag("VITA2NATIVE_DEBUG_TRACE_PROCESS_PARAM")) {
                 const uint32_t *words = process_param;
 
                 for (unsigned i = 0; i < 40; i += 8)
@@ -1117,19 +1117,19 @@ int main(int argc, char *argv[])
         }
         /*
          * Debug helpers:
-         *   VITA2NATIVE_PATCH_BKPT=<offset>   plant `udf #0` in the image
-         *   VITA2NATIVE_PATCH=<off>=<hex16>,...  patch 16-bit instructions
+         *   VITA2NATIVE_LOADER_PATCH_BKPT=<offset>   plant `udf #0` in the image
+         *   VITA2NATIVE_LOADER_PATCH=<off>=<hex16>,...  patch 16-bit instructions
          * Both help inspect guest state without a writable JIT mapping.
          */
-        const char *breakpoint = vita2native_env_str("VITA2NATIVE_PATCH_BKPT");
-        const char *patch_list = vita2native_env_str("VITA2NATIVE_PATCH");
+        const char *breakpoint = vita2native_env_str("VITA2NATIVE_LOADER_PATCH_BKPT");
+        const char *patch_list = vita2native_env_str("VITA2NATIVE_LOADER_PATCH");
 
         g_main_image_rw = (uintptr_t)main_info.code_rw;
         g_main_image_size = jit.size;
 
-        /* VITA2NATIVE_DUMP_MAIN_CODE=<path> writes the relocated main image. */
+        /* VITA2NATIVE_DEBUG_DUMP_MAIN_CODE=<path> writes the relocated main image. */
         {
-            const char *dump_path = vita2native_env_str("VITA2NATIVE_DUMP_MAIN_CODE");
+            const char *dump_path = vita2native_env_str("VITA2NATIVE_DEBUG_DUMP_MAIN_CODE");
 
             if (dump_path && main_info.code_rw && jit.size) {
                 FILE *file = fopen(dump_path, "wb");
@@ -1144,13 +1144,13 @@ int main(int argc, char *argv[])
 
 #if defined(__arm__)
         /*
-         * VITA2NATIVE_TRACE_TARGET=<vita address>[,<address>...] records the
+         * VITA2NATIVE_DEBUG_TRACE_TARGET=<vita address>[,<address>...] records the
          * arguments of every call to the given functions. Useful for the
          * allocator entry points, which are only reachable through
          * movw/movt/blx sequences.
          */
         {
-            const char *targets = vita2native_env_str("VITA2NATIVE_TRACE_TARGET");
+            const char *targets = vita2native_env_str("VITA2NATIVE_DEBUG_TRACE_TARGET");
 
             LOG("Trace: env=%s rx=%p rw=%p", targets ? targets : "(unset)",
                 main_info.code_rx, main_info.code_rw);
@@ -1193,7 +1193,7 @@ int main(int argc, char *argv[])
                 unsigned long offset = strtoul(cursor, &end, 0);
 
                 if (!end || *end != '=') {
-                    LOG("VITA2NATIVE_PATCH: expected <offset>=<value> in \"%s\"", cursor);
+                    LOG("VITA2NATIVE_LOADER_PATCH: expected <offset>=<value> in \"%s\"", cursor);
                     break;
                 }
 
@@ -1219,7 +1219,7 @@ int main(int argc, char *argv[])
 #if defined(__arm__)
         /* Snapshot the host mappings before any guest code runs, so heap
            regions created by the title can be told apart from ours. */
-        if (vita2native_env_flag("VITA2NATIVE_DUMP_MAPS")) {
+        if (vita2native_env_flag("VITA2NATIVE_DEBUG_DUMP_MAPS")) {
             dump_maps_around(0);
             dump_big_anon_mappings("prelaunch");
         }

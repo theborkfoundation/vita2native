@@ -700,7 +700,7 @@ static void texel_format_init(TexelFormat *tf, SceGxmTextureFormat format)
     }
     tf->fast4 = count == 4 && tf->base == SCE_GXM_TEXTURE_BASE_FORMAT_U4U4U4U4;
     tf->fast16 = count == 4 && tf->base == SCE_GXM_TEXTURE_BASE_FORMAT_U1U5U5U5 &&
-                 !vita2native_env_flag("VITA2NATIVE_NO_TEXTURE_LUT");
+                 !vita2native_env_flag("VITA2NATIVE_DEBUG_NO_TEXTURE_LUT");
 
     if (count == 4) {
         const char *letters = swizzle4_letters[tf->swizzle & 7];
@@ -888,7 +888,7 @@ static int decode_texel_prepared(uint8_t out[4], const uint8_t *data, uint32_t i
         static int replicate = -1;
 
         if (replicate < 0)
-            replicate = (int)vita2native_env_int("VITA2NATIVE_MASK_REPLICATE", 0);
+            replicate = (int)vita2native_env_int("VITA2NATIVE_DEBUG_MASK_REPLICATE", 0);
 
         switch (swizzle) {
         case 0: /* R */

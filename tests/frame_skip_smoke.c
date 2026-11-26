@@ -9,7 +9,7 @@ int main(void)
 {
     int drawn = 0;
 
-    setenv("VITA2NATIVE_FRAME_SKIP", "3", 1);
+    setenv("VITA2NATIVE_VIDEO_FRAME_SKIP", "3", 1);
 
     /* The frames a title spends loading are never skipped. */
     for (int i = 0; i < 120; i++) {

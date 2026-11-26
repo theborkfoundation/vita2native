@@ -1,12 +1,12 @@
 /*
  * Deterministic controller script for automated runs.
  *
- * Setting VITA2NATIVE_CTRL_SCRIPT installs a button timetable keyed to the
+ * Setting VITA2NATIVE_INPUT_PAD_SCRIPT installs a button timetable keyed to the
  * display backend's frame counter. That counter is the host vblank clock on
  * the SDL backend (about 60 steps per second, independent of how slowly the
  * guest presents), so schedule presses in those units:
  *
- *   VITA2NATIVE_CTRL_SCRIPT="120:down,150:,600:cross,660:"
+ *   VITA2NATIVE_INPUT_PAD_SCRIPT="120:down,150:,600:cross,660:"
  *
  * Each entry is `<frame>:<button>[+<button>...]`; the state applies from that
  * frame until the next entry. An empty button list releases everything. Hold a
@@ -90,7 +90,7 @@ static void script_append(unsigned int frame, unsigned int buttons)
 
 static void script_load(void)
 {
-    const char *env = vita2native_env_str("VITA2NATIVE_CTRL_SCRIPT");
+    const char *env = vita2native_env_str("VITA2NATIVE_INPUT_PAD_SCRIPT");
     char *copy;
     char *token;
 
@@ -162,7 +162,7 @@ uint32_t SceCtrl_script_buttons(void)
         g_script_buttons = g_script[g_script_index].buttons;
         g_script_index++;
 
-        if (vita2native_env_flag("VITA2NATIVE_CTRL_SCRIPT_DEBUG"))
+        if (vita2native_env_flag("VITA2NATIVE_DEBUG_INPUT_PAD_SCRIPT"))
             fprintf(stderr, "vita2native: SceCtrl script frame %u -> buttons 0x%x\n", frame,
                     g_script_buttons);
     }

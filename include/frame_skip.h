@@ -9,7 +9,7 @@
  * dropping the render work of some frames keeps the loop at 60 Hz while fewer
  * frames reach the display.
  *
- *   VITA2NATIVE_FRAME_SKIP=auto   skip only while the loop is behind 60 Hz
+ *   VITA2NATIVE_VIDEO_FRAME_SKIP=auto   skip only while the loop is behind 60 Hz
  *                        =N       draw one frame in N (2 shows every other)
  *   unset, empty, 0 or 1          off
  *

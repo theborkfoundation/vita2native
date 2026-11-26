@@ -76,7 +76,7 @@ static void init(void)
     const char *value;
 
     g_ready = true;
-    value = vita2native_env_str("VITA2NATIVE_FRAME_SKIP");
+    value = vita2native_env_str("VITA2NATIVE_VIDEO_FRAME_SKIP");
     if (!value || !value[0])
         return;
 

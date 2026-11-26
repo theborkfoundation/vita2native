@@ -97,7 +97,7 @@ static int trace_fios(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = vita2native_env_flag("VITA2NATIVE_TRACE_FIOS");
+        enabled = vita2native_env_flag("VITA2NATIVE_DEBUG_TRACE_FIOS");
     return enabled;
 }
 

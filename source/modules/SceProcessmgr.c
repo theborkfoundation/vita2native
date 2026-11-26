@@ -158,11 +158,11 @@ EXPORT(SceProcessmgr, 0xEB6E50BB, int, sceKernelCallAbortHandler, void)
 
     /*
      * The guest reaches this helper through its own abort path, so guest
-     * return addresses are still live on the host stack. VITA2NATIVE_TRACE_ABORT
+     * return addresses are still live on the host stack. VITA2NATIVE_DEBUG_TRACE_ABORT
      * prints them (odd values inside the JIT code range) to place a failing
      * title.
      */
-    if (vita2native_env_flag("VITA2NATIVE_TRACE_ABORT")) {
+    if (vita2native_env_flag("VITA2NATIVE_DEBUG_TRACE_ABORT")) {
         const uint32_t *slots = (const uint32_t *)__builtin_frame_address(0);
         int shown = 0;
 

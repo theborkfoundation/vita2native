@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Enabled with VITA2NATIVE_FPS_OVERLAY. */
+/* Enabled with VITA2NATIVE_DEBUG_FPS_OVERLAY. */
 bool fps_overlay_enabled(void);
 
 /* Adds one sample; the display backend calls this once per second. */

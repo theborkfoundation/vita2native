@@ -12,10 +12,10 @@
  * trigger axes an Xbox pad uses; and its button policy depends on the device
  * name. SDL covers all of that, and nothing about presentation needs evdev.
  *
- * Setting VITA2NATIVE_CTRL_SCRIPT installs a deterministic script on top,
+ * Setting VITA2NATIVE_INPUT_PAD_SCRIPT installs a deterministic script on top,
  * keyed to the number of presented display frames:
  *
- *   VITA2NATIVE_CTRL_SCRIPT="2:down,4:,6:down,8:,10:cross,12:"
+ *   VITA2NATIVE_INPUT_PAD_SCRIPT="2:down,4:,6:down,8:,10:cross,12:"
  *
  * Each entry is `<frame>:<button>[+<button>...]`; the state applies from that
  * frame until the next entry. An empty button list releases everything. The
@@ -114,7 +114,7 @@ DECLARE_LIBRARY(SceCtrl, 0xD197E3C7);
 
 int SceCtrl_init(void)
 {
-    g_debug = vita2native_env_flag("VITA2NATIVE_INPUT_DEBUG");
+    g_debug = vita2native_env_flag("VITA2NATIVE_DEBUG_INPUT");
 
     if (g_debug)
         fprintf(stderr, "vita2native: SceCtrl reads input from SDL only\n");

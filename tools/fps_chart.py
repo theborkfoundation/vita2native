@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Live FPS chart for vita2native.
 
-The emulator appends one sample per second when VITA2NATIVE_METRICS_FILE is
+The emulator appends one sample per second when VITA2NATIVE_DEBUG_METRICS_FILE is
 set:
 
     <monotonic-ms>,<fps>,<frame-count>

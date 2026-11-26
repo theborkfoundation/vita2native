@@ -19,7 +19,7 @@
  * work a decoder uses (a 32x32 Morton tile, a 4x4 compressed block); a worker
  * must never start or end in the middle of one.
  *
- * Set VITA2NATIVE_DECODE_THREADS=1 to keep everything on the calling thread,
+ * Set VITA2NATIVE_GFX_DECODE_THREADS=1 to keep everything on the calling thread,
  * which is the A/B control for measuring the split.
  */
 #define GXM_DECODE_MAX_WORKERS 4
@@ -75,7 +75,7 @@ static inline unsigned gxm_decode_worker_count(uint32_t width, uint32_t height, 
 
     if (configured < 0) {
         long cores = gxm_decode_cpu_count();
-        long value = vita2native_env_int("VITA2NATIVE_DECODE_THREADS", 0);
+        long value = vita2native_env_int("VITA2NATIVE_GFX_DECODE_THREADS", 0);
 
         /*
          * Default: on three cores or more, one worker per core except the one
@@ -92,7 +92,7 @@ static inline unsigned gxm_decode_worker_count(uint32_t width, uint32_t height, 
             value = 1;
 
         configured = (int)value;
-        if (vita2native_env_flag("VITA2NATIVE_TRACE_TEXTURES"))
+        if (vita2native_env_flag("VITA2NATIVE_DEBUG_TRACE_TEXTURES"))
             fprintf(stderr, "gxm: texture decode uses %d worker(s) of %ld allowed CPU(s)\n",
                     configured, cores);
     }

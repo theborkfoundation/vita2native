@@ -134,7 +134,7 @@ static EGLContext gl_thread_context(HostGles *g)
     g_thread_state.bound = (EGLSurface)(uintptr_t)-1;
     g_thread_state.window = false;
 
-    if (vita2native_env_flag("VITA2NATIVE_DIRECT_PRESENT_DEBUG"))
+    if (vita2native_env_flag("VITA2NATIVE_DEBUG_PRESENT"))
         fprintf(stderr, "vita2native: thread ctx created (pbuffer %p, config %p)\n",
                 (void *)surface, (void *)g->thread_config);
 
@@ -419,7 +419,7 @@ HostGpuDevice host_gfx_gl_create(const HostGpuConfig *config)
         g->display = dpy;
         g->window_info = win;
 
-        if (vita2native_env_flag("VITA2NATIVE_DIRECT_PRESENT_DEBUG"))
+        if (vita2native_env_flag("VITA2NATIVE_DEBUG_PRESENT"))
             fprintf(stderr, "vita2native: EGL display %p from window type %d (headless=%d)\n",
                     (void *)dpy, (int)win.type, config->headless ? 1 : 0);
     }
@@ -501,7 +501,7 @@ HostGpuDevice host_gfx_gl_create(const HostGpuConfig *config)
     version = (const char *)g->glGetString(GL_VERSION);
     renderer = (const char *)g->glGetString(GL_RENDERER);
 
-    if (vita2native_env_flag("VITA2NATIVE_GL_INFO")) {
+    if (vita2native_env_flag("VITA2NATIVE_DEBUG_GL_INFO")) {
         const char *extensions = (const char *)g->glGetString(GL_EXTENSIONS);
 
         fprintf(stderr, "vita2native: GL extensions: %s\n", extensions ? extensions : "(none)");
@@ -895,7 +895,7 @@ static bool gxm_x11_visual_id(const void *native_window, EGLint *visual_id)
     if (!display)
         return false;
 
-    if (vita2native_env_flag("VITA2NATIVE_DIRECT_PRESENT_DEBUG"))
+    if (vita2native_env_flag("VITA2NATIVE_DEBUG_PRESENT"))
         fprintf(stderr, "vita2native: X display '%s', window 0x%lx\n",
                 display_string ? display_string(display) : "?",
                 (unsigned long)(uintptr_t)native_window);
@@ -941,7 +941,7 @@ static EGLSurface gles_attach_window_surface(HostGles *g, void *native_window)
     }
 
     if (have_visual &&
-        vita2native_env_flag("VITA2NATIVE_DIRECT_PRESENT_DEBUG"))
+        vita2native_env_flag("VITA2NATIVE_DEBUG_PRESENT"))
         fprintf(stderr, "vita2native: window visual 0x%x\n", (unsigned)window_visual);
 
     surface = g->eglCreateWindowSurface(g->display, g->egl_config, native_window, NULL);
@@ -1388,7 +1388,7 @@ void host_gfx_gl_present_texture(HostGpuDevice device, unsigned int texture, int
         g->glUseProgram(0);
     }
 
-    if (vita2native_env_flag("VITA2NATIVE_DIRECT_PRESENT_DEBUG")) {
+    if (vita2native_env_flag("VITA2NATIVE_DEBUG_PRESENT")) {
         static unsigned int logged;
         GLenum error = g->glGetError();
 

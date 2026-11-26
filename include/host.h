@@ -99,8 +99,8 @@ void host_sleep_ns(int64_t nanoseconds);
 /*
  * Video output. SDL is loaded at runtime and owns driver selection: KMSDRM on
  * handhelds, X11/Wayland on desktops, dummy for headless runs
- * (SDL_VIDEODRIVER=dummy). VITA2NATIVE_STRETCH fills the display instead of
- * letterboxing, and VITA2NATIVE_SDL_WINDOWED keeps a window instead of going
+ * (SDL_VIDEODRIVER=dummy). VITA2NATIVE_VIDEO_STRETCH fills the display instead of
+ * letterboxing, and VITA2NATIVE_VIDEO_WINDOWED keeps a window instead of going
  * fullscreen.
  */
 typedef struct HostVideo HostVideo;

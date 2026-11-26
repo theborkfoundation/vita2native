@@ -148,13 +148,13 @@ int main(int argc, char **argv)
     }
 
     /* Lookup and the typo hint. */
-    REQUIRE(vita2native_settings_find("VITA2NATIVE_NO_MSAA") != NULL);
-    CHECK(vita2native_settings_find("VITA2NATIVE_NO_MSA") == NULL);
+    REQUIRE(vita2native_settings_find("VITA2NATIVE_GFX_NO_MSAA") != NULL);
+    CHECK(vita2native_settings_find("VITA2NATIVE_GFX_NO_MSA") == NULL);
     CHECK(vita2native_settings_find("VITA2NATIVE_NOT_A_SETTING") == NULL);
     {
-        const char *hint = vita2native_settings_suggest("VITA2NATIVE_NO_MSA");
+        const char *hint = vita2native_settings_suggest("VITA2NATIVE_GFX_NO_MSA");
 
-        CHECK(hint != NULL && strcmp(hint, "VITA2NATIVE_NO_MSAA") == 0,
+        CHECK(hint != NULL && strcmp(hint, "VITA2NATIVE_GFX_NO_MSAA") == 0,
               "no hint for a one-letter typo");
         CHECK(vita2native_settings_suggest("VITA2NATIVE_Z") == NULL);
     }

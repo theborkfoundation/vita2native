@@ -81,7 +81,7 @@ int main(int argc, char **argv)
     }
 
     printf("present_probe: SDL output %dx%d stretch=%s\n", host_video_width(video),
-           host_video_height(video), getenv("VITA2NATIVE_STRETCH") ? "yes" : "no");
+           host_video_height(video), getenv("VITA2NATIVE_VIDEO_STRETCH") ? "yes" : "no");
 
     frame = calloc((size_t)width * height, sizeof(*frame));
     if (!frame) {

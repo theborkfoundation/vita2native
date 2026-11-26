@@ -78,8 +78,8 @@ static long g_captures[MAX_CAPTURES];
 static int g_capture_count;
 
 /*
- * Headless frame capture. Set VITA2NATIVE_DUMP_FRAME to a path and optionally
- * VITA2NATIVE_DUMP_FRAME_AT to a comma-separated list of swap indices to
+ * Headless frame capture. Set VITA2NATIVE_DEBUG_DUMP_PRESENTED_FRAMES to a path and optionally
+ * VITA2NATIVE_DEBUG_DUMP_PRESENTED_AT to a comma-separated list of swap indices to
  * capture a BMP of the guest framebuffer. A '%u' in the path is replaced with
  * the frame index, so one run can capture a scripted sequence. This is how real
  * homebrew output is checked without a window.
@@ -109,10 +109,10 @@ static bool g_dump_initialised;
 static bool dump_requested(void)
 {
     if (!g_dump_initialised) {
-        const char *at = vita2native_env_str("VITA2NATIVE_DUMP_FRAME_AT");
+        const char *at = vita2native_env_str("VITA2NATIVE_DEBUG_DUMP_PRESENTED_AT");
 
         g_dump_initialised = true;
-        g_dump_path = vita2native_env_str("VITA2NATIVE_DUMP_FRAME");
+        g_dump_path = vita2native_env_str("VITA2NATIVE_DEBUG_DUMP_PRESENTED_FRAMES");
         if (at) {
             char *copy = malloc(strlen(at) + 1);
 
@@ -349,9 +349,9 @@ static void display_log_fps(void)
     uint64_t now;
 
     if (!ready) {
-        enabled = vita2native_env_flag("VITA2NATIVE_FPS");
+        enabled = vita2native_env_flag("VITA2NATIVE_DEBUG_FPS");
         overlay_enabled = fps_overlay_enabled();
-        metrics_path = vita2native_env_str("VITA2NATIVE_METRICS_FILE");
+        metrics_path = vita2native_env_str("VITA2NATIVE_DEBUG_METRICS_FILE");
         if (metrics_path && !metrics_path[0])
             metrics_path = NULL;
         ready = true;
@@ -384,7 +384,7 @@ static void display_log_fps(void)
                 LOG("SceDisplay: %u frames in %.1f s (%.1f fps)", frames, elapsed, fps);
         }
 
-        if (vita2native_env_flag("VITA2NATIVE_TIME_TRACE")) {
+        if (vita2native_env_flag("VITA2NATIVE_DEBUG_CLOCK_TRACE")) {
             unsigned int total = g_time_trace_process + g_time_trace_rtc + g_time_trace_vcount;
 
             LOG("SceDisplay: clock reads with %u frames: process %u, rtc %u, vcount %u (%.1f "

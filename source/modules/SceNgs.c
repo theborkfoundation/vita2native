@@ -84,7 +84,7 @@ static int ngs_trace_enabled(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = vita2native_env_flag("VITA2NATIVE_NGS_DEBUG");
+        enabled = vita2native_env_flag("VITA2NATIVE_DEBUG_NGS");
     return enabled;
 }
 

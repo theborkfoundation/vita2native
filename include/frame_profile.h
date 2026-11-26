@@ -5,9 +5,9 @@
 #include <stdint.h>
 
 /*
- * Whole-frame timing, enabled with VITA2NATIVE_PROFILE_FRAME=1.
+ * Whole-frame timing, enabled with VITA2NATIVE_DEBUG_PROFILE_FRAME=1.
  *
- * VITA2NATIVE_PROFILE covers GXM internals only, which is not enough to tell
+ * VITA2NATIVE_DEBUG_PROFILE covers GXM internals only, which is not enough to tell
  * where a slow title spends its frame: on the handhelds most of it is guest
  * code and vblank waits. These counters split the interval between presented
  * frames into the GXM draw/end work, the presentation, vblank sleeps, and the

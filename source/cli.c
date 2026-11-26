@@ -190,7 +190,7 @@ CliResult cli_parse(int argc, char *argv[], CliOptions *out, const char **error)
 
     argparse_init(&parser, options, usages, 0);
     argparse_describe(&parser, "Run a PlayStation Vita title natively on 32-bit ARM Linux.",
-                      "VITA2NATIVE_ENV_DUMP=1 prints every setting with its value.");
+                      "VITA2NATIVE_CLI_ENV_DUMP=1 prints every setting with its value.");
     leftover = argparse_parse(&parser, argc, (const char **)argv);
 
     /* A terminal flag wins over everything else, help first. */
@@ -223,7 +223,7 @@ void cli_print_usage(FILE *stream, const char *program)
     fprintf(stream, "      --headless        run without a window\n");
     fprintf(stream, "\n");
     fprintf(stream, "With no title, <storage>/executable is loaded from the working\n");
-    fprintf(stream, "directory. Settings are environment variables; VITA2NATIVE_ENV_DUMP=1\n");
+    fprintf(stream, "directory. Settings are environment variables; VITA2NATIVE_CLI_ENV_DUMP=1\n");
     fprintf(stream, "lists them with their current values.\n");
     fflush(stream);
 }

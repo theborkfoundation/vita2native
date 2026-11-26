@@ -2,7 +2,7 @@
 #define VITA2NATIVE_TIME_TRACE_H
 
 /*
- * Diagnostic counters for VITA2NATIVE_TIME_TRACE.
+ * Diagnostic counters for VITA2NATIVE_DEBUG_CLOCK_TRACE.
  *
  * A title that never reads a clock advances once per presented frame, so on a
  * host that only renders 30 fps it runs at half of real speed - while a title

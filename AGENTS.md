@@ -226,7 +226,7 @@ ssh opiz3 'cd ~/vita2native && ~/.local/bin/sway-vnc-kiosk run \
   the guest's own frame dump does not include it.
 - **This board hard-hangs on asset-heavy loads** (SSH banner times out, ping and
   TCP still fine, needs a power cycle). See `ISSUES.md` I-15: run with
-  `VITA2NATIVE_FINISH_PER_FRAME=1`, a cgroup memory cap, and logs on disk rather
+  `VITA2NATIVE_DEBUG_FINISH_PER_FRAME=1`, a cgroup memory cap, and logs on disk rather
   than tmpfs. Do not assume a `dummy`-driver run is cheap — the guest still
   loads and decodes every asset.
 
@@ -240,7 +240,7 @@ binary as described under *Staging the binary*.
 ## Rendering traps
 
 - **A black panel with a healthy fps counter means every draw is being dropped.**
-  Set `VITA2NATIVE_GL_CHECK=1`: `GL error 0x506` is
+  Set `VITA2NATIVE_DEBUG_GL_CHECK=1`: `GL error 0x506` is
   `GL_INVALID_FRAMEBUFFER_OPERATION`, and GL silently discards the draw.
   `gxm_gl_check()` names the cause:
 
@@ -261,13 +261,13 @@ binary as described under *Staging the binary*.
   Angry Birds Trilogy never hits it — "works on title X" proves nothing here.
 
 - **The `.dsm` shader dump is guest GXP disassembly, not what reaches GL.**
-  `VITA2NATIVE_GXM_SHADER_DUMP=<dir>` writes `.dsm` plus the translated
+  `VITA2NATIVE_DEBUG_DUMP_SHADERS=<dir>` writes `.dsm` plus the translated
   `.vert`/`.frag`. Read the GLSL when a draw is black or wrong-coloured. It only
   writes on a cache *miss*, so clear `vita2native/cache/shaders` first.
 
 - **Validate a diagnostic knob before trusting a negative result.** Three that
-  silently did nothing: `VITA2NATIVE_NO_FB_FETCH` (the cache is read before the
-  flag, so clear it), `VITA2NATIVE_FORCE_COLOR` (needs a `_Color` uniform) and
+  silently did nothing: `VITA2NATIVE_GFX_NO_FB_FETCH` (the cache is read before the
+  flag, so clear it), `VITA2NATIVE_DEBUG_FORCE_COLOR` (needs a `_Color` uniform) and
   `VITA2NATIVE_DEBUG_TEXCOLOR` (needs `fragTex_tex` and `v_TexCoord0`).
   `VITA2NATIVE_DEBUG_PROGRAM_COLORS` does work generally — use it to prove
   fragment output reaches the framebuffer at all.

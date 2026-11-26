@@ -31,7 +31,7 @@ bool fps_overlay_enabled(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = vita2native_env_flag("VITA2NATIVE_FPS_OVERLAY");
+        enabled = vita2native_env_flag("VITA2NATIVE_DEBUG_FPS_OVERLAY");
     return enabled != 0;
 }
 

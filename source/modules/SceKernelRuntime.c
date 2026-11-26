@@ -260,7 +260,7 @@ static uint64_t runtime_now_us(void)
     g_time_trace_process++;
 
     if (scale < 0.0) {
-        const char *value = vita2native_env_str("VITA2NATIVE_TIME_SCALE");
+        const char *value = vita2native_env_str("VITA2NATIVE_DEBUG_CLOCK_SCALE");
 
         scale = (value && value[0]) ? strtod(value, NULL) : 1.0;
         if (scale <= 0.0)

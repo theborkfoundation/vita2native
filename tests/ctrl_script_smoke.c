@@ -57,7 +57,7 @@ int main(void)
     SceCtrlData pad;
     SceCtrlPadInputMode mode;
 
-    if (setenv("VITA2NATIVE_CTRL_SCRIPT", "0:down,2:,3:cross+start,5:r1,7:,22:cross+start,24:",
+    if (setenv("VITA2NATIVE_INPUT_PAD_SCRIPT", "0:down,2:,3:cross+start,5:r1,7:,22:cross+start,24:",
                1) != 0) {
         fprintf(stderr, "setenv failed\n");
         return 1;

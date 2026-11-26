@@ -289,7 +289,7 @@ EXPORT(SceSysmem, 0x87CC580B, int, sceKernelGetFreeMemorySize, SceKernelFreeMemo
     info->size_phycont = 0x800000;
 
     {
-        const char *override = vita2native_env_str("VITA2NATIVE_FREE_MEM");
+        const char *override = vita2native_env_str("VITA2NATIVE_MEM_FREE_SIZE");
 
         if (override)
             info->size_user = (SceSize)strtoul(override, NULL, 0);

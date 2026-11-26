@@ -86,7 +86,7 @@ static bool trace_imports(void)
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = vita2native_env_flag("VITA2NATIVE_TRACE_IMPORTS");
+        enabled = vita2native_env_flag("VITA2NATIVE_DEBUG_TRACE_IMPORTS");
 
     return enabled != 0;
 }
@@ -96,11 +96,11 @@ static bool trace_imports(void)
  * do not carry a Thumb bit in every build: VitaSDK stores them tagged, Sony's
  * and Unity's linkers store plain offsets. Relocation codes are unambiguous
  * (Thumb functions only carry R_ARM_THM_* relocations), so use them to decide.
- * Set VITA2NATIVE_GUEST_ARM=1 to force ARM mode.
+ * Set VITA2NATIVE_LOADER_GUEST_ARM=1 to force ARM mode.
  */
 static bool module_is_thumb(const segment_info_t *segments, int num_segments)
 {
-    const char *force_arm = vita2native_env_str("VITA2NATIVE_GUEST_ARM");
+    const char *force_arm = vita2native_env_str("VITA2NATIVE_LOADER_GUEST_ARM");
     int thumb = 0;
     int arm = 0;
 
@@ -825,9 +825,9 @@ segments_ready:
         info->data_addr = (void *)data_addr;
     }
 
-    /* VITA2NATIVE_DUMP_MAIN_DATA=<path> writes the main image's data segment. */
+    /* VITA2NATIVE_DEBUG_DUMP_MAIN_DATA=<path> writes the main image's data segment. */
     if (info && strcmp(info->name, "eboot") == 0) {
-        const char *dump_path = vita2native_env_str("VITA2NATIVE_DUMP_MAIN_DATA");
+        const char *dump_path = vita2native_env_str("VITA2NATIVE_DEBUG_DUMP_MAIN_DATA");
 
         if (dump_path && data_addr && data_size) {
             FILE *file = fopen(dump_path, "wb");
