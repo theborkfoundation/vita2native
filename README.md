@@ -142,7 +142,7 @@ prints the same table with the current values.
 | `VITA2NATIVE_PROFILE_FRAME=1` | present / vblank / GXM / guest split |
 | `VITA2NATIVE_PROFILE=1` | GXM draw breakdown |
 | `VITA2NATIVE_GL_CHECK=1` | per-draw `glGetError` checks |
-| `VITA2NATIVE_DUMP_FRAME` | write guest framebuffers as BMP |
+| `VITA2NATIVE_DUMP_FRAME` | write presented frames as BMP (GPU readback when a window is used) |
 | `VITA2NATIVE_RENDER_SCALE=0.5` | render 3D at half resolution |
 | `VITA2NATIVE_STRETCH=1` | fill the display instead of letterboxing |
 

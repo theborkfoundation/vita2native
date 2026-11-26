@@ -10719,6 +10719,39 @@ bool SceGxm_get_present_frame(const void *data, unsigned int *texture, int *widt
     return true;
 }
 
+bool SceGxm_read_present_frame(uint8_t *rgba, int width, int height)
+{
+    GLint previous = 0;
+    GLuint framebuffer = 0;
+    bool complete;
+
+    if (!g_gl || !rgba || !g_present_frame.valid)
+        return false;
+    if (width != g_present_frame.width || height != g_present_frame.height)
+        return false;
+
+    host_gpu_thread_enter(g_device);
+
+    /* Attach the render target to a scratch framebuffer. Attaching does not
+       bind it to a texture unit, so the sampler memo is untouched. */
+    g_gl->glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous);
+    g_gl->glGenFramebuffers(1, &framebuffer);
+    g_gl->glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    g_gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                                 g_present_frame.texture, 0);
+    complete = g_gl->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+
+    if (complete) {
+        g_gl->glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        g_gl->glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    }
+
+    g_gl->glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)previous);
+    g_gl->glDeleteFramebuffers(1, &framebuffer);
+
+    return complete;
+}
+
 int SceGxm_init(HostGpuDevice device)
 {
     g_device = device;

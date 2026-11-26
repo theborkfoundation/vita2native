@@ -74,25 +74,21 @@ static void put_u32(unsigned char *p, uint32_t value)
     p[3] = (unsigned char)(value >> 24);
 }
 
-static void dump_framebuffer(const SceDisplayFrameBuf *fb)
-{
-    static const char *path;
-    static bool initialised;
-    const uint8_t *base;
-    unsigned int width;
-    unsigned int height;
-    unsigned int pitch;
-    unsigned int row_size;
-    unsigned char header[54];
-    unsigned char *row;
-    char file_path[1024];
-    FILE *file;
+static const char *g_dump_path;
+static bool g_dump_initialised;
 
-    if (!initialised) {
+/*
+ * Reads the capture settings once and reports whether the current swap index
+ * was asked for. The GPU readback below has to know before it pays for a copy,
+ * so the check is separate from the writers.
+ */
+static bool dump_requested(void)
+{
+    if (!g_dump_initialised) {
         const char *at = vita2native_env_str("VITA2NATIVE_DUMP_FRAME_AT");
 
-        initialised = true;
-        path = vita2native_env_str("VITA2NATIVE_DUMP_FRAME");
+        g_dump_initialised = true;
+        g_dump_path = vita2native_env_str("VITA2NATIVE_DUMP_FRAME");
         if (at) {
             char *copy = malloc(strlen(at) + 1);
 
@@ -108,65 +104,101 @@ static void dump_framebuffer(const SceDisplayFrameBuf *fb)
         }
     }
 
-    if (!path || !fb || !fb->base)
-        return;
-    if (g_capture_count > 0) {
-        bool wanted = false;
+    if (!g_dump_path)
+        return false;
+    if (g_capture_count == 0)
+        return true;
 
-        for (int i = 0; i < g_capture_count; i++)
-            wanted = wanted || g_captures[i] == (long)g_frame_count;
-        if (!wanted)
-            return;
+    for (int i = 0; i < g_capture_count; i++) {
+        if (g_captures[i] == (long)g_frame_count)
+            return true;
     }
 
-    /* A '%u' in the path is replaced with the frame index, which lets one run
-       capture a whole scripted sequence. */
-    if (strchr(path, '%'))
-        snprintf(file_path, sizeof(file_path), path, g_frame_count);
+    return false;
+}
+
+/* A '%u' in the path is replaced with the frame index, which lets one run
+   capture a whole scripted sequence. */
+static void dump_file_path(char *out, size_t size)
+{
+    if (strchr(g_dump_path, '%'))
+        snprintf(out, size, g_dump_path, g_frame_count);
     else
-        snprintf(file_path, sizeof(file_path), "%s", path);
+        snprintf(out, size, "%s", g_dump_path);
+}
 
-    width  = fb->width;
-    height = fb->height;
-    pitch  = fb->pitch;
-    if (width == 0 || height == 0 || pitch < width)
-        return;
+/* Opens `path` and writes the BMP header; the caller appends the rows,
+   bottom row first, which is the order a bottom-up BMP stores them in. */
+static FILE *bmp_create(const char *path, unsigned int width, unsigned int height,
+                        unsigned int *row_size)
+{
+    unsigned char header[54];
+    FILE *file;
 
-    file = fopen(file_path, "wb");
+    *row_size = (width * 3 + 3) & ~3u;
+
+    file = fopen(path, "wb");
     if (!file)
-        return;
-
-    base = fb->base;
-    row_size = (width * 3 + 3) & ~3u;
-    row = calloc(1, row_size);
-    if (!row) {
-        fclose(file);
-        return;
-    }
+        return NULL;
 
     memset(header, 0, sizeof(header));
     header[0] = 'B';
     header[1] = 'M';
-    put_u32(header + 2, 54u + (uint32_t)(row_size * height));
+    put_u32(header + 2, 54u + (uint32_t)(*row_size * height));
     put_u32(header + 10, 54);
     put_u32(header + 14, 40);
     put_u32(header + 18, width);
     put_u32(header + 22, height);
     put_u16(header + 26, 1);
     put_u16(header + 28, 24);
-    put_u32(header + 34, (uint32_t)(row_size * height));
+    put_u32(header + 34, (uint32_t)(*row_size * height));
     fwrite(header, 1, sizeof(header), file);
 
+    return file;
+}
+
+static void dump_framebuffer(const SceDisplayFrameBuf *fb)
+{
+    unsigned int width;
+    unsigned int height;
+    unsigned int pitch;
+    unsigned int row_size;
+    unsigned char *row;
+    char file_path[1024];
+    FILE *file;
+
+    if (!dump_requested() || !fb || !fb->base)
+        return;
+
+    width = fb->width;
+    height = fb->height;
+    pitch = fb->pitch;
+    if (width == 0 || height == 0 || pitch < width)
+        return;
+
+    dump_file_path(file_path, sizeof(file_path));
+    file = bmp_create(file_path, width, height, &row_size);
+    if (!file)
+        return;
+
+    row = calloc(1, row_size);
+    if (!row) {
+        fclose(file);
+        return;
+    }
+
     for (unsigned int y = height; y-- > 0;) {
-        const uint32_t *src = (const uint32_t *)(base + (size_t)y * pitch * 4);
+        const uint32_t *src = (const uint32_t *)(fb->base + (size_t)y * pitch * 4);
 
         for (unsigned int x = 0; x < width; x++) {
             uint32_t pixel = src[x];
 
-            /* A8B8G8R8, the only format the guest can present. */
-            row[x * 3 + 0] = (unsigned char)(pixel & 0xFF);
-            row[x * 3 + 1] = (unsigned char)((pixel >> 8) & 0xFF);
-            row[x * 3 + 2] = (unsigned char)((pixel >> 16) & 0xFF);
+            /* A8B8G8R8 is a word: R in the low byte, then G, B, A. The guest
+               buffer is little-endian, so its bytes are R,G,B,A while a BMP
+               row is B,G,R. */
+            row[x * 3 + 0] = (unsigned char)((pixel >> 16) & 0xFF); /* B */
+            row[x * 3 + 1] = (unsigned char)((pixel >> 8) & 0xFF);  /* G */
+            row[x * 3 + 2] = (unsigned char)(pixel & 0xFF);         /* R */
         }
         fwrite(row, 1, row_size, file);
     }
@@ -174,6 +206,61 @@ static void dump_framebuffer(const SceDisplayFrameBuf *fb)
     free(row);
     fclose(file);
     LOG("SceDisplay: captured frame %u to %s", g_frame_count, file_path);
+}
+
+/*
+ * A GPU-presented frame never reaches guest memory: the video layer blits the
+ * render target straight to the window, so pParam->base stays black and the
+ * guest-buffer capture above has nothing to write. Read the render target back
+ * instead. Rows come bottom-up from GL, which is exactly the BMP order.
+ */
+static void dump_present_texture(int width, int height)
+{
+    unsigned int row_size;
+    unsigned char *row;
+    uint8_t *rgba;
+    char file_path[1024];
+    FILE *file;
+    bool written = false;
+
+    if (width <= 0 || height <= 0)
+        return;
+
+    rgba = malloc((size_t)width * (size_t)height * 4);
+    if (!rgba)
+        return;
+
+    dump_file_path(file_path, sizeof(file_path));
+    if (!SceGxm_read_present_frame(rgba, width, height)) {
+        free(rgba);
+        return;
+    }
+
+    file = bmp_create(file_path, (unsigned int)width, (unsigned int)height, &row_size);
+    if (file) {
+        row = calloc(1, row_size);
+        if (row) {
+            for (int y = 0; y < height; y++) {
+                const uint8_t *src = rgba + (size_t)y * (size_t)width * 4;
+
+                for (int x = 0; x < width; x++) {
+                    row[x * 3 + 0] = src[x * 4 + 2]; /* B */
+                    row[x * 3 + 1] = src[x * 4 + 1]; /* G */
+                    row[x * 3 + 2] = src[x * 4 + 0]; /* R */
+                }
+                fwrite(row, 1, row_size, file);
+            }
+            free(row);
+            written = true;
+        }
+        fclose(file);
+    }
+
+    free(rgba);
+
+    if (written)
+        LOG("SceDisplay: captured GPU frame %u (%dx%d) to %s", g_frame_count, width, height,
+            file_path);
 }
 
 unsigned int SceDisplay_get_frame_count(void)
@@ -290,6 +377,8 @@ EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayF
             if (video && pParam->base && pParam->width && pParam->height)
                 host_video_present(video, pParam->base, (int)pParam->width, (int)pParam->height,
                                    (int)pParam->pitch);
+        } else if (dump_requested()) {
+            dump_present_texture(present_width, present_height);
         }
     }
     if (present_started) {

@@ -115,7 +115,7 @@ static const Setting g_settings[] = {
     FLAG("VITA2NATIVE_PROFILE_FRAME", "print the frame split (present, vblank, GXM, guest)"),
 
     /* Display and presentation. */
-    STR("VITA2NATIVE_DUMP_FRAME", "write guest framebuffer BMPs here (%u = frame number)"),
+    STR("VITA2NATIVE_DUMP_FRAME", "write presented frames as BMPs here (%u = frame number)"),
     STR("VITA2NATIVE_DUMP_FRAME_AT", "comma-separated swap indices to capture"),
     FLAG("VITA2NATIVE_FINISH_PER_FRAME", "glFinish before each readback (skipped by default)"),
     FLAG("VITA2NATIVE_FPS", "log the frame rate once a second"),

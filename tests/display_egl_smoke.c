@@ -35,6 +35,15 @@ bool SceGxm_get_present_frame(void *base, unsigned int *texture, int *width, int
     return false;
 }
 
+/* The GPU-side frame capture needs a real render target to read back. */
+bool SceGxm_read_present_frame(uint8_t *rgba, int width, int height)
+{
+    (void)rgba;
+    (void)width;
+    (void)height;
+    return false;
+}
+
 /* The save-data dialog is part of SceCommonDialog, which this test links in for
    the overlay; neither of these is reachable from a display-only test. */
 void *SceSysmem_alloc_guest_scratch(const char *name, uint32_t size)
