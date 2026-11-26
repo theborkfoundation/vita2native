@@ -75,7 +75,7 @@ The four sample images in `assets/` were generated with OpenAI image generation:
 Run the launcher from the directory containing `launcher.toml`:
 
 ```sh
-cd ~/v2n
+cd ~/vita2native
 ./v2n-launcher
 ```
 
@@ -85,7 +85,7 @@ A configuration file is optional. Copy `launcher.toml.example` to
 ```toml
 [paths]
 games = "./games"
-loader = "./v2n"
+loader = "./vita2native"
 
 [appearance]
 # logo = "./assets/logo.svg" # PNG and SVG are supported

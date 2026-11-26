@@ -49,14 +49,14 @@ SDL2 and EGL/GLESv2 are `dlopen`ed, so the binary never links against them.
 ./build/release/vita2native ./MyHomebrew.vpk
 ```
 
-The binary must **not** be named `vita2native`. That name is the runtime's
-filesystem root, created on first run, so the two collide. Deploy it as
-`v2n-arm`.
+The binary can keep its own name. The guest filesystem root is `storage/` in the
+working directory — or whatever `paths.storage` names in a `launcher.toml`
+beside it — so `vita2native` no longer collides with anything.
 
 ### Options
 
 ```
-v2n-arm [--headless] [title.vpk|eboot.bin]
+vita2native [--headless] [title.vpk|eboot.bin]
 ```
 
 | Option | Effect |
@@ -156,7 +156,7 @@ panel:
 VITA2NATIVE_DUMP_FRAME=/tmp/frame-%04u.bmp \
 VITA2NATIVE_DUMP_FRAME_AT=0,120,240 \
 VITA2NATIVE_CTRL_SCRIPT="30:down,32:,34:cross,40:" \
-SDL_VIDEODRIVER=dummy ./v2n-arm ./VitaShell.vpk
+SDL_VIDEODRIVER=dummy ./vita2native ./VitaShell.vpk
 ```
 
 `..._AT` is a comma-separated list of swap indices; a `%u` in the path becomes

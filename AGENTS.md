@@ -52,26 +52,44 @@ and a display-backed bed for GL.
 
 ## Staging the binary
 
-**Copy it as `v2n-arm`, into `~/v2n/` on the test bed:**
+**Copy it as `vita2native`, into `~/vita2native/` on the test bed:**
 
 ```sh
-scp build/release/vita2native <host>:~/v2n/v2n-arm
+scp build/release/vita2native <host>:~/vita2native/vita2native
 ```
 
-Never name it `vita2native`. That name is the runtime's filesystem root
-(`VITA2NATIVE_ROOT_PATH` in `include/config.h`), created on first run, so a
-binary with that name collides with the guest's `ux0:`/`savedata/` tree.
+That directory is the layout the loader and launcher expect:
+
+```
+vita2native/            launcher, launcher.toml, games/<ID>/, storage/
+```
+
+`launcher.toml` names the paths: `games` (imported titles), `loader` (the
+binary below it) and `storage` (the guest filesystem — `ux0/`, `savedata/`,
+`system/`, `cache/`, `log.txt`). The loader reads `paths.storage` from it in
+the working directory, defaulting to `storage`, so run titles from that
+directory; a run started elsewhere creates a fresh `storage/` beside it:
+
+```sh
+ssh <host> 'cd ~/vita2native && ./vita2native games/<TITLEID>/eboot.bin'
+```
+
+The binary keeps the name `vita2native`. That no longer collides with anything:
+the guest root is `storage/`, not a directory named after the binary. Beds that
+still use the older `~/v2n/v2n-arm` layout behave the same way — with no
+`launcher.toml` the loader falls back to `storage/` in the working directory,
+which is why the scratchvm commands below run from `~/v2n`.
 
 A running binary cannot be overwritten (`text file busy` on ARM). Stop it first,
 or upload to a temporary name and move:
 
 ```sh
-scp build/release/vita2native <host>:~/v2n/v2n-arm.new
-ssh <host> 'pkill -f "[v]2n-arm"; sleep 1; mv ~/v2n/v2n-arm.new ~/v2n/v2n-arm'
+scp build/release/vita2native <host>:~/vita2native/vita2native.new
+ssh <host> 'pkill -x vita2native; sleep 1; mv ~/vita2native/vita2native.new ~/vita2native/vita2native'
 ```
 
-Use the bracketed `pkill` pattern. `pkill -f "./v2n-arm"`
-matches the shell running it and kills your own SSH session.
+Use `pkill -x`, which matches the process name only. `pkill -f vita2native`
+also matches the shell running the command and kills your own SSH session.
 
 ## Staging a title from Vita3K
 
@@ -100,8 +118,10 @@ cp -Rf "$V3K/cache/decrypted_selfs/$ID/sce_module/." /tmp/stage-$ID/$ID/sce_modu
 cp -Rf "$V3K/cache/decrypted_selfs/$ID/sce_sys/."    /tmp/stage-$ID/$ID/sce_sys/
 ```
 
-Then copy the title to `<host>:~/vita-games/<TITLEID>/`, so `eboot.bin` sits at
-`~/vita-games/<TITLEID>/eboot.bin`.
+Then copy the title into the install directory's `games/`:
+`<host>:~/vita2native/games/<TITLEID>/`, so `eboot.bin` sits at
+`~/vita2native/games/<TITLEID>/eboot.bin`. Beds still on the older layout use
+`~/vita-games/<TITLEID>/` instead, as the scratchvm examples below do.
 
 Notes that save time:
 
@@ -118,8 +138,8 @@ Notes that save time:
 - macOS `tar` ships AppleDouble `._*` files. Strip them, or use `rsync -a
   --exclude '._*'`, or `tar --disable-copyfile`.
 - The stage dir already contains the title-ID directory, so copying it with a
-  trailing slash into `~/vita-games/<TITLEID>/` doubles the nesting. Move the
-  inner directory up afterwards.
+  trailing slash into `games/<TITLEID>/` doubles the nesting. Move the inner
+  directory up afterwards.
 
 ## Test beds
 
@@ -180,7 +200,14 @@ run the ARM32 artifact.
 2 GB Allwinner H618 with Mali-G31 (Panfrost), `ssh opiz3`. Runs
 `tools/sway-vnc-kiosk` (installed in `~/.local/bin`): sway on the wlroots
 **headless** backend with `WLR_RENDERER=gles2`, plus wayvnc on 640x480. Run
-titles with `sway-vnc-kiosk run …` so the Wayland environment is set.
+titles with `sway-vnc-kiosk run …` so the Wayland environment is set. The wrapper
+is not on `PATH` for a non-interactive shell, and the loader wants the working
+directory that holds `launcher.toml`:
+
+```sh
+ssh opiz3 'cd ~/vita2native && ~/.local/bin/sway-vnc-kiosk run \
+  ./vita2native games/<TITLEID>/eboot.bin'
+```
 
 - **This is the only way to get the GPU headlessly on this board.** Weston
   13's `vnc-backend` and `rdp-backend` are pixman-only: `--backend=vnc
@@ -208,7 +235,7 @@ titles with `sway-vnc-kiosk run …` so the Wayland environment is set.
 Rockchip RK3326 with Mali-G31 through the vendor blob, 640x480 DSI panel,
 `ssh r36s`. Runs **sway**, so it is the first GPU-composited Wayland target and
 the intended test bed for KMS/DRM presentation (`ISSUES.md` I-10). Deploy the
-binary to `~/v2n/v2n-arm`.
+binary as described under *Staging the binary*.
 
 ## Rendering traps
 
