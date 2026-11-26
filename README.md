@@ -167,6 +167,18 @@ memory: a capture (just the frames you asked for), a window that cannot present
 the texture, or `VITA2NATIVE_READBACK=1`. The copy measured 62 ms per frame at
 960×544 on the Orange Pi, so it is not paid by default.
 
+Signals grab a frame from a running session, whatever the backend:
+
+```sh
+kill -USR2 <pid>   # next presented frame -> screenshot-<frame>.bmp in the cwd
+kill -USR1 <tid>   # sample one thread's PC and stack (VITA2NATIVE_DEBUG_SAMPLE=1)
+```
+
+The handler only raises a flag; the write happens on the present thread, so the
+image is a complete frame and no GL or file work runs in signal context. A
+requested screenshot resolves the colour surface for that frame even when the
+copy is otherwise off.
+
 ## Tools
 
 In `tools/`:

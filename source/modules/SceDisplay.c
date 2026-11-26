@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <psp2/display.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +20,28 @@
 
 static SceDisplayFrameBuf g_vita_conf_fb;
 static unsigned int g_frame_count;
+
+/*
+ * Set by SIGUSR2. The handler only raises the flag: the file is written from
+ * the present path, where a whole frame exists and GL and file I/O are safe to
+ * call. The next frame that reaches the display is captured and the flag is
+ * cleared, so a burst of signals cannot pile up.
+ */
+static volatile sig_atomic_t g_screenshot_requested;
+
+/*
+ * Frame the request decided to resolve at EndScene time. A signal can arrive
+ * after EndScene has already run, when the colour surface was not copied; the
+ * request is then left pending and serviced one frame later, rather than
+ * writing a buffer that may be many frames old.
+ */
+static unsigned int g_capture_frame;
+static bool g_capture_frame_valid;
+
+void SceDisplay_request_screenshot(void)
+{
+    g_screenshot_requested = 1;
+}
 
 /*
  * Vblank clock. Sleeping a fresh 16.67 ms per wait restarts from the wakeup
@@ -119,6 +142,14 @@ static bool dump_requested(void)
 
 bool SceDisplay_capture_wanted(void)
 {
+    if (g_screenshot_requested) {
+        /* A requested screenshot is a capture for the frame it will land on, so
+           the colour surface is resolved for it even when the copy is off. */
+        g_capture_frame = g_frame_count;
+        g_capture_frame_valid = true;
+        return true;
+    }
+
     return dump_requested();
 }
 
@@ -162,34 +193,32 @@ static FILE *bmp_create(const char *path, unsigned int width, unsigned int heigh
     return file;
 }
 
-static void dump_framebuffer(const SceDisplayFrameBuf *fb)
+static bool write_guest_bmp(const char *file_path, const SceDisplayFrameBuf *fb)
 {
     unsigned int width;
     unsigned int height;
     unsigned int pitch;
     unsigned int row_size;
     unsigned char *row;
-    char file_path[1024];
     FILE *file;
 
-    if (!dump_requested() || !fb || !fb->base)
-        return;
+    if (!fb || !fb->base)
+        return false;
 
     width = fb->width;
     height = fb->height;
     pitch = fb->pitch;
     if (width == 0 || height == 0 || pitch < width)
-        return;
+        return false;
 
-    dump_file_path(file_path, sizeof(file_path));
     file = bmp_create(file_path, width, height, &row_size);
     if (!file)
-        return;
+        return false;
 
     row = calloc(1, row_size);
     if (!row) {
         fclose(file);
-        return;
+        return false;
     }
 
     for (unsigned int y = height; y-- > 0;) {
@@ -210,35 +239,33 @@ static void dump_framebuffer(const SceDisplayFrameBuf *fb)
 
     free(row);
     fclose(file);
-    LOG("SceDisplay: captured frame %u to %s", g_frame_count, file_path);
+    return true;
 }
 
 /*
  * A GPU-presented frame never reaches guest memory: the video layer blits the
  * render target straight to the window, so pParam->base stays black and the
- * guest-buffer capture above has nothing to write. Read the render target back
+ * guest-buffer writer above has nothing to write. Read the render target back
  * instead. Rows come bottom-up from GL, which is exactly the BMP order.
  */
-static void dump_present_texture(int width, int height)
+static bool write_texture_bmp(const char *file_path, int width, int height)
 {
     unsigned int row_size;
     unsigned char *row;
     uint8_t *rgba;
-    char file_path[1024];
     FILE *file;
     bool written = false;
 
     if (width <= 0 || height <= 0)
-        return;
+        return false;
 
     rgba = malloc((size_t)width * (size_t)height * 4);
     if (!rgba)
-        return;
+        return false;
 
-    dump_file_path(file_path, sizeof(file_path));
     if (!SceGxm_read_present_frame(rgba, width, height)) {
         free(rgba);
-        return;
+        return false;
     }
 
     file = bmp_create(file_path, (unsigned int)width, (unsigned int)height, &row_size);
@@ -262,8 +289,30 @@ static void dump_present_texture(int width, int height)
     }
 
     free(rgba);
+    return written;
+}
 
-    if (written)
+static void dump_framebuffer(const SceDisplayFrameBuf *fb)
+{
+    char file_path[1024];
+
+    if (!dump_requested() || !fb || !fb->base)
+        return;
+
+    dump_file_path(file_path, sizeof(file_path));
+    if (write_guest_bmp(file_path, fb))
+        LOG("SceDisplay: captured frame %u to %s", g_frame_count, file_path);
+}
+
+static void dump_present_texture(int width, int height)
+{
+    char file_path[1024];
+
+    if (width <= 0 || height <= 0)
+        return;
+
+    dump_file_path(file_path, sizeof(file_path));
+    if (write_texture_bmp(file_path, width, height))
         LOG("SceDisplay: captured GPU frame %u (%dx%d) to %s", g_frame_count, width, height,
             file_path);
 }
@@ -384,6 +433,30 @@ EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayF
                                    (int)pParam->pitch);
         } else if (dump_requested()) {
             dump_present_texture(present_width, present_height);
+        }
+
+        /*
+         * A SIGUSR2 request is serviced here, on the thread that presents: the
+         * frame is complete, the GL context is current, and file I/O is allowed.
+         * The presented texture is the authoritative image, so it is preferred
+         * over the guest buffer.
+         */
+        if (g_screenshot_requested &&
+            (presented || (g_capture_frame_valid && g_capture_frame == g_frame_count))) {
+            char file_path[128];
+            bool written;
+
+            snprintf(file_path, sizeof(file_path), "screenshot-%04u.bmp", g_frame_count);
+            written = presented ? write_texture_bmp(file_path, present_width, present_height)
+                                : write_guest_bmp(file_path, pParam);
+            g_screenshot_requested = 0;
+            g_capture_frame_valid = false;
+
+            if (written)
+                LOG("SceDisplay: screenshot %u written to %s", g_frame_count, file_path);
+            else
+                LOG("SceDisplay: screenshot %u could not be written to %s", g_frame_count,
+                    file_path);
         }
     }
     if (present_started) {

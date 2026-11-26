@@ -783,6 +783,17 @@ static void debug_sample_handler(int signal, siginfo_t *info, void *context)
     backtrace_symbols_fd(frames, count, STDERR_FILENO);
 }
 
+/*
+ * `kill -USR2 <pid>` writes the next presented frame to screenshot-<frame>.bmp.
+ * Only a flag is raised here; the frame is written from the present path, where
+ * a complete frame exists and GL and file I/O are safe.
+ */
+static void screenshot_signal_handler(int signal)
+{
+    (void)signal;
+    SceDisplay_request_screenshot();
+}
+
 static void install_guest_signal_handlers(void)
 {
     static const int signals[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP, SIGABRT };
@@ -795,6 +806,17 @@ static void install_guest_signal_handlers(void)
 
     for (size_t i = 0; i < ARRAY_SIZE(signals); i++)
         sigaction(signals[i], &action, NULL);
+
+    /* `kill -USR2 <pid>` captures the next frame, whatever the backend. */
+    {
+        struct sigaction shot;
+
+        memset(&shot, 0, sizeof(shot));
+        shot.sa_handler = screenshot_signal_handler;
+        shot.sa_flags = SA_RESTART;
+        sigemptyset(&shot.sa_mask);
+        sigaction(SIGUSR2, &shot, NULL);
+    }
 
     /* `kill -USR1 <tid>` samples one thread's PC and call stack. */
     if (vita2native_env_flag("VITA2NATIVE_DEBUG_SAMPLE")) {

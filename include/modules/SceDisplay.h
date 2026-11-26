@@ -23,4 +23,11 @@ void SceDisplay_get_window_size(int *width, int *height);
  */
 bool SceDisplay_capture_wanted(void);
 
+/*
+ * Asks for the next presented frame to be written to screenshot-<frame>.bmp in
+ * the working directory. Async-signal-safe: the write happens on the thread
+ * that presents.
+ */
+void SceDisplay_request_screenshot(void);
+
 #endif
