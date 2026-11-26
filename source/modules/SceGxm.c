@@ -495,6 +495,11 @@ typedef struct SceGxmRenderTarget {
      */
     bool painted;
 
+    /* Selective scaling: the target turned out to be the presented one, and has
+       been rebuilt at the draw size yet or not. */
+    bool want_scale;
+    bool scaled;
+
     /* Depth exported to a sampleable R32F texture instead of guest memory. */
     GLuint ds_copy_tex;
     GLuint ds_copy_fbo;
@@ -709,6 +714,7 @@ typedef struct {
     GLuint texture;
     int width;
     int height;
+    void *render_target;
 } GxmPresentFrame;
 
 static GxmPresentFrame g_present_frame;
@@ -3777,6 +3783,167 @@ EXPORT(SceGxm, 0xB291C959, int, sceGxmGetRenderTargetMemSize,
     return 0;
 }
 
+static int gxm_selective_scale_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = vita2native_env_flag("VITA2NATIVE_RENDER_SCALE_SELECTIVE");
+    return enabled;
+}
+
+static void gxm_render_target_size(SceGxmRenderTarget *rt, float scale)
+{
+    rt->render_width = (uint32_t)((float)rt->params.width * scale + 0.5f);
+    rt->render_height = (uint32_t)((float)rt->params.height * scale + 0.5f);
+    if (rt->render_width < 1)
+        rt->render_width = 1;
+    if (rt->render_height < 1)
+        rt->render_height = 1;
+}
+
+static void gxm_render_target_free_gl(SceGxmRenderTarget *rt)
+{
+    if (!g_gl)
+        return;
+
+    if (rt->fbo)
+        g_gl->glDeleteFramebuffers(1, &rt->fbo);
+    if (rt->color)
+        g_gl->glDeleteTextures(1, &rt->color);
+    if (rt->depth)
+        g_gl->glDeleteTextures(1, &rt->depth);
+    if (rt->depth_rb)
+        g_gl->glDeleteRenderbuffers(1, &rt->depth_rb);
+    if (rt->msaa_fbo)
+        g_gl->glDeleteFramebuffers(1, &rt->msaa_fbo);
+    if (rt->msaa_color)
+        g_gl->glDeleteRenderbuffers(1, &rt->msaa_color);
+    if (rt->msaa_depth)
+        g_gl->glDeleteRenderbuffers(1, &rt->msaa_depth);
+    if (rt->alias_fbo)
+        g_gl->glDeleteFramebuffers(1, &rt->alias_fbo);
+    if (rt->alias_tex)
+        g_gl->glDeleteTextures(1, &rt->alias_tex);
+    if (rt->ds_copy_fbo)
+        g_gl->glDeleteFramebuffers(1, &rt->ds_copy_fbo);
+    if (rt->ds_copy_tex)
+        g_gl->glDeleteTextures(1, &rt->ds_copy_tex);
+
+    rt->fbo = 0;
+    rt->color = 0;
+    rt->depth = 0;
+    rt->depth_rb = 0;
+    rt->msaa_fbo = 0;
+    rt->msaa_color = 0;
+    rt->msaa_depth = 0;
+    rt->alias_fbo = 0;
+    rt->alias_tex = 0;
+    rt->ds_copy_fbo = 0;
+    rt->ds_copy_tex = 0;
+    rt->depth_is_texture = false;
+    rt->alias_valid = false;
+    rt->ds_gl_valid = false;
+    rt->attached_thread_valid = false;
+    rt->samples = 0;
+}
+
+static void gxm_render_target_alloc_gl(SceGxmRenderTarget *rt)
+{
+    if (!g_gl)
+        return;
+
+    g_gl->glGenTextures(1, &rt->color);
+    g_gl->glBindTexture(GL_TEXTURE_2D, rt->color);
+    g_gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)rt->render_width,
+                       (GLsizei)rt->render_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    g_gl->glGenFramebuffers(1, &rt->fbo);
+    g_gl->glBindFramebuffer(GL_FRAMEBUFFER, rt->fbo);
+    g_gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt->color,
+                                 0);
+
+    /*
+     * A depth/stencil *texture* lets sceGxmBeginScene upload guest depth
+     * data (glTexSubImage2D); a renderbuffer would be write-only. Some
+     * GLES 3.0 drivers do not allow packed depth/stencil textures, so
+     * fall back to a renderbuffer when the framebuffer is incomplete.
+     */
+    while (g_gl->glGetError() != GL_NO_ERROR) {
+    }
+    g_gl->glGenTextures(1, &rt->depth);
+    g_gl->glBindTexture(GL_TEXTURE_2D, rt->depth);
+    g_gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, (GLsizei)rt->render_width,
+                       (GLsizei)rt->render_height, 0, GL_DEPTH_STENCIL,
+                       GL_UNSIGNED_INT_24_8, NULL);
+    g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    g_gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D,
+                                 rt->depth, 0);
+    if (g_gl->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE &&
+        g_gl->glGetError() == GL_NO_ERROR) {
+        rt->depth_is_texture = true;
+    } else {
+        g_gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D,
+                                     0, 0);
+        g_gl->glDeleteTextures(1, &rt->depth);
+        rt->depth = 0;
+
+        g_gl->glGenRenderbuffers(1, &rt->depth_rb);
+        g_gl->glBindRenderbuffer(GL_RENDERBUFFER, rt->depth_rb);
+        g_gl->glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8,
+                                    (GLsizei)rt->render_width, (GLsizei)rt->render_height);
+        g_gl->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                                        GL_RENDERBUFFER, rt->depth_rb);
+        if (g_gl->glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+            LOG("SceGxm: render target framebuffer incomplete");
+    }
+
+    /* Optional multisampled draw target, resolved into the FBO above. */
+    rt->samples = rt->params.multisampleMode == SCE_GXM_MULTISAMPLE_4X   ? 4
+                  : rt->params.multisampleMode == SCE_GXM_MULTISAMPLE_2X ? 2
+                                                                      : 0;
+    if (rt->samples && !gxm_no_msaa() && g_gl->glRenderbufferStorageMultisample) {
+        rt->samples = rt->samples > 4 ? 4 : rt->samples;
+        g_gl->glGenRenderbuffers(1, &rt->msaa_color);
+        g_gl->glBindRenderbuffer(GL_RENDERBUFFER, rt->msaa_color);
+        g_gl->glRenderbufferStorageMultisample(GL_RENDERBUFFER, (GLsizei)rt->samples, GL_RGBA8,
+                                               (GLsizei)rt->render_width,
+                                               (GLsizei)rt->render_height);
+        g_gl->glGenRenderbuffers(1, &rt->msaa_depth);
+        g_gl->glBindRenderbuffer(GL_RENDERBUFFER, rt->msaa_depth);
+        g_gl->glRenderbufferStorageMultisample(GL_RENDERBUFFER, (GLsizei)rt->samples,
+                                               GL_DEPTH24_STENCIL8, (GLsizei)rt->render_width,
+                                               (GLsizei)rt->render_height);
+        g_gl->glGenFramebuffers(1, &rt->msaa_fbo);
+        g_gl->glBindFramebuffer(GL_FRAMEBUFFER, rt->msaa_fbo);
+        g_gl->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER,
+                                        rt->msaa_color);
+        g_gl->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                                        GL_RENDERBUFFER, rt->msaa_depth);
+        if (g_gl->glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            LOG("SceGxm: multisampled framebuffer incomplete, falling back");
+            g_gl->glDeleteFramebuffers(1, &rt->msaa_fbo);
+            g_gl->glDeleteRenderbuffers(1, &rt->msaa_color);
+            g_gl->glDeleteRenderbuffers(1, &rt->msaa_depth);
+            rt->msaa_fbo = 0;
+            rt->msaa_color = 0;
+            rt->msaa_depth = 0;
+            /*
+             * Keep rt->samples as the requested count: the surface scale
+             * mode is a guest-visible property, and a driver without MSAA
+             * still needs the supersampled/downscaled writeback shape.
+             */
+        }
+    }
+    g_gl->glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    rt->attached_thread = pthread_self();
+    rt->attached_thread_valid = true;
+}
+
 EXPORT(SceGxm, 0x207AF96B, int, sceGxmCreateRenderTarget, const SceGxmRenderTargetParams *params,
        SceGxmRenderTarget **renderTarget)
 {
@@ -3794,109 +3961,10 @@ EXPORT(SceGxm, 0x207AF96B, int, sceGxmCreateRenderTarget, const SceGxmRenderTarg
         return SCE_KERNEL_ERROR_NO_MEMORY;
 
     rt->params = *params;
-    {
-        float scale = gxm_render_scale();
-
-        rt->render_width = (uint32_t)((float)params->width * scale + 0.5f);
-        rt->render_height = (uint32_t)((float)params->height * scale + 0.5f);
-        if (rt->render_width < 1)
-            rt->render_width = 1;
-        if (rt->render_height < 1)
-            rt->render_height = 1;
-    }
+    gxm_render_target_size(rt, gxm_selective_scale_enabled() ? 1.0f : gxm_render_scale());
     LOG("SceGxm: render target %ux%u (draw %ux%u) multisampleMode=%u", params->width,
         params->height, rt->render_width, rt->render_height, params->multisampleMode);
-    if (g_gl) {
-        g_gl->glGenTextures(1, &rt->color);
-        g_gl->glBindTexture(GL_TEXTURE_2D, rt->color);
-        g_gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)rt->render_width,
-                           (GLsizei)rt->render_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-        g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-        g_gl->glGenFramebuffers(1, &rt->fbo);
-        g_gl->glBindFramebuffer(GL_FRAMEBUFFER, rt->fbo);
-        g_gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt->color,
-                                     0);
-
-        /*
-         * A depth/stencil *texture* lets sceGxmBeginScene upload guest depth
-         * data (glTexSubImage2D); a renderbuffer would be write-only. Some
-         * GLES 3.0 drivers do not allow packed depth/stencil textures, so
-         * fall back to a renderbuffer when the framebuffer is incomplete.
-         */
-        while (g_gl->glGetError() != GL_NO_ERROR) {
-        }
-        g_gl->glGenTextures(1, &rt->depth);
-        g_gl->glBindTexture(GL_TEXTURE_2D, rt->depth);
-        g_gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, (GLsizei)rt->render_width,
-                           (GLsizei)rt->render_height, 0, GL_DEPTH_STENCIL,
-                           GL_UNSIGNED_INT_24_8, NULL);
-        g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        g_gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D,
-                                     rt->depth, 0);
-        if (g_gl->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE &&
-            g_gl->glGetError() == GL_NO_ERROR) {
-            rt->depth_is_texture = true;
-        } else {
-            g_gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D,
-                                         0, 0);
-            g_gl->glDeleteTextures(1, &rt->depth);
-            rt->depth = 0;
-
-            g_gl->glGenRenderbuffers(1, &rt->depth_rb);
-            g_gl->glBindRenderbuffer(GL_RENDERBUFFER, rt->depth_rb);
-            g_gl->glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8,
-                                        (GLsizei)rt->render_width, (GLsizei)rt->render_height);
-            g_gl->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
-                                            GL_RENDERBUFFER, rt->depth_rb);
-            if (g_gl->glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-                LOG("SceGxm: render target framebuffer incomplete");
-        }
-
-        /* Optional multisampled draw target, resolved into the FBO above. */
-        rt->samples = params->multisampleMode == SCE_GXM_MULTISAMPLE_4X   ? 4
-                      : params->multisampleMode == SCE_GXM_MULTISAMPLE_2X ? 2
-                                                                          : 0;
-        if (rt->samples && !gxm_no_msaa() && g_gl->glRenderbufferStorageMultisample) {
-            rt->samples = rt->samples > 4 ? 4 : rt->samples;
-            g_gl->glGenRenderbuffers(1, &rt->msaa_color);
-            g_gl->glBindRenderbuffer(GL_RENDERBUFFER, rt->msaa_color);
-            g_gl->glRenderbufferStorageMultisample(GL_RENDERBUFFER, (GLsizei)rt->samples, GL_RGBA8,
-                                                   (GLsizei)rt->render_width,
-                                                   (GLsizei)rt->render_height);
-            g_gl->glGenRenderbuffers(1, &rt->msaa_depth);
-            g_gl->glBindRenderbuffer(GL_RENDERBUFFER, rt->msaa_depth);
-            g_gl->glRenderbufferStorageMultisample(GL_RENDERBUFFER, (GLsizei)rt->samples,
-                                                   GL_DEPTH24_STENCIL8, (GLsizei)rt->render_width,
-                                                   (GLsizei)rt->render_height);
-            g_gl->glGenFramebuffers(1, &rt->msaa_fbo);
-            g_gl->glBindFramebuffer(GL_FRAMEBUFFER, rt->msaa_fbo);
-            g_gl->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER,
-                                            rt->msaa_color);
-            g_gl->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
-                                            GL_RENDERBUFFER, rt->msaa_depth);
-            if (g_gl->glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-                LOG("SceGxm: multisampled framebuffer incomplete, falling back");
-                g_gl->glDeleteFramebuffers(1, &rt->msaa_fbo);
-                g_gl->glDeleteRenderbuffers(1, &rt->msaa_color);
-                g_gl->glDeleteRenderbuffers(1, &rt->msaa_depth);
-                rt->msaa_fbo = 0;
-                rt->msaa_color = 0;
-                rt->msaa_depth = 0;
-                /*
-                 * Keep rt->samples as the requested count: the surface scale
-                 * mode is a guest-visible property, and a driver without MSAA
-                 * still needs the supersampled/downscaled writeback shape.
-                 */
-            }
-        }
-        g_gl->glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-        rt->attached_thread = pthread_self();
-        rt->attached_thread_valid = true;
-    }
+    gxm_render_target_alloc_gl(rt);
 
     *renderTarget = rt;
     gxm_render_target_register(rt);
@@ -5591,6 +5659,30 @@ EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsign
     if (!renderTarget)
         return SCE_GXM_ERROR_INVALID_POINTER;
 
+    /*
+     * Selective scaling allocates every target at native size, because whether
+     * one is presented is only known once the guest hands its surface to
+     * sceDisplaySetFrameBuf. Now that this one is, rebuild it at the draw size
+     * before anything is rendered into it.
+     */
+    if (renderTarget->want_scale && !renderTarget->scaled) {
+        SceGxmRenderTarget *presented = (SceGxmRenderTarget *)renderTarget;
+        float scale = gxm_render_scale();
+
+        presented->scaled = true;
+        if (scale < 1.0f) {
+            uint32_t was_width = presented->render_width;
+            uint32_t was_height = presented->render_height;
+
+            gxm_render_target_free_gl(presented);
+            gxm_render_target_size(presented, scale);
+            gxm_render_target_alloc_gl(presented);
+            LOG("SceGxm: presented target %ux%u now draws %ux%u (was %ux%u)",
+                presented->params.width, presented->params.height, presented->render_width,
+                presented->render_height, was_width, was_height);
+        }
+    }
+
     context->render_target = renderTarget;
     context->color_surface =
         (colorSurface && !((const SceGxmColorSurfaceInner *)colorSurface)->disabled)
@@ -6119,6 +6211,7 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
     if (!discard && context->render_target)
         ((SceGxmRenderTarget *)context->render_target)->painted = true;
     g_present_frame.valid = false;
+    g_present_frame.render_target = NULL;
 
     if (g_f32m_uploads_frame) {
         static int trace_f32m = -1;
@@ -6266,6 +6359,7 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
 
             if (!copy && presents_texture) {
                 g_present_frame.valid = true;
+                g_present_frame.render_target = (void *)target;
                 g_present_frame.data = surface->data;
                 g_present_frame.texture = target->color;
                 g_present_frame.width = (int)target->render_width;
@@ -10868,6 +10962,20 @@ bool SceGxm_get_present_frame(const void *data, unsigned int *texture, int *widt
 
     if (!g_present_frame.valid || !data || data != g_present_frame.data)
         return false;
+
+    /*
+     * Selective scaling: this target is the one on screen, so the next scene
+     * that renders into it rebuilds it at the draw size. Marking here, rather
+     * than comparing against the display framebuffer, is what makes a title
+     * that alternates two buffers work: each one is marked when its own turn
+     * comes.
+     */
+    if (gxm_selective_scale_enabled()) {
+        SceGxmRenderTarget *presented = g_present_frame.render_target;
+
+        if (presented && !presented->scaled)
+            presented->want_scale = true;
+    }
 
     if (texture)
         *texture = g_present_frame.texture;

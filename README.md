@@ -175,6 +175,7 @@ prints the same table with the current values.
 | `VITA2NATIVE_READBACK=1` | copy every frame back to guest memory (only titles that read their own framebuffer need it) |
 | `VITA2NATIVE_NO_DMABUF_READBACK=1` | use `glReadPixels` instead of blitting into a linear dma-buf |
 | `VITA2NATIVE_RENDER_SCALE=auto` | draw at the display's resolution (or a fixed 0.25–1.0 ratio) |
+| `VITA2NATIVE_RENDER_SCALE_SELECTIVE=1` | scale only the render target that is presented |
 | `VITA2NATIVE_STRETCH=1` | fill the display instead of letterboxing |
 
 Headless capture and scripted input, which is how titles are validated without a

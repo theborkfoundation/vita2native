@@ -123,6 +123,8 @@ static const Setting g_settings[] = {
         "auto or N: draw one frame in N to hold 60 Hz when the host is slower"),
     FLAG("VITA2NATIVE_FPS_OVERLAY", "draw the FPS graph in the corner of the frame"),
     STR("VITA2NATIVE_METRICS_FILE", "append <ms>,<fps>,<frames> per second for fps_chart.py"),
+    FLAG("VITA2NATIVE_RENDER_SCALE_SELECTIVE",
+         "scale only the presented render target; offscreen targets stay native"),
     STR("VITA2NATIVE_RENDER_SCALE",
         "auto (fit the window) or 0.25-1.0: draw the scene smaller, upscaled on present"),
     STR("VITA2NATIVE_SDL_SIZE", "SDL window size, WxH (default: the display geometry)"),
