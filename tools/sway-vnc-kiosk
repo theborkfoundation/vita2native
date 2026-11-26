@@ -27,7 +27,6 @@ import time
 
 SCRIPT_NAME = "sway-vnc-kiosk"
 SERVICE_NAME = "sway-vnc-kiosk.service"
-LEGACY_SERVICE = "weston-vnc-kiosk.service"
 
 SOCKET = "wayland-kiosk"
 PORT = 5901
@@ -41,7 +40,7 @@ After=dbus.service
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/{script}
+ExecStart=%h/.local/bin/{script} serve
 Restart=always
 RestartSec=2
 StandardOutput=append:{log}
@@ -273,13 +272,6 @@ def cmd_install(args: argparse.Namespace) -> None:
             ]
         )
 
-    legacy_unit = os.path.join(
-        home, ".config", "systemd", "user", LEGACY_SERVICE
-    )
-    if os.path.exists(legacy_unit):
-        log(f"stopping legacy {LEGACY_SERVICE}")
-        as_user("systemctl", "--user", "disable", "--now", LEGACY_SERVICE)
-
     if as_user("systemctl", "--user", "daemon-reload").returncode != 0:
         die("systemctl --user daemon-reload failed")
     result = as_user("systemctl", "--user", "enable", SERVICE_NAME)
@@ -439,7 +431,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     if argv and argv[0] == "--":
         argv = argv[1:]
     if not argv:
-        die("run requires a command, e.g.: sway-vnc-kiosk run weston-terminal")
+        die("run requires a command, e.g.: sway-vnc-kiosk run -- ./game")
 
     runtime = runtime_dir()
     sock_path = os.path.join(runtime, SOCKET)
@@ -476,11 +468,10 @@ def build_parser() -> argparse.ArgumentParser:
             f"  sudo {SCRIPT_NAME} install --user bachnx\n"
             f"  sudo {SCRIPT_NAME} install --user bachnx --no-auth\n"
             f"  {SCRIPT_NAME} serve\n"
-            f"  {SCRIPT_NAME} run weston-terminal\n"
             f"  {SCRIPT_NAME} run -- v2n-arm ~/vita-games/PCSE00747/eboot.bin\n"
         ),
     )
-    sub = parser.add_subparsers(dest="command")
+    sub = parser.add_subparsers(dest="command", required=True)
 
     p_install = sub.add_parser(
         "install", help="install for a user (must be run as root)"
@@ -507,8 +498,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    if not getattr(args, "command", None):
-        args = argparse.Namespace(command="serve", func=cmd_serve)
     args.func(args)
 
 
