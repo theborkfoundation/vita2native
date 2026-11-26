@@ -145,30 +145,32 @@ Notes that save time:
 
 ### scratchvm
 
-x86_64 Ubuntu 24.04, qemu-user-static, **armhf multiarch with an X display on
-`:0`**. This is where the ARM32 binary is exercised without real hardware.
+x86_64 Ubuntu 24.04, qemu-user-static, **armhf multiarch**, no display and no
+display manager — the VNC kiosk is the only output path. This is where the
+ARM32 binary is exercised without real hardware.
 
 ```sh
 scp build/release/vita2native scratchvm:~/v2n/v2n-arm
-ssh scratchvm 'cd ~/v2n && DISPLAY=:0 SDL_VIDEODRIVER=x11 \
+ssh scratchvm 'cd ~/v2n && ~/.local/bin/sway-vnc-kiosk run \
   qemu-arm-static -L /usr/arm-linux-gnueabihf ./v2n-arm \
   ~/vita-games/<TITLEID>/eboot.bin'
 ```
 
-- **VNC kiosk** is the normal path now: `~/.local/bin/weston-vnc-kiosk run
-  <cmd>` injects `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY=wayland-kiosk`. It is a
-  user service (`systemctl --user status weston-vnc-kiosk`), 640x480. The
-  script is not on `PATH` for non-interactive SSH — call it by full path.
-  `tools/sway-vnc-kiosk` is the GPU-composited replacement (sway + wayvnc, same
-  commands and port); the Orange Pi runs it because Weston's VNC backend cannot
-  use the GPU.
+- **`sway-vnc-kiosk` is the display**: `~/.local/bin/sway-vnc-kiosk run <cmd>`
+  injects `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY=wayland-kiosk`. It is a user
+  service (`systemctl --user status sway-vnc-kiosk`) running sway on the wlroots
+  headless backend with the GLES2 renderer, which is the host's GPU here, plus
+  wayvnc, 640x480. The script is not on `PATH` for non-interactive SSH — call it
+  by full path. It replaced the Weston kiosk on this bed; `sudo
+  tools/sway-vnc-kiosk install --user <name> --no-auth` recreates it. Without
+  auth, anything that can reach port 5901 gets the keyboard and pointer.
 - **`virpipe-run` gives the guest a real GPU.** Wrap the binary with it and GL
   goes through VirGL to the host's Intel GPU instead of llvmpipe — measured at
   ~55 fps against ~1.6 fps, so it is the only way to tell a rendering bug from
   software-rasteriser slowness:
 
   ```sh
-  ssh scratchvm 'cd ~/v2n && weston-vnc-kiosk run \
+  ssh scratchvm 'cd ~/v2n && ~/.local/bin/sway-vnc-kiosk run \
     virpipe-run ./v2n-arm ~/vita-games/<TITLEID>/eboot.bin'
   ```
 
