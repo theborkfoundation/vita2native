@@ -488,6 +488,13 @@ typedef struct SceGxmRenderTarget {
     uint64_t alias_frame;
     bool alias_valid;
 
+    /*
+     * A target that has never been drawn into holds whatever the driver left in
+     * it, so a frame skip must not be the first thing that happens to it: a
+     * title can sample the surface before it is presented.
+     */
+    bool painted;
+
     /* Depth exported to a sampleable R32F texture instead of guest memory. */
     GLuint ds_copy_tex;
     GLuint ds_copy_fbo;
@@ -5608,6 +5615,8 @@ EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsign
     context->precomputed_fragment = NULL;
     context->in_scene = true;
     context->discard = !frame_skip_frame_current();
+    if (context->discard && !renderTarget->painted)
+        context->discard = false;
     g_current_context = context;
 
     if (g_gl) {
@@ -6107,6 +6116,8 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
     context->in_scene = false;
     discard = context->discard;
     context->discard = false;
+    if (!discard && context->render_target)
+        ((SceGxmRenderTarget *)context->render_target)->painted = true;
     g_present_frame.valid = false;
 
     if (g_f32m_uploads_frame) {

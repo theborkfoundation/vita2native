@@ -106,6 +106,10 @@ bool frame_skip_frame_current(void)
         return true;
     if (atomic_load_explicit(&g_hold, memory_order_relaxed))
         return true;
+    /* Loading creates the textures, render targets and shaders a title needs;
+       skipping there only delays them. */
+    if (g_frames_seen < WARMUP_FRAMES)
+        return true;
     return !atomic_load_explicit(&g_skip_next, memory_order_relaxed);
 }
 

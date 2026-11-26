@@ -11,6 +11,12 @@ int main(void)
 
     setenv("VITA2NATIVE_FRAME_SKIP", "3", 1);
 
+    /* The frames a title spends loading are never skipped. */
+    for (int i = 0; i < 120; i++) {
+        assert(frame_skip_frame_current());
+        frame_skip_frame_end(false);
+    }
+
     for (int i = 0; i < 30; i++) {
         bool current = frame_skip_frame_current();
 

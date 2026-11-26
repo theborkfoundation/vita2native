@@ -132,6 +132,13 @@ rather than the renderer is the limit. A fixed `N` draws one frame in N, for A/B
 comparisons. It is off by default, because a skipped frame keeps the previous
 image on screen and that is wrong for a title that reads its own framebuffer.
 
+A skipped frame runs no draws at all, so anything a frame *produces* is missing
+from it: a render target the title builds and samples in the same frame keeps
+its previous contents, which shows up as stale or blank textures on titles that
+compose their own atlases per frame. The first frames after launch are never
+skipped, and neither is the first draw into a render target that has not been
+painted yet, so a fresh target is never sampled uninitialised.
+
 ## Status
 
 Homebrew runs end to end: ELF loading, relocations, import patching, threads,
