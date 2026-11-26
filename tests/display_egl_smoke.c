@@ -44,6 +44,13 @@ bool SceGxm_read_present_frame(uint8_t *rgba, int width, int height)
     return false;
 }
 
+/* Without a guest there is never anything new to draw, but the fallback path
+   must still present every frame. */
+unsigned int SceGxm_take_frame_damage(void)
+{
+    return 1;
+}
+
 /* The save-data dialog is part of SceCommonDialog, which this test links in for
    the overlay; neither of these is reachable from a display-only test. */
 void *SceSysmem_alloc_guest_scratch(const char *name, uint32_t size)

@@ -15,6 +15,10 @@ int SceGxm_finish(void);
  */
 bool SceGxm_get_present_frame(const void *data, unsigned int *texture, int *width, int *height);
 
+/* Draws and transfers since the last call, used to skip a present that would
+   show exactly the frame already on screen. */
+unsigned int SceGxm_take_frame_damage(void);
+
 /*
  * Reads the render target named by the last direct present back into `rgba`
  * (R, G, B, A bytes; row 0 is the bottom of the image, which is the order

@@ -13,6 +13,7 @@
  * SceGxmColorSurface, which is what sceDisplaySetFrameBuf presents.
  */
 #include <limits.h>
+#include <stdatomic.h>
 #include <math.h>
 #include <psp2/gxm.h>
 #include <psp2/kernel/error.h>
@@ -204,6 +205,12 @@ static GxmTextureCache g_texture_cache[GXM_TEXTURE_CACHE_SLOTS];
 static uint64_t g_texture_cache_bytes;
 static uint64_t g_texture_clock;
 static uint64_t g_gxm_frame;
+static atomic_uint g_frame_damage;
+
+unsigned int SceGxm_take_frame_damage(void)
+{
+    return atomic_exchange_explicit(&g_frame_damage, 0, memory_order_relaxed);
+}
 static unsigned int g_profile_draws;
 static unsigned int g_profile_vertices;
 static unsigned int g_profile_uploads;
@@ -9085,6 +9092,7 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
     if (context->discard)
         return 0;
 
+    atomic_fetch_add_explicit(&g_frame_damage, 1, memory_order_relaxed);
     gxm_ensure_shaders(context);
 
     program = gxm_get_linked_program(context->vertex_program, context->fragment_program, &linked);
@@ -9920,6 +9928,7 @@ EXPORT(SceGxm, 0x62312BF8, int, sceGxmTransferCopy, uint32_t width, uint32_t hei
 
     gxm_color_note_cpu_read(srcAddress);
     gxm_ds_note_read(srcAddress);
+    atomic_fetch_add_explicit(&g_frame_damage, 1, memory_order_relaxed);
     gxm_ds_note_write(destAddress);
 
     if (g_current_context)

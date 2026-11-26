@@ -27,6 +27,7 @@ enum
 static int g_mode;
 static bool g_ready;
 static atomic_bool g_skip_next;
+static atomic_bool g_hold;
 static unsigned int g_every = 1;
 static unsigned int g_index;
 static double g_drawn_ms;
@@ -103,6 +104,8 @@ bool frame_skip_frame_current(void)
         init();
     if (g_mode == MODE_OFF)
         return true;
+    if (atomic_load_explicit(&g_hold, memory_order_relaxed))
+        return true;
     return !atomic_load_explicit(&g_skip_next, memory_order_relaxed);
 }
 
@@ -128,7 +131,10 @@ void frame_skip_frame_end(bool skipped)
 
     if (g_mode == MODE_FIXED) {
         g_index = (g_index + 1) % g_every;
-        atomic_store_explicit(&g_skip_next, g_index != 0, memory_order_relaxed);
+        atomic_store_explicit(&g_skip_next,
+                              g_index != 0 &&
+                                  !atomic_load_explicit(&g_hold, memory_order_relaxed),
+                              memory_order_relaxed);
         return;
     }
 
@@ -170,7 +176,14 @@ void frame_skip_frame_end(bool skipped)
     }
 
     g_index = (g_index + 1) % g_every;
-    atomic_store_explicit(&g_skip_next, g_index != 0, memory_order_relaxed);
+    atomic_store_explicit(&g_skip_next,
+                          g_index != 0 && !atomic_load_explicit(&g_hold, memory_order_relaxed),
+                          memory_order_relaxed);
+}
+
+void frame_skip_hold_next(bool hold)
+{
+    atomic_store_explicit(&g_hold, hold, memory_order_relaxed);
 }
 
 unsigned int frame_skip_take_skipped(void)

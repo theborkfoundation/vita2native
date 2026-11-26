@@ -323,6 +323,20 @@ unsigned int SceDisplay_get_frame_count(void)
     return g_frame_count;
 }
 
+/* Last texture handed to the presenter, to recognise a frame that would show
+   exactly what is already on screen. */
+static unsigned int g_present_texture;
+static bool g_present_valid;
+static unsigned int g_present_age = 10;
+static unsigned int g_idle_presents;
+
+static bool capture_active(void)
+{
+    if (!g_dump_initialised)
+        (void)dump_requested();
+    return g_dump_path != NULL || g_screenshot_requested != 0;
+}
+
 static void display_log_fps(void)
 {
     static uint64_t last_ns;
@@ -360,10 +374,12 @@ static void display_log_fps(void)
 
         if (enabled) {
             unsigned int skipped = frame_skip_take_skipped();
+            unsigned int idle = g_idle_presents;
 
-            if (skipped)
-                LOG("SceDisplay: %u frames in %.1f s (%.1f fps, %u skipped)", frames, elapsed,
-                    fps, skipped);
+            g_idle_presents = 0;
+            if (skipped || idle)
+                LOG("SceDisplay: %u frames in %.1f s (%.1f fps, %u skipped, %u idle)", frames,
+                    elapsed, fps, skipped, idle);
             else
                 LOG("SceDisplay: %u frames in %.1f s (%.1f fps)", frames, elapsed, fps);
         }
@@ -401,7 +417,11 @@ EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayF
        SceDisplaySetBufSync sync)
 {
     uint64_t present_started = frame_profile_enabled() ? frame_profile_now_ns() : 0;
-    bool frame_skipped = !frame_skip_frame_current();
+    bool frame_skipped;
+
+    /* A frame that is being captured has to be a real one. */
+    frame_skip_hold_next(capture_active());
+    frame_skipped = !frame_skip_frame_current();
 
     (void)sync;
 
@@ -412,20 +432,45 @@ EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayF
         unsigned int present_texture;
         int present_width, present_height;
         HostVideo *video = display_video();
+        unsigned int damage = SceGxm_take_frame_damage();
         bool presented = false;
+        bool unchanged = false;
 
         if (video &&
             SceGxm_get_present_frame(pParam->base, &present_texture, &present_width,
                                      &present_height)) {
-            int overlay_width = 0, overlay_height = 0;
-            const uint32_t *fps_image = fps_overlay_image(&overlay_width, &overlay_height);
+            /*
+             * Nothing was drawn since the last present and it is the same surface,
+             * so the screen already shows this frame and the blit would cost the
+             * same as a real one. A capture still needs it, and every tenth frame
+             * is presented anyway in case the guest wrote the buffer in a way that
+             * is not counted as damage.
+             */
+            unchanged = g_present_valid && present_texture == g_present_texture && damage == 0 &&
+                        g_present_age < 10 && !capture_active();
+            if (unchanged)
+                g_idle_presents++;
 
-            host_video_set_overlay(video, fps_image, overlay_width, overlay_height);
-            presented = host_video_present_texture(video, present_texture, present_width,
-                                                   present_height);
+            if (!unchanged) {
+                int overlay_width = 0, overlay_height = 0;
+                const uint32_t *fps_image = fps_overlay_image(&overlay_width, &overlay_height);
+
+                host_video_set_overlay(video, fps_image, overlay_width, overlay_height);
+                presented = host_video_present_texture(video, present_texture, present_width,
+                                                       present_height);
+                if (presented) {
+                    g_present_texture = present_texture;
+                    g_present_valid = true;
+                    g_present_age = 0;
+                } else {
+                    g_present_valid = false;
+                }
+            }
         }
 
-        if (!presented) {
+        g_present_age++;
+
+        if (!presented && !unchanged) {
             CommonDialogOverlay overlay;
 
             if (SceCommonDialog_getOverlay(&overlay)) {

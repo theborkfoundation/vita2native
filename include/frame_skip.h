@@ -18,6 +18,9 @@
  * guest frame, at the present, to account for the time that frame took.
  */
 
+/* Force the next frame to draw and present, for a frame that is being captured. */
+void frame_skip_hold_next(bool hold);
+
 bool frame_skip_frame_current(void);
 void frame_skip_frame_end(bool skipped);
 unsigned int frame_skip_take_skipped(void);
