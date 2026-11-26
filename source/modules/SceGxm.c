@@ -24,6 +24,7 @@
 
 #include "config.h"
 #include "frame_profile.h"
+#include "frame_skip.h"
 #include "fs.h"
 #include "gfx.h"
 #include "gxm/texture.h"
@@ -286,6 +287,7 @@ static void gxm_command_free(GxmCommand *command);
 typedef struct SceGxmContext {
     SceGxmContextParams params;
     bool in_scene;
+    bool discard; /* frame skip: drop this frame's draws */
 
     const SceGxmRenderTarget *render_target;
     const SceGxmColorSurfaceInner *color_surface;
@@ -5565,6 +5567,7 @@ EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsign
     context->precomputed_vertex = NULL;
     context->precomputed_fragment = NULL;
     context->in_scene = true;
+    context->discard = !frame_skip_frame_current();
     g_current_context = context;
 
     if (g_gl) {
@@ -6045,6 +6048,7 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
     const uint8_t *pixels;
     unsigned int pixel_stride;
     uint64_t t_resolve, t0, t1, t2;
+    bool discard;
 
     (void)vertexNotification;
     (void)fragmentNotification;
@@ -6061,6 +6065,8 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
         return SCE_GXM_ERROR_NOT_WITHIN_SCENE;
 
     context->in_scene = false;
+    discard = context->discard;
+    context->discard = false;
     g_present_frame.valid = false;
 
     if (g_f32m_uploads_frame) {
@@ -6080,7 +6086,7 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
 
     gxm_batch_flush(context);
 
-    if (!g_gl || !context->render_target)
+    if (!g_gl || !context->render_target || discard)
         return 0;
 
     {
@@ -9063,6 +9069,8 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
             return SCE_GXM_ERROR_INVALID_VALUE;
         if (!g_gl)
             return 0;
+        if (context->discard)
+            return 0;
         return gxm_record_draw(context, primType, indexType, indexData, indexCount, instances);
     }
 
@@ -9073,6 +9081,8 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
     if (!indexData || !indexCount)
         return SCE_GXM_ERROR_INVALID_VALUE;
     if (!g_gl)
+        return 0;
+    if (context->discard)
         return 0;
 
     gxm_ensure_shaders(context);

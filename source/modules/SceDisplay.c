@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include "frame_profile.h"
+#include "frame_skip.h"
 #include "host.h"
 #include "log.h"
 #include "module.h"
@@ -357,8 +358,15 @@ static void display_log_fps(void)
         const double elapsed = (double)(now - last_ns) / 1e9;
         const double fps = (double)frames / elapsed;
 
-        if (enabled)
-            LOG("SceDisplay: %u frames in %.1f s (%.1f fps)", frames, elapsed, fps);
+        if (enabled) {
+            unsigned int skipped = frame_skip_take_skipped();
+
+            if (skipped)
+                LOG("SceDisplay: %u frames in %.1f s (%.1f fps, %u skipped)", frames, elapsed,
+                    fps, skipped);
+            else
+                LOG("SceDisplay: %u frames in %.1f s (%.1f fps)", frames, elapsed, fps);
+        }
 
         if (vita2native_env_flag("VITA2NATIVE_TIME_TRACE")) {
             unsigned int total = g_time_trace_process + g_time_trace_rtc + g_time_trace_vcount;
@@ -393,13 +401,14 @@ EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayF
        SceDisplaySetBufSync sync)
 {
     uint64_t present_started = frame_profile_enabled() ? frame_profile_now_ns() : 0;
+    bool frame_skipped = !frame_skip_frame_current();
 
     (void)sync;
 
     if (pParam)
         g_vita_conf_fb = *pParam;
 
-    if (pParam) {
+    if (pParam && !frame_skipped) {
         unsigned int present_texture;
         int present_width, present_height;
         HostVideo *video = display_video();
@@ -464,6 +473,8 @@ EXPORT(SceDisplayUser, 0x7A410B64, int, sceDisplaySetFrameBuf, const SceDisplayF
 
         frame_profile_present(now - present_started, now);
     }
+
+    frame_skip_frame_end(frame_skipped);
 
     g_frame_count++;
     display_log_fps();

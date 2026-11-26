@@ -140,6 +140,7 @@ add_custom_command(OUTPUT "${VITA2NATIVE_OVERLAY_HEADER}"
 
 set(VITA2NATIVE_HOST_GFX_SOURCES
     source/frame_profile.c
+    source/frame_skip.c
     source/host/host_gfx.c
     source/host/host_gfx_gl.c
     source/host/host_gfx_readback.c

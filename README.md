@@ -111,6 +111,27 @@ Under a software compositor — for example Weston on its Pixman backend — the
 device is software too, and the compositor's own swap copy then dominates the
 frame. On a GPU-composited Wayland or X11 session it is the hardware driver.
 
+### Frame pacing
+
+Vblanks are a wall-clock 60 Hz grid, so a title that waits on
+`sceDisplayWaitVblankStart` keeps time even when a frame costs more than 16.6 ms.
+Titles that instead treat every drawn frame as 1/60 s do not: when the host
+cannot finish a frame in time, the game itself plays back slow. Frame skipping
+drops the render work of some frames so the guest loop keeps running at 60
+frames per second, at the cost of presenting fewer of them:
+
+```sh
+VITA2NATIVE_FRAME_SKIP=auto ./vita2native game.vpk   # skip as needed
+VITA2NATIVE_FRAME_SKIP=2    ./vita2native game.vpk   # draw one frame in two
+```
+
+`auto` measures a drawn frame and a skipped one, then picks the smallest ratio
+that fits the loop into 60 Hz: it does not skip while the title already holds
+60, and it pauses itself when skipping stops saving time, which means the guest
+rather than the renderer is the limit. A fixed `N` draws one frame in N, for A/B
+comparisons. It is off by default, because a skipped frame keeps the previous
+image on screen and that is wrong for a title that reads its own framebuffer.
+
 ## Status
 
 Homebrew runs end to end: ELF loading, relocations, import patching, threads,
