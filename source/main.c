@@ -1088,9 +1088,9 @@ int main(int argc, char *argv[])
         }
 
         /* Load and start the user modules the executable depends on. */
+        SceModulemgr_register_main_module(&main_info);
         if (SceModulemgr_load_app_modules() > 0) {
             SceModulemgr_repatch_modules();
-            load_repatch_imports(&main_info);
             SceModulemgr_start_modules();
         }
         /*

@@ -1,6 +1,8 @@
 #ifndef SCE_MODULEMGR_H
 #define SCE_MODULEMGR_H
 
+#include "load.h"
+
 /*
  * Loads every user module shipped inside the application directory
  * (`sce_module/` and `Media/Modules/`, for files ending in `.suprx`), resolves their
@@ -14,6 +16,10 @@
  * Returns the number of modules started, or -1 if nothing could be loaded.
  */
 int SceModulemgr_load_app_modules(void);
+
+/* Makes the main executable part of the re-patch set. Call it once the image is
+   loaded and before any module is loaded. */
+void SceModulemgr_register_main_module(LoadedModuleInfo *info);
 
 /* Re-resolve the imports of every loaded module (including the main
    executable, if it was registered here). */

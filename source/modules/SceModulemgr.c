@@ -52,6 +52,7 @@ typedef struct {
 
 static VitaModuleInfo g_modules[VITA_MODULE_SLOTS];
 static pthread_mutex_t g_modules_lock = PTHREAD_MUTEX_INITIALIZER;
+static LoadedModuleInfo *g_main_module;
 
 static bool trace_module_lookups(void)
 {
@@ -168,6 +169,15 @@ static SceUID module_load(const char *path)
 
     module_dump_code(module);
     module_apply_debug_patches(module);
+
+    /*
+     * A title may load a module itself, long after the application loader
+     * resolved the main image's imports. Those that named this module's
+     * libraries were patched to "export not found" stubs, so re-resolve every
+     * importer now that the exports are registered. Bind-on-load is what the
+     * firmware does; without it the guest keeps calling the error stubs.
+     */
+    SceModulemgr_repatch_modules();
 
     return module->uid;
 }
@@ -536,8 +546,19 @@ int SceModulemgr_load_app_modules(void)
     return loaded;
 }
 
+void SceModulemgr_register_main_module(LoadedModuleInfo *info)
+{
+    g_main_module = info;
+}
+
 void SceModulemgr_repatch_modules(void)
 {
+    /* The main executable is not one of the module slots, and it is the image
+       most likely to be waiting on exports: the application loader resolves its
+       imports before the modules that provide them are registered. */
+    if (g_main_module)
+        load_repatch_imports(g_main_module);
+
     pthread_mutex_lock(&g_modules_lock);
     for (int i = 0; i < VITA_MODULE_SLOTS; i++) {
         if (!g_modules[i].used)
