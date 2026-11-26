@@ -114,8 +114,11 @@ set(VITA2NATIVE_GXM_TEXTURE_SOURCES
     external/Vita3K/vita3k/renderer/src/texture/pvrt-dec.cpp
 )
 
-# Embed optional presentation artwork in every target using the GL presenter.
-set(VITA2NATIVE_OVERLAY_PNG "" CACHE FILEPATH "PNG to embed in the presentation border")
+# Embed the presentation artwork in every target using the GL presenter. The
+# default is the shipped banner; an empty value falls back to the generated
+# blue-gray placeholder, which is useful for A/B comparisons.
+set(VITA2NATIVE_OVERLAY_PNG "${CMAKE_SOURCE_DIR}/source/host/overlay-landscape.png"
+    CACHE FILEPATH "PNG to embed in the presentation border")
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(VITA2NATIVE_OVERLAY_HEADER "${CMAKE_BINARY_DIR}/generated/v2n_overlay_png.h")
 set(_v2n_overlay_args "")

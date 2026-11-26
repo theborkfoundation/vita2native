@@ -92,8 +92,10 @@ Presentation is GPU-side: the guest render target is blitted straight to the
 window surface, so no `glReadPixels` runs on the normal path. A CPU frame (video
 decode, guest-side composite) is uploaded as a texture and blitted the same way.
 The aspect-fitted game frame is aligned to the top of the screen. The remaining
-space uses a temporary blue-gray texture by default. To embed a custom PNG at
-build time, configure the release build with its path:
+space is filled by the default border artwork, `source/host/overlay-landscape.png`
+(a 640×117 pixel-art banner, embedded at build time), which is the size that
+matches the area below a 960×544 Vita frame on a 640×480 panel. To use your own
+image instead:
 
 ```sh
 cmake --preset release -DVITA2NATIVE_OVERLAY_PNG=/absolute/path/to/overlay.png
@@ -101,10 +103,9 @@ cmake --build --preset release
 ```
 
 The image is embedded in the executable; the file is not needed on the device.
-For a 640×480 screen, 640×117 pixels matches the area below a 960×544 Vita
-frame. Other image sizes are stretched to fit. Transparent pixels are blended
-against the default blue-gray background. To restore the generated texture,
-reconfigure with `-DVITA2NATIVE_OVERLAY_PNG=` and rebuild.
+Other image sizes are stretched to fit, and transparent pixels are blended
+against the blue-gray base colour. Reconfigure with `-DVITA2NATIVE_OVERLAY_PNG=`
+for the generated blue-gray placeholder instead.
 
 Under a software compositor — for example Weston on its Pixman backend — the GL
 device is software too, and the compositor's own swap copy then dominates the
