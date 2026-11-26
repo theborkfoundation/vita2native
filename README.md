@@ -143,6 +143,7 @@ prints the same table with the current values.
 | `VITA2NATIVE_PROFILE=1` | GXM draw breakdown |
 | `VITA2NATIVE_GL_CHECK=1` | per-draw `glGetError` checks |
 | `VITA2NATIVE_DUMP_FRAME` | write presented frames as BMP (GPU readback when a window is used) |
+| `VITA2NATIVE_READBACK=1` | copy every frame back to guest memory (only titles that read their own framebuffer need it) |
 | `VITA2NATIVE_RENDER_SCALE=0.5` | render 3D at half resolution |
 | `VITA2NATIVE_STRETCH=1` | fill the display instead of letterboxing |
 
@@ -160,6 +161,11 @@ SDL_VIDEODRIVER=dummy ./v2n-arm ./VitaShell.vpk
 the frame number. Script entries are `<frame>:<button>[+<button>...]` and apply
 until the next entry. `VITA2NATIVE_TOUCH_SCRIPT` drives the touch panel the same
 way, as `<frame>:<x>/<y>`.
+
+A frame is copied out of the render target only when something needs it in guest
+memory: a capture (just the frames you asked for), a window that cannot present
+the texture, or `VITA2NATIVE_READBACK=1`. The copy measured 62 ms per frame at
+960×544 on the Orange Pi, so it is not paid by default.
 
 ## Tools
 

@@ -32,6 +32,7 @@
 #include "host_gfx_gl.h"
 #include "log.h"
 #include "module.h"
+#include "modules/SceDisplay.h"
 #include "settings.h"
 #include "spirv_cross_glsl_es.h"
 #include "util.h"
@@ -5962,14 +5963,47 @@ static int gxm_state_trace(void)
     return enabled;
 }
 
-/* Diagnostic: measure the frame with the colour-surface readback removed. */
-static int gxm_skip_readback(void)
+/*
+ * Copying the colour surface back to guest memory is a GPU-to-CPU transfer: a
+ * 960x544 frame measured 62 ms on the Orange Pi's Mali-G31, versus 1.7 ms of
+ * draw submission. Almost nothing needs it — a windowed frame presents the
+ * render target as a texture, and sampling a colour surface aliases that same
+ * texture. It is only required when something reads the memory itself: a title
+ * transferring from, or memcpying, its own framebuffer, or a capture. So it is
+ * opt-in, and a frame being captured asks for it on its own.
+ */
+static int gxm_readback_enabled(void)
 {
     static int enabled = -1;
 
     if (enabled < 0)
-        enabled = vita2native_env_flag("VITA2NATIVE_SKIP_READBACK");
+        enabled = vita2native_env_flag("VITA2NATIVE_READBACK");
     return enabled;
+}
+
+/*
+ * Guest memory only holds the frame when the copy ran. Warn once when a CPU
+ * reader touches a colour surface while it is off: the title needs
+ * VITA2NATIVE_READBACK=1, and stale pixels are far worse than a log line.
+ */
+static void gxm_color_note_cpu_read(const void *address)
+{
+    static bool warned;
+
+    if (!address || warned || gxm_readback_enabled())
+        return;
+
+    for (unsigned int i = 0; i < GXM_MAX_RENDER_TARGETS; i++) {
+        SceGxmRenderTarget *rt = g_render_targets[i];
+
+        if (!rt || rt->color_data != address)
+            continue;
+
+        warned = true;
+        LOG("SceGxm: a CPU read touched a colour surface with the copy disabled; "
+            "set VITA2NATIVE_READBACK=1 if this title reads its own framebuffer");
+        return;
+    }
 }
 
 static int gxm_direct_present_enabled(void)
@@ -6140,33 +6174,53 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
                 out_height = surface->height;
         }
 
-        if (gxm_direct_present_enabled() && replicate == 1 && target->color &&
-            surface->width == target->params.width &&
-            surface->height == target->params.height) {
-            g_present_frame.valid = true;
-            g_present_frame.data = surface->data;
-            g_present_frame.texture = target->color;
-            g_present_frame.width = (int)target->render_width;
-            g_present_frame.height = (int)target->render_height;
-            if (vita2native_env_flag("VITA2NATIVE_DIRECT_PRESENT_DEBUG")) {
-                static unsigned int logged;
+        {
+            /* A window exists at all: either it takes the texture (fast) or it
+               has to be shown from guest memory (MSAA, size mismatch). */
+            bool window = gxm_direct_present_enabled() != 0;
+            bool presents_texture = window && replicate == 1 && target->color &&
+                                    surface->width == target->params.width &&
+                                    surface->height == target->params.height;
+            bool copy = gxm_readback_enabled() != 0;
 
-                if (logged < 20) {
-                    LOG("SceGxm direct frame %llu: surf=%p tex=%u %dx%d",
-                        (unsigned long long)g_gxm_frame, surface->data, target->color,
-                        (int)target->render_width, (int)target->render_height);
-                    logged++;
+            /*
+             * A BMP is read out of guest memory, so the frame being captured is
+             * copied even without the opt-in. Only when there is no window: a
+             * windowed capture reads the render target instead.
+             */
+            if (!copy && !window && SceDisplay_capture_wanted())
+                copy = true;
+
+            /* Showing a frame the texture path cannot take needs it in memory. */
+            if (!copy && window && !presents_texture)
+                copy = true;
+
+            if (!copy && presents_texture) {
+                g_present_frame.valid = true;
+                g_present_frame.data = surface->data;
+                g_present_frame.texture = target->color;
+                g_present_frame.width = (int)target->render_width;
+                g_present_frame.height = (int)target->render_height;
+                if (vita2native_env_flag("VITA2NATIVE_DIRECT_PRESENT_DEBUG")) {
+                    static unsigned int logged;
+
+                    if (logged < 20) {
+                        LOG("SceGxm direct frame %llu: surf=%p tex=%u %dx%d",
+                            (unsigned long long)g_gxm_frame, surface->data, target->color,
+                            (int)target->render_width, (int)target->render_height);
+                        logged++;
+                    }
                 }
+                t2 = gxm_time_ns();
+                gxm_profile_frame(t_resolve, t1 - t0, t2 - t1, 0);
+                goto convert_done;
             }
-            t2 = gxm_time_ns();
-            gxm_profile_frame(t_resolve, t1 - t0, t2 - t1, 0);
-            goto convert_done;
-        }
 
-        if (gxm_skip_readback()) {
-            t2 = gxm_time_ns();
-            gxm_profile_frame(t_resolve, t1 - t0, t2 - t1, gxm_time_ns() - t2);
-            goto convert_done;
+            if (!copy) {
+                t2 = gxm_time_ns();
+                gxm_profile_frame(t_resolve, t1 - t0, t2 - t1, gxm_time_ns() - t2);
+                goto convert_done;
+            }
         }
 
         if (width == 0 || height == 0 || out_width == 0 || out_height == 0) {
@@ -9815,6 +9869,7 @@ EXPORT(SceGxm, 0x62312BF8, int, sceGxmTransferCopy, uint32_t width, uint32_t hei
     if (src_bpp != dst_bpp)
         return SCE_GXM_ERROR_INVALID_VALUE;
 
+    gxm_color_note_cpu_read(srcAddress);
     gxm_ds_note_read(srcAddress);
     gxm_ds_note_write(destAddress);
 
@@ -9868,6 +9923,8 @@ EXPORT(SceGxm, 0xD10F7EAD, int, sceGxmTransferDownscale, SceGxmTransferFormat sr
 
     if (!srcAddress || !destAddress || !srcWidth || !srcHeight || src_bpp != dst_bpp)
         return SCE_GXM_ERROR_INVALID_VALUE;
+
+    gxm_color_note_cpu_read(srcAddress);
 
     if (g_current_context)
         gxm_batch_flush(g_current_context);

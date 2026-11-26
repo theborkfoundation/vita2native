@@ -16,4 +16,11 @@ unsigned int SceDisplay_get_frame_count(void);
 /* Current logical window size, used to map pointer input onto the touch panel. */
 void SceDisplay_get_window_size(int *width, int *height);
 
+/*
+ * Whether the frame about to be presented is one the caller asked to capture.
+ * SceGxm uses it to copy the colour surface back only on frames a BMP needs,
+ * instead of every frame.
+ */
+bool SceDisplay_capture_wanted(void);
+
 #endif

@@ -117,6 +117,11 @@ static bool dump_requested(void)
     return false;
 }
 
+bool SceDisplay_capture_wanted(void)
+{
+    return dump_requested();
+}
+
 /* A '%u' in the path is replaced with the frame index, which lets one run
    capture a whole scripted sequence. */
 static void dump_file_path(char *out, size_t size)

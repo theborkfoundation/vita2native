@@ -51,6 +51,12 @@ void fatal_error(const char *message, const char *detail)
     abort();
 }
 
+/* No display is linked in, so no frame is ever being captured. */
+bool SceDisplay_capture_wanted(void)
+{
+    return false;
+}
+
 /*
  * GXM stores texture addresses as 30-bit words (address >> 2). On a 64-bit
  * test host, allocate texture data below 2 GiB so the packing round-trips, as
