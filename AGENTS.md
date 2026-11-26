@@ -135,10 +135,13 @@ ssh scratchvm 'cd ~/v2n && DISPLAY=:0 SDL_VIDEODRIVER=x11 \
   ~/vita-games/<TITLEID>/eboot.bin'
 ```
 
-- **Weston VNC kiosk** is the normal path now: `~/.local/bin/weston-vnc-kiosk
-  run <cmd>` injects `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY=wayland-kiosk`. It
-  is a user service (`systemctl --user status weston-vnc-kiosk`), 640x480.
-  The script is not on `PATH` for non-interactive SSH — call it by full path.
+- **VNC kiosk** is the normal path now: `~/.local/bin/weston-vnc-kiosk run
+  <cmd>` injects `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY=wayland-kiosk`. It is a
+  user service (`systemctl --user status weston-vnc-kiosk`), 640x480. The
+  script is not on `PATH` for non-interactive SSH — call it by full path.
+  `tools/sway-vnc-kiosk` is the GPU-composited replacement (sway + wayvnc, same
+  commands and port); the Orange Pi runs it because Weston's VNC backend cannot
+  use the GPU.
 - **`virpipe-run` gives the guest a real GPU.** Wrap the binary with it and GL
   goes through VirGL to the host's Intel GPU instead of llvmpipe — measured at
   ~55 fps against ~1.6 fps, so it is the only way to tell a rendering bug from
@@ -174,14 +177,26 @@ run the ARM32 artifact.
 
 ### Orange Pi Zero 3
 
-2 GB Allwinner H618 with Mali-G31 (Panfrost), `ssh opiz3`. Serves a Weston
-Wayland kiosk; run titles with `weston-vnc-kiosk run …` so the Wayland
-environment is set.
+2 GB Allwinner H618 with Mali-G31 (Panfrost), `ssh opiz3`. Runs
+`tools/sway-vnc-kiosk` (installed in `~/.local/bin`): sway on the wlroots
+**headless** backend with `WLR_RENDERER=gles2`, plus wayvnc on 640x480. Run
+titles with `sway-vnc-kiosk run …` so the Wayland environment is set.
 
-- Its Weston runs the **Pixman** backend with no dmabuf, so Wayland gives
-  llvmpipe, not the GPU. Software `eglSwapBuffers` then dominates the frame
-  (measured ~460 ms present against ~4 ms guest). `SDL_VIDEODRIVER=dummy` gets
-  Mali-G31, because only the compositor path is software.
+- **This is the only way to get the GPU headlessly on this board.** Weston
+  13's `vnc-backend` and `rdp-backend` are pixman-only: `--backend=vnc
+  --renderer=gl` initialises the GL renderer on Mali and then dies with
+  "failed to create compositor backend", so the guest fell back to llvmpipe and
+  ran at 9-10 fps. Under sway/GLES2 the guest reports `Mali-G31 (Panfrost)` and
+  holds 57-59 fps at 640x480.
+- The headless backend has no DRM fd (`Failed to get backend DRM FD`), so the
+  compositor's last hop to wayvnc is shm: one copy per frame on top of the GPU
+  render. A real KMS output — a dummy HDMI plug, or `video=HDMI-A-1:640x480@60e`
+  on the kernel cmdline — would make that hop zero-copy.
+- Settings live in `~/.config/sway-vnc-kiosk/` (`sway.conf`, `wayvnc.conf`).
+  The generated `wayvnc.conf` is `address`/`port` only, no auth. Never add
+  `max_fps` to it: wayvnc 0.7.2 double-frees on that key. `grim` captures the
+  composited output, which is the only way to see the presentation border —
+  the guest's own frame dump does not include it.
 - **This board hard-hangs on asset-heavy loads** (SSH banner times out, ping and
   TCP still fine, needs a power cycle). See `ISSUES.md` I-15: run with
   `VITA2NATIVE_FINISH_PER_FRAME=1`, a cgroup memory cap, and logs on disk rather
