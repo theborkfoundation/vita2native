@@ -3783,13 +3783,23 @@ EXPORT(SceGxm, 0xB291C959, int, sceGxmGetRenderTargetMemSize,
     return 0;
 }
 
-static int gxm_selective_scale_enabled(void)
+/*
+ * Which render targets the scale applies to. Shrinking an offscreen target that
+ * a title builds for effects and samples spends quality where nothing is
+ * displayed, so "present" leaves everything but the target on screen native.
+ */
+static int gxm_scale_present_only(void)
 {
-    static int enabled = -1;
+    static int present_only = -1;
 
-    if (enabled < 0)
-        enabled = vita2native_env_flag("VITA2NATIVE_RENDER_SCALE_SELECTIVE");
-    return enabled;
+    if (present_only < 0) {
+        const char *scope = vita2native_env_str("VITA2NATIVE_RENDER_SCALE_SCOPE");
+
+        present_only = scope && strcmp(scope, "present") == 0;
+        if (scope && scope[0] && !present_only && strcmp(scope, "all") != 0)
+            LOG("SceGxm: unknown VITA2NATIVE_RENDER_SCALE_SCOPE \"%s\", using all", scope);
+    }
+    return present_only;
 }
 
 static void gxm_render_target_size(SceGxmRenderTarget *rt, float scale)
@@ -3961,7 +3971,7 @@ EXPORT(SceGxm, 0x207AF96B, int, sceGxmCreateRenderTarget, const SceGxmRenderTarg
         return SCE_KERNEL_ERROR_NO_MEMORY;
 
     rt->params = *params;
-    gxm_render_target_size(rt, gxm_selective_scale_enabled() ? 1.0f : gxm_render_scale());
+    gxm_render_target_size(rt, gxm_scale_present_only() ? 1.0f : gxm_render_scale());
     LOG("SceGxm: render target %ux%u (draw %ux%u) multisampleMode=%u", params->width,
         params->height, rt->render_width, rt->render_height, params->multisampleMode);
     gxm_render_target_alloc_gl(rt);
@@ -5660,9 +5670,9 @@ EXPORT(SceGxm, 0x8734FF4E, int, sceGxmBeginScene, SceGxmContext *context, unsign
         return SCE_GXM_ERROR_INVALID_POINTER;
 
     /*
-     * Selective scaling allocates every target at native size, because whether
-     * one is presented is only known once the guest hands its surface to
-     * sceDisplaySetFrameBuf. Now that this one is, rebuild it at the draw size
+     * Present-only scaling allocates every target at native size, because
+     * whether one is presented is only known once the guest hands its surface
+     * to sceDisplaySetFrameBuf. Now that this one is, rebuild it at the draw size
      * before anything is rendered into it.
      */
     if (renderTarget->want_scale && !renderTarget->scaled) {
@@ -10964,13 +10974,13 @@ bool SceGxm_get_present_frame(const void *data, unsigned int *texture, int *widt
         return false;
 
     /*
-     * Selective scaling: this target is the one on screen, so the next scene
+     * Present-only scaling: this target is the one on screen, so the next scene
      * that renders into it rebuilds it at the draw size. Marking here, rather
      * than comparing against the display framebuffer, is what makes a title
      * that alternates two buffers work: each one is marked when its own turn
      * comes.
      */
-    if (gxm_selective_scale_enabled()) {
+    if (gxm_scale_present_only()) {
         SceGxmRenderTarget *presented = g_present_frame.render_target;
 
         if (presented && !presented->scaled)
