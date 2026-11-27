@@ -164,25 +164,28 @@ ssh scratchvm 'cd ~/v2n && ~/.local/bin/sway-vnc-kiosk run \
   by full path. It replaced the Weston kiosk on this bed; `sudo
   tools/sway-vnc-kiosk install --user <name> --no-auth` recreates it. Without
   auth, anything that can reach port 5901 gets the keyboard and pointer.
-- **`virpipe-run` gives the guest a real GPU.** Wrap the binary with it and GL
-  goes through VirGL to the host's Intel GPU instead of llvmpipe — measured at
-  ~55 fps against ~1.6 fps, so it is the only way to tell a rendering bug from
+- **`virpipe` gives the guest a real GPU.** Wrap the binary with it and GL goes
+  through VirGL to the host's Intel GPU instead of llvmpipe — measured at ~55 fps
+  against ~1.6 fps, so it is the only way to tell a rendering bug from
   software-rasteriser slowness:
 
   ```sh
   ssh scratchvm 'cd ~/v2n && ~/.local/bin/sway-vnc-kiosk run \
-    virpipe-run ./v2n-arm ~/vita-games/<TITLEID>/eboot.bin'
+    virpipe ./v2n-arm ~/vita-games/<TITLEID>/eboot.bin'
   ```
 
-  It starts a private `virgl_test_server` and sets `GALLIUM_DRIVER=virpipe` and
-  `VTEST_SOCKET_NAME` for the child only. `virpipe-run --diagnose` reports which
-  renderer wins. The installed copy is the patched one (no `--no-fork`): the
-  stock single-serving server deadlocks a client that opens more than one GL
-  connection, and vita2native opens one per guest thread that gets a context —
-  it hangs inside `eglInitialize` with no error. Keep it in sync by copying that
-  file, not the distribution's.
+  One `virgl_test_server` backs every client: it is a user unit (`systemctl
+  --user status virpipe`) listening on `$XDG_RUNTIME_DIR/virpipe/vtest.sock`,
+  installed with `sudo tools/virpipe install --user <name>`. `virpipe run <cmd>`
+  only sets `GALLIUM_DRIVER=virpipe` and `VTEST_SOCKET_NAME` and execs, so
+  concurrent titles share the endpoint; `virpipe diagnose` probes it with
+  `eglinfo` and reports which renderer wins. The unit starts the server in its
+  default forking mode: a single-serving server (`--no-fork`) blocks the second
+  vtest connection, and vita2native opens one per guest thread that gets a
+  context — it hangs inside `eglInitialize` with no error. Restart the unit after
+  a Mesa upgrade, or clients keep talking to the `virglrenderer` it started with.
 - Everything still runs under `qemu-arm-static`, so absolute CPU speed is
-  meaningless. With `virpipe-run` the GL side is not emulated, so frame-rate
+  meaningless. With `virpipe` the GL side is not emulated, so frame-rate
   comparisons between code changes are meaningful there; they are not against
   the real handhelds.
 - It cannot validate KMS/DRM: the i915 device has no matching armhf Mesa

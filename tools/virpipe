@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+"""VirGL test server (shared virpipe endpoint) with installer and client runner.
+
+Commands:
+  install --user <name>   install the service and script for <name> (as root)
+  run <command> [args…]   run a command against the shared endpoint
+  diagnose                report which renderer the endpoint provides
+
+The server is a systemd user unit listening on a fixed socket under the runtime
+directory, so any number of applications share one GPU connection point instead
+of starting a private server each. `run` sets GALLIUM_DRIVER=virpipe and
+VTEST_SOCKET_NAME and executes the command. Only the Python standard library is
+used.
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import os
+import pwd
+import shutil
+import stat
+import subprocess
+import sys
+import time
+
+SCRIPT_NAME = "virpipe"
+SERVICE_NAME = "virpipe.service"
+SERVER_BINARY = "virgl_test_server"
+
+SOCKET_DIR = "virpipe"
+SOCKET_NAME = "vtest.sock"
+
+UNIT_TEMPLATE = """[Unit]
+Description=VirGL test server (shared virpipe endpoint)
+
+[Service]
+Type=simple
+RuntimeDirectory={socket_dir}
+RuntimeDirectoryMode=0700
+ExecStartPre=-/bin/rm -f %t/{socket_dir}/{socket}
+ExecStart={server} --use-egl-surfaceless --socket-path=%t/{socket_dir}/{socket}
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def log(msg: str) -> None:
+    print(msg, flush=True)
+
+
+def die(msg: str, code: int = 1) -> "NoReturn":  # noqa: F821
+    print(f"error: {msg}", file=sys.stderr, flush=True)
+    raise SystemExit(code)
+
+
+def runtime_dir() -> str:
+    return os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+
+
+def socket_path(runtime: str | None = None) -> str:
+    return os.path.join(runtime or runtime_dir(), SOCKET_DIR, SOCKET_NAME)
+
+
+def render_nodes() -> list[tuple[str, str]]:
+    nodes: list[tuple[str, str]] = []
+    for node in sorted(glob.glob("/dev/dri/renderD*")):
+        link = f"/sys/class/drm/{os.path.basename(node)}/device/driver"
+        try:
+            driver = os.path.basename(os.path.realpath(link, strict=True))
+        except OSError:
+            driver = "unknown"
+        nodes.append((node, driver))
+    return nodes
+
+
+def write_unit(path: str, content: str, uid: int, gid: int) -> None:
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as fh:
+            if fh.read() == content:
+                log(f"unit unchanged: {path}")
+                return
+        backup = f"{path}.bak-{time.strftime('%Y%m%d%H%M%S')}"
+        shutil.copyfile(path, backup)
+        os.chown(backup, uid, gid)
+        log(f"updating {path} (previous copy: {backup})")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    os.chown(path, uid, gid)
+    os.chmod(path, 0o644)
+
+
+def wait_for_user_manager(uid: int) -> str:
+    runtime = f"/run/user/{uid}"
+    bus = os.path.join(runtime, "bus")
+
+    def up() -> bool:
+        try:
+            return stat.S_ISSOCK(os.stat(bus).st_mode)
+        except OSError:
+            return False
+
+    for _ in range(50):
+        if up():
+            return runtime
+        time.sleep(0.2)
+    log(f"starting user manager for uid {uid}")
+    subprocess.run(
+        ["systemctl", "start", f"user@{uid}.service"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    for _ in range(50):
+        if up():
+            return runtime
+        time.sleep(0.2)
+    die(f"user manager for uid {uid} did not come up (is systemd-logind running?)")
+
+
+def cmd_install(args: argparse.Namespace) -> None:
+    if os.geteuid() != 0:
+        die("install must be run as root (use sudo)")
+    try:
+        pw = pwd.getpwnam(args.user)
+    except KeyError:
+        die(f"no such user: {args.user}")
+    home = pw.pw_dir
+    if not home or not os.path.isdir(home):
+        die(f"cannot resolve home directory for {args.user}")
+    uid, gid = pw.pw_uid, pw.pw_gid
+    runuser = shutil.which("runuser")
+    if not runuser:
+        die("runuser not found (util-linux is required)")
+    server = shutil.which(SERVER_BINARY)
+    if not server:
+        die(f"{SERVER_BINARY} not found; install it first (apt install mesa-utils-extra)")
+
+    bin_dir = os.path.join(home, ".local", "bin")
+    unit_dir = os.path.join(home, ".config", "systemd", "user")
+    unit = os.path.join(unit_dir, SERVICE_NAME)
+    dst = os.path.join(bin_dir, SCRIPT_NAME)
+
+    log(f"installing for user {args.user} (uid {uid}, home {home})")
+
+    for path, mode in ((bin_dir, 0o755), (unit_dir, 0o755)):
+        os.makedirs(path, exist_ok=True)
+        os.chown(path, uid, gid)
+        os.chmod(path, mode)
+
+    src = os.path.realpath(__file__)
+    if os.path.realpath(dst) != src:
+        shutil.copyfile(src, dst)
+        os.chmod(dst, 0o755)
+        os.chown(dst, uid, gid)
+        log(f"installed {dst}")
+    else:
+        log(f"script already installed at {dst}")
+
+    content = UNIT_TEMPLATE.format(
+        socket_dir=SOCKET_DIR, socket=SOCKET_NAME, server=server
+    )
+    write_unit(unit, content, uid, gid)
+
+    log(f"enabling linger for {args.user}")
+    subprocess.run(["loginctl", "enable-linger", args.user], check=True)
+
+    runtime = wait_for_user_manager(uid)
+
+    def as_user(*cmd: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [
+                runuser, "-u", args.user, "--", "env",
+                f"XDG_RUNTIME_DIR={runtime}",
+                f"DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus",
+                *cmd,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    if as_user("systemctl", "--user", "daemon-reload").returncode != 0:
+        die("systemctl --user daemon-reload failed")
+    result = as_user("systemctl", "--user", "enable", SERVICE_NAME)
+    if result.returncode == 0:
+        result = as_user("systemctl", "--user", "restart", SERVICE_NAME)
+    if result.returncode != 0:
+        die(f"failed to enable {SERVICE_NAME}")
+
+    if as_user("systemctl", "--user", "is-active", "--quiet", SERVICE_NAME).returncode == 0:
+        log(f"service {SERVICE_NAME} is active")
+    else:
+        log(f"warning: {SERVICE_NAME} did not stay active; check:")
+        log(f"  journalctl --user -u {SERVICE_NAME}")
+
+    node = socket_path(runtime)
+    deadline = time.time() + 10.0
+    while not os.path.exists(node) and time.time() < deadline:
+        time.sleep(0.2)
+    if os.path.exists(node):
+        log(f"endpoint ready: {node}")
+    else:
+        log(f"warning: no endpoint socket at {node}; check the service log")
+
+    nodes = render_nodes()
+    if not nodes:
+        log("warning: no /dev/dri render node; GPU rendering may fall back to llvmpipe")
+    elif not any(as_user("test", "-w", node).returncode == 0 for node, _ in nodes):
+        log(f"warning: uid {uid} cannot write any render node; add {args.user} to the render group")
+
+    log("")
+    log(f"start apps:  {SCRIPT_NAME} run <command>")
+    log(f"endpoint:    {node}")
+    log(f"logs:        journalctl --user -u {SERVICE_NAME}")
+
+
+def cmd_run(args: argparse.Namespace) -> None:
+    if os.geteuid() == 0:
+        die("run must be executed as the service user, not root")
+
+    argv = list(args.argv)
+    if argv and argv[0] == "--":
+        argv = argv[1:]
+    if not argv:
+        die("run requires a command, e.g.: virpipe run -- ./game")
+
+    runtime = runtime_dir()
+    node = socket_path(runtime)
+    if not os.path.exists(node):
+        die(
+            f"virpipe endpoint not found: {node}\n"
+            f"is the service running?  systemctl --user status {SERVICE_NAME}"
+        )
+
+    if "/" in argv[0]:
+        exe = argv[0]
+        if not os.path.exists(exe):
+            print(f"error: command not found: {argv[0]}", file=sys.stderr)
+            raise SystemExit(127)
+    else:
+        exe = shutil.which(argv[0])
+        if not exe:
+            print(f"error: command not found: {argv[0]}", file=sys.stderr)
+            raise SystemExit(127)
+
+    env = os.environ.copy()
+    env["XDG_RUNTIME_DIR"] = runtime
+    env["GALLIUM_DRIVER"] = "virpipe"
+    env["VTEST_SOCKET_NAME"] = node
+    os.execvpe(exe, [exe, *argv[1:]], env)
+
+
+def cmd_diagnose(_: argparse.Namespace) -> None:
+    node = socket_path()
+    active = subprocess.run(
+        ["systemctl", "--user", "is-active", "--quiet", SERVICE_NAME]
+    ).returncode == 0
+    log(f"service {SERVICE_NAME}: {'active' if active else 'inactive'}")
+    log(f"endpoint: {node} ({'present' if os.path.exists(node) else 'missing'})")
+    for path, driver in render_nodes():
+        log(f"{path}: kernel driver {driver}")
+    log(f"{SERVER_BINARY}: {shutil.which(SERVER_BINARY) or 'not on PATH'}")
+    if not os.path.exists(node):
+        die(f"cannot probe the endpoint; is {SERVICE_NAME} running?")
+
+    eglinfo = shutil.which("eglinfo")
+    if not eglinfo:
+        die("eglinfo not found; install the Mesa EGL utilities to probe the endpoint")
+
+    env = os.environ.copy()
+    env["GALLIUM_DRIVER"] = "virpipe"
+    env["VTEST_SOCKET_NAME"] = node
+    env["EGL_PLATFORM"] = "surfaceless"
+    try:
+        result = subprocess.run(
+            [eglinfo, "-B"], env=env, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, errors="replace", timeout=20,
+        )
+    except subprocess.TimeoutExpired:
+        die("eglinfo timed out after 20 s")
+
+    renderers = [line for line in result.stdout.splitlines() if "renderer" in line.lower()]
+    for line in renderers:
+        log(line)
+    if any("virgl" in line.lower() for line in renderers):
+        log("virgl renderer confirmed")
+        return
+    die("Mesa EGL did not report a virgl renderer; see the probe output above")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=SCRIPT_NAME,
+        description="VirGL test server (shared virpipe endpoint) for GPU-backed GL.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "examples:\n"
+            f"  sudo {SCRIPT_NAME} install --user bachnx\n"
+            f"  {SCRIPT_NAME} run -- ./v2n-arm ~/vita-games/PCSE00747/eboot.bin\n"
+            f"  {SCRIPT_NAME} diagnose\n"
+        ),
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_install = sub.add_parser(
+        "install", help="install the service and script for a user (as root)"
+    )
+    p_install.add_argument("--user", required=True, metavar="NAME",
+                           help="target user (must exist)")
+    p_install.set_defaults(func=cmd_install)
+
+    p_run = sub.add_parser("run", help="run a command against the shared endpoint")
+    p_run.add_argument("argv", nargs=argparse.REMAINDER, metavar="COMMAND",
+                       help="command and arguments (use -- before flags)")
+    p_run.set_defaults(func=cmd_run)
+
+    p_diag = sub.add_parser(
+        "diagnose", help="report the renderer the endpoint provides"
+    )
+    p_diag.set_defaults(func=cmd_diagnose)
+
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
