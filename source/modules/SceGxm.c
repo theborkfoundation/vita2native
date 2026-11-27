@@ -2901,6 +2901,23 @@ static void gxm_arena_commit(GxmBufferArena *arena, GLenum target, uint32_t star
     g_gl->glBufferSubData(target, (GLintptr)start, (GLsizeiptr)(end - start), arena->stage + start);
 }
 
+/*
+ * A batch only appends above the previous end, and sceGxmBeginScene already
+ * orphaned this arena for the frame, so the storage it writes into is not read
+ * by any queued draw: the orphan that gxm_arena_commit does per batch would
+ * allocate the same thing again. Used for the stream and index arenas, which
+ * are reset by the scene rather than by the batch.
+ */
+static void gxm_arena_commit_append(GxmBufferArena *arena, GLenum target, uint32_t start,
+                                    uint32_t end)
+{
+    if (!arena->buffer || !arena->stage || end <= start || end > arena->stage_capacity)
+        return;
+
+    g_gl->glBindBuffer(target, arena->buffer);
+    g_gl->glBufferSubData(target, (GLintptr)start, (GLsizeiptr)(end - start), arena->stage + start);
+}
+
 static uint32_t gxm_arena_upload(GxmBufferArena *arena, GLenum target, const void *data,
                                  uint32_t size, uint32_t alignment)
 {
@@ -8690,12 +8707,12 @@ static void gxm_batch_flush(SceGxmContext *context)
             for (unsigned int i = 0; i < vp->streamCount && i < SCE_GXM_MAX_VERTEX_STREAMS; i++) {
                 if (!vp->streams[i].stride)
                     continue;
-                gxm_arena_commit(&context->stream_arena[i], GL_ARRAY_BUFFER,
-                                 batch->stream_start[i], context->stream_arena[i].used);
+                gxm_arena_commit_append(&context->stream_arena[i], GL_ARRAY_BUFFER,
+                                        batch->stream_start[i], context->stream_arena[i].used);
             }
         }
-        gxm_arena_commit(&context->index_arena, GL_ELEMENT_ARRAY_BUFFER, batch->index_start,
-                         context->index_arena.used);
+        gxm_arena_commit_append(&context->index_arena, GL_ELEMENT_ARRAY_BUFFER,
+                                batch->index_start, context->index_arena.used);
         if (batch->draw_uniforms && batch->vertex_program &&
             batch->vertex_program->draw_uniform_location >= 0) {
             gxm_arena_commit(&context->draw_uniform_arena, GL_UNIFORM_BUFFER, 0,
