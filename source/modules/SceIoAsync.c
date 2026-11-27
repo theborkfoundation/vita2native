@@ -21,6 +21,7 @@
 #include <psp2/io/fcntl.h>
 #include <psp2/types.h>
 
+#include "modules/SceIoAsync.h"
 #include "modules/SceLibKernel.h"
 #include "module.h"
 
@@ -37,32 +38,53 @@ int sceIoRmdir(const char *dir);
 typedef struct {
     SceUID fd;
     int result;
+    uint64_t seq;
     bool used;
 } AsyncResult;
 
 static AsyncResult g_async[ASYNC_SLOTS];
 static pthread_mutex_t g_async_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_async_seq;
 
 static void async_store(SceUID fd, int result)
 {
+    AsyncResult *slot = NULL;
+
     pthread_mutex_lock(&g_async_lock);
 
     for (int i = 0; i < ASYNC_SLOTS; i++) {
         if (g_async[i].used && g_async[i].fd == fd) {
-            g_async[i].result = result;
-            pthread_mutex_unlock(&g_async_lock);
-            return;
-        }
-    }
-
-    for (int i = 0; i < ASYNC_SLOTS; i++) {
-        if (!g_async[i].used) {
-            g_async[i].used = true;
-            g_async[i].fd = fd;
-            g_async[i].result = result;
+            slot = &g_async[i];
             break;
         }
     }
+
+    if (!slot) {
+        for (int i = 0; i < ASYNC_SLOTS; i++) {
+            if (!g_async[i].used) {
+                slot = &g_async[i];
+                break;
+            }
+        }
+    }
+
+    /*
+     * A full table used to drop the result silently, so the caller's completion
+     * reported zero. One slot per descriptor is all the guest can observe, so
+     * retire the oldest entry instead.
+     */
+    if (!slot) {
+        slot = &g_async[0];
+        for (int i = 1; i < ASYNC_SLOTS; i++) {
+            if (g_async[i].seq < slot->seq)
+                slot = &g_async[i];
+        }
+    }
+
+    slot->used = true;
+    slot->fd = fd;
+    slot->result = result;
+    slot->seq = ++g_async_seq;
 
     pthread_mutex_unlock(&g_async_lock);
 }
@@ -84,7 +106,7 @@ static int async_load(SceUID fd, int *result)
     return found;
 }
 
-static void async_forget(SceUID fd)
+void SceIoAsync_forget(SceUID fd)
 {
     pthread_mutex_lock(&g_async_lock);
     for (int i = 0; i < ASYNC_SLOTS; i++) {
@@ -115,7 +137,7 @@ EXPORT(SceIofilemgr, 0x8EA3616A, int, sceIoCloseAsync, SceUID fd)
 {
     int result = sceIoClose(fd);
 
-    async_forget(fd);
+    SceIoAsync_forget(fd);
     return result;
 }
 
@@ -265,7 +287,7 @@ EXPORT(SceIofilemgr, 0xDC2D7D38, int, sceIoDcloseAsync, SceUID fd)
 {
     int result = sceIoDclose(fd);
 
-    async_forget(fd);
+    SceIoAsync_forget(fd);
     return result;
 }
 

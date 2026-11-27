@@ -31,6 +31,7 @@
 #include "util.h"
 
 #include "modules/SceKernelThreadMgr.h"
+#include "modules/SceIoAsync.h"
 #include "modules/SceLibKernel.h"
 #include "modules/SceSysmem.h"
 #include "settings.h"
@@ -40,6 +41,13 @@ typedef struct {
     SceUID uid;
     FILE *fp;
     char *file;
+    /*
+     * A handle outlives its descriptor. sceIoClose unlinks it so no new call can
+     * find it, but a thread already inside a read keeps it alive until it
+     * returns, and the last one to leave closes the stream.
+     */
+    int refs;
+    bool closing;
 } VitaOpenedFile;
 
 typedef struct {
@@ -60,17 +68,44 @@ DICT_DEF2(vita_opened_dirs_dict, SceUID, M_DEFAULT_OPLIST, VitaOpenedDir *, M_PO
 static vita_opened_dirs_dict_t g_vita_opened_dirs;
 static RwLock g_vita_opened_dirs_lock;
 
+/* Takes a reference the caller must hand back with put_opened_file(). */
 static VitaOpenedFile *get_opened_file_for_fd(SceUID fd)
 {
-    VitaOpenedFile *vfile;
+    VitaOpenedFile *vfile = NULL;
     VitaOpenedFile **slot;
 
-    rwlockReadLock(&g_vita_opened_files_lock);
+    /*
+     * The write lock, not the read lock: taking a reference writes to the
+     * object, and a concurrent close frees it the moment its refs reach zero.
+     */
+    rwlockWriteLock(&g_vita_opened_files_lock);
     slot = vita_opened_files_dict_get(g_vita_opened_files, fd);
-    vfile = slot ? *slot : NULL;
-    rwlockReadUnlock(&g_vita_opened_files_lock);
+    if (slot && *slot && !(*slot)->closing) {
+        vfile = *slot;
+        vfile->refs++;
+    }
+    rwlockWriteUnlock(&g_vita_opened_files_lock);
 
     return vfile;
+}
+
+static void put_opened_file(VitaOpenedFile *vfile)
+{
+    bool destroy;
+
+    if (!vfile)
+        return;
+
+    rwlockWriteLock(&g_vita_opened_files_lock);
+    destroy = --vfile->refs == 0 && vfile->closing;
+    rwlockWriteUnlock(&g_vita_opened_files_lock);
+
+    if (!destroy)
+        return;
+
+    fclose(vfile->fp);
+    free(vfile->file);
+    free(vfile);
 }
 
 static VitaOpenedDir *get_opened_dir_for_fd(SceUID fd)
@@ -222,24 +257,35 @@ EXPORT(SceLibKernel, 0x6C60AC61, SceUID, sceIoOpen, const char *file, int flags,
 
 EXPORT(SceIofilemgr, 0xC70B8886, int, sceIoClose, SceUID fd)
 {
-    VitaOpenedFile *vfile = get_opened_file_for_fd(fd);
-    int ret;
+    VitaOpenedFile *vfile = NULL;
+    VitaOpenedFile **slot;
+    bool destroy;
+
+    rwlockWriteLock(&g_vita_opened_files_lock);
+    slot = vita_opened_files_dict_get(g_vita_opened_files, fd);
+    if (slot && *slot && !(*slot)->closing) {
+        vfile = *slot;
+        vfile->closing = true;
+        vita_opened_files_dict_erase(g_vita_opened_files, fd);
+    }
+    destroy = vfile && vfile->refs == 0;
+    rwlockWriteUnlock(&g_vita_opened_files_lock);
 
     if (!vfile)
         return SCE_ERROR_ERRNO_EBADF;
 
-    ret = fclose(vfile->fp);
-    rwlockWriteLock(&g_vita_opened_files_lock);
-    vita_opened_files_dict_erase(g_vita_opened_files, fd);
-    rwlockWriteUnlock(&g_vita_opened_files_lock);
-    free(vfile->file);
-    free(vfile);
+    /* The descriptor is gone, so a result queued against it can never be
+       collected; leaving it behind filled the table. */
+    SceIoAsync_forget(fd);
+
+    if (destroy) {
+        fclose(vfile->fp);
+        free(vfile->file);
+        free(vfile);
+    }
 
     if (vita2native_env_flag("VITA2NATIVE_DEBUG_TRACE_FILE_IO"))
         LOG("sceIoClose(0x%x)", fd);
-
-    if (ret)
-        return SCE_ERROR_ERRNO_EBADF;
 
     return 0;
 }
@@ -257,6 +303,14 @@ EXPORT(SceIofilemgr, 0xFDB32293, SceSSize, sceIoRead, SceUID fd, void *buf, SceS
     if (vita2native_env_flag("VITA2NATIVE_DEBUG_TRACE_FILE_IO"))
         LOG("sceIoRead(0x%x, %u) -> %d", fd, (unsigned)nbyte, (int)result);
 
+    /* A host read error is not EOF: reporting the short count would silently
+       truncate whatever the title is loading. */
+    if (ferror(vfile->fp)) {
+        put_opened_file(vfile);
+        return SCE_ERROR_ERRNO_EIO;
+    }
+
+    put_opened_file(vfile);
     return result;
 }
 
@@ -275,10 +329,12 @@ EXPORT(SceIofilemgr, 0x34EFD876, SceSSize, sceIoWrite, SceUID fd, const void *bu
      * expects the second descriptor to see the write, and a full disk only
      * shows up at this point rather than in fwrite.
      */
-    if (fflush(vfile->fp) != 0 || written != nbyte)
-        return SCE_ERROR_ERRNO_EIO;
+    {
+        bool failed = fflush(vfile->fp) != 0 || written != nbyte;
 
-    return (SceSSize)written;
+        put_opened_file(vfile);
+        return failed ? SCE_ERROR_ERRNO_EIO : (SceSSize)written;
+    }
 }
 
 EXPORT(SceIofilemgr, 0x49252B9B, long, sceIoLseek32, SceUID fd, long offset, int whence)
@@ -287,10 +343,17 @@ EXPORT(SceIofilemgr, 0x49252B9B, long, sceIoLseek32, SceUID fd, long offset, int
     if (!vfile)
         return SCE_ERROR_ERRNO_EBADF;
 
-    if (fseek(vfile->fp, offset, whence) != 0)
-        return -1;
+    {
+        long position;
 
-    return ftell(vfile->fp);
+        if (fseek(vfile->fp, offset, whence) != 0) {
+            put_opened_file(vfile);
+            return -1;
+        }
+        position = ftell(vfile->fp);
+        put_opened_file(vfile);
+        return position;
+    }
 }
 
 EXPORT(SceIofilemgr, 0x16512F59, int, sceIoSyncByFd, SceUID fd, int flag)
@@ -299,7 +362,12 @@ EXPORT(SceIofilemgr, 0x16512F59, int, sceIoSyncByFd, SceUID fd, int flag)
     if (!vfile)
         return SCE_ERROR_ERRNO_EBADF;
 
-    return fflush(vfile->fp);
+    {
+        int ret = fflush(vfile->fp);
+
+        put_opened_file(vfile);
+        return ret;
+    }
 }
 
 int SceLibKernel_fd_truncate(SceUID fd, int64_t size)
@@ -309,8 +377,14 @@ int SceLibKernel_fd_truncate(SceUID fd, int64_t size)
     if (!vfile)
         return -1;
 
-    fflush(vfile->fp);
-    return ftruncate(fileno(vfile->fp), (off_t)size);
+    {
+        int ret;
+
+        fflush(vfile->fp);
+        ret = ftruncate(fileno(vfile->fp), (off_t)size);
+        put_opened_file(vfile);
+        return ret;
+    }
 }
 
 int SceLibKernel_fd_setlock(SceUID fd, int exclusive, int wait)
@@ -327,7 +401,12 @@ int SceLibKernel_fd_setlock(SceUID fd, int exclusive, int wait)
     lock.l_start = 0;
     lock.l_len = 0;
 
-    return fcntl(fileno(vfile->fp), wait ? F_SETLKW : F_SETLK, &lock);
+    {
+        int ret = fcntl(fileno(vfile->fp), wait ? F_SETLKW : F_SETLK, &lock);
+
+        put_opened_file(vfile);
+        return ret;
+    }
 }
 
 EXPORT(SceLibKernel, 0xA9283DD0, SceUID, sceIoDopen, const char *dirname)
@@ -507,16 +586,21 @@ EXPORT(SceLibKernel, 0x57F8CD25, int, sceIoGetstatByFd, SceUID fd, SceIoStat *st
     VitaOpenedFile *vfile = get_opened_file_for_fd(fd);
     struct stat sb;
 
-    if (!st)
+    if (!st) {
+        put_opened_file(vfile);
         return sce_error_from_errno(EINVAL);
+    }
 
     if (!vfile)
         return SCE_ERROR_ERRNO_EBADF;
 
-    if (fstat(fileno(vfile->fp), &sb) != 0)
+    if (fstat(fileno(vfile->fp), &sb) != 0) {
+        put_opened_file(vfile);
         return sce_error_from_errno(errno);
+    }
 
     stat_to_sce_iostat(&sb, st);
+    put_opened_file(vfile);
     return 0;
 }
 
@@ -621,14 +705,21 @@ EXPORT(SceLibKernel, 0x99BA173E, SceOff, sceIoLseek, SceUID fd, SceOff offset, i
     if (!vfile)
         return SCE_ERROR_ERRNO_EBADF;
 
-    if (fseeko(vfile->fp, (off_t)offset, whence) != 0)
+    if (fseeko(vfile->fp, (off_t)offset, whence) != 0) {
+        put_opened_file(vfile);
         return -1;
+    }
 
     if (vita2native_env_flag("VITA2NATIVE_DEBUG_TRACE_FILE_IO"))
         LOG("sceIoLseek(0x%x, %lld, %d) -> %lld", fd, (long long)offset, whence,
             (long long)ftello(vfile->fp));
 
-    return (SceOff)ftello(vfile->fp);
+    {
+        SceOff position = (SceOff)ftello(vfile->fp);
+
+        put_opened_file(vfile);
+        return position;
+    }
 }
 
 EXPORT_FUNC(SceLibKernel, 0x632980D7, memset)
@@ -710,17 +801,22 @@ EXPORT(SceLibKernel, 0x52315AD7, SceSSize, sceIoPread, SceUID fd, void *buf, Sce
      * alone, so a concurrently read stream is not disturbed. Buffered writes
      * have to reach the file first.
      */
-    if (fflush(vfile->fp) != 0)
+    if (fflush(vfile->fp) != 0) {
+        put_opened_file(vfile);
         return sce_error_from_errno(errno);
+    }
 
     read = pread(fileno(vfile->fp), buf, nbyte, (off_t)offset);
-    if (read < 0)
+    if (read < 0) {
+        put_opened_file(vfile);
         return sce_error_from_errno(errno);
+    }
 
     if (vita2native_env_flag("VITA2NATIVE_DEBUG_TRACE_FILE_IO"))
         LOG("sceIoPread(0x%x, %u, %lld) -> %d", fd, (unsigned)nbyte, (long long)offset,
             (int)read);
 
+    put_opened_file(vfile);
     return (SceSSize)read;
 }
 
@@ -733,13 +829,18 @@ EXPORT(SceLibKernel, 0x8FFFF5A8, SceSSize, sceIoPwrite, SceUID fd, const void *b
     if (!vfile)
         return SCE_ERROR_ERRNO_EBADF;
 
-    if (fflush(vfile->fp) != 0)
+    if (fflush(vfile->fp) != 0) {
+        put_opened_file(vfile);
         return sce_error_from_errno(errno);
+    }
 
     written = pwrite(fileno(vfile->fp), buf, nbyte, (off_t)offset);
-    if (written < 0)
+    if (written < 0) {
+        put_opened_file(vfile);
         return sce_error_from_errno(errno);
+    }
 
+    put_opened_file(vfile);
     return (SceSSize)written;
 }
 
