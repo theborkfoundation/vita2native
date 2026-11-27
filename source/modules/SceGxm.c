@@ -1764,6 +1764,17 @@ static int gxm_trace_textures(void)
     return enabled;
 }
 
+/* Diagnostic: pretend the descriptor has no mip chain. Upload, lookup and
+   hashing all have to agree on it, or every draw re-uploads the texture. */
+static int gxm_force_level0(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = vita2native_env_flag("VITA2NATIVE_DEBUG_TEXTURE_LEVEL0");
+    return enabled;
+}
+
 static uint32_t gxm_texture_hash(const SceGxmTextureInner *texture, const void *data)
 {
     SceGxmTextureFormat format = gxm_texture_get_format(texture);
@@ -1790,6 +1801,8 @@ static uint32_t gxm_texture_hash(const SceGxmTextureInner *texture, const void *
                     gxm_texture_true_mip_count(texture), data);
             }
             hash = gxm_hash_bytes_fast(hash, (const uint8_t *)data + info.offset, info.size);
+            if (gxm_force_level0())
+                break;
         }
     }
 
@@ -2029,7 +2042,7 @@ static GxmTextureCache *gxm_texture_cache_find(const SceGxmTextureInner *texture
                                                const void *data, GLenum target)
 {
     uint32_t format = (uint32_t)gxm_texture_get_format(texture);
-    uint32_t mip_count = gxm_texture_true_mip_count(texture);
+    uint32_t mip_count = gxm_force_level0() ? 1 : gxm_texture_true_mip_count(texture);
     const void *palette = (const void *)(uintptr_t)(texture->palette_addr << 6);
     uint32_t type = (uint32_t)gxm_texture_get_type(texture);
     uint32_t width = (uint32_t)gxm_texture_get_width(texture);
@@ -2273,22 +2286,15 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
     const void *data = gxm_texture_get_data(texture);
     uint32_t width = (uint32_t)gxm_texture_get_width(texture);
     uint32_t height = (uint32_t)gxm_texture_get_height(texture);
-    uint32_t mip_count = gxm_texture_true_mip_count(texture);
+    uint32_t mip_count = gxm_force_level0() ? 1 : gxm_texture_true_mip_count(texture);
     const void *palette = (const void *)(uintptr_t)(texture->palette_addr << 6);
-    static int force_level0 = -1;
     static int force_lit_shadow = -1;
     static int trace_textures = -1;
     static unsigned int trace_count;
     uint32_t hash;
 
-    /* Diagnostic: ignore the mip chain so the scene can be compared against a
-       level-0-only baseline. */
-    if (force_level0 < 0)
-        force_level0 = vita2native_env_flag("VITA2NATIVE_DEBUG_TEXTURE_LEVEL0");
     if (force_lit_shadow < 0)
         force_lit_shadow = vita2native_env_flag("VITA2NATIVE_DEBUG_FORCE_SHADOW_LIT");
-    if (force_level0)
-        mip_count = 1;
     if (trace_textures < 0)
         trace_textures = vita2native_env_flag("VITA2NATIVE_DEBUG_TRACE_TEXTURES");
     GxmTextureCache *cache;
