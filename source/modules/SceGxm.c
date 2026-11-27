@@ -9690,7 +9690,6 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
            per-draw array; give it slot 0 for this unbatched draw. */
         if (vp->draw_uniform_location >= 0) {
             uint32_t size = gxm_build_uniforms(context, vp->programId, true);
-            float zero = 0.0f;
 
             if (!context->draw_uniform_arena.buffer)
                 gxm_arena_init(&context->draw_uniform_arena, GL_UNIFORM_BUFFER,
@@ -9701,8 +9700,6 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
             context->draw_index_arena.used = 0;
             gxm_arena_append(&context->draw_uniform_arena, context->vertex_block_data, size, size);
             gxm_arena_commit(&context->draw_uniform_arena, GL_UNIFORM_BUFFER, 0, size);
-            gxm_arena_append(&context->draw_index_arena, &zero, sizeof(zero), 4);
-            gxm_arena_commit(&context->draw_index_arena, GL_ARRAY_BUFFER, 0, sizeof(zero));
             if (g_bound_draw_uniform_block != context->draw_uniform_arena.buffer) {
                 g_gl->glBindBufferBase(GL_UNIFORM_BUFFER, GXM_DRAW_UNIFORM_BINDING,
                                        context->draw_uniform_arena.buffer);
@@ -9715,9 +9712,15 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
         if (vp->draw_uniform_location >= 0) {
             GLuint location = (GLuint)vp->draw_uniform_location;
 
-            g_gl->glBindBuffer(GL_ARRAY_BUFFER, context->draw_index_arena.buffer);
-            g_gl->glEnableVertexAttribArray(location);
-            g_gl->glVertexAttribPointer(location, 1, GL_FLOAT, GL_FALSE, sizeof(float), NULL);
+            /*
+             * One zero was uploaded but the attribute is a per-vertex array, so
+             * every vertex past the first read past it and could select another
+             * draw's uniforms. A disabled array takes the generic value, which
+             * covers every vertex this draw addresses.
+             */
+            g_gl->glDisableVertexAttribArray(location);
+            if (g_gl->glVertexAttrib1f)
+                g_gl->glVertexAttrib1f(location, 0.0f);
         }
 
         wire = gxm_wireframe_indices(primType, indexType, indexData, indexCount, &wire_count);

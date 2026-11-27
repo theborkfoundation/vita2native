@@ -247,6 +247,17 @@ In `tools/`:
 - [argparse](https://github.com/cofyc/argparse) — the command-line parser
   (MIT).
 
+## Security
+
+Guest code is native ARM code in this process. The guest can issue raw Linux
+system calls (`svc #0`) and touch any descriptor the process holds, so the
+loader does not contain a title: it runs it. Treat a title as an untrusted
+binary, and if a deployment runs titles it did not build itself, isolate the
+process rather than the guest — seccomp-bpf for the syscall surface,
+bubblewrap or landlock for the filesystem, a dedicated user, or a container.
+Saves and the storage tree are ordinary files on the host filesystem and get
+whatever permissions that user has.
+
 ## Disclaimer
 
 **PlayStation Vita** is a trademark of **Sony Interactive Entertainment**.

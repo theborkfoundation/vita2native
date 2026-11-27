@@ -66,6 +66,7 @@
     X(PFNGLENABLEVERTEXATTRIBARRAYPROC, glEnableVertexAttribArray)                                 \
     X(PFNGLDISABLEVERTEXATTRIBARRAYPROC, glDisableVertexAttribArray)                               \
     X(PFNGLVERTEXATTRIBPOINTERPROC, glVertexAttribPointer)                                         \
+    X(PFNGLVERTEXATTRIB1FPROC, glVertexAttrib1f)                                         \
     X(PFNGLCREATESHADERPROC, glCreateShader)                                                       \
     X(PFNGLSHADERSOURCEPROC, glShaderSource)                                                       \
     X(PFNGLCOMPILESHADERPROC, glCompileShader)                                                     \
