@@ -65,6 +65,9 @@ bool convert_gxp_to_glsl_c_hinted(char **glsl, const SceGxmProgram *program, con
 /* Component count/type the recompiler infers from a texture format. */
 uint32_t vita3k_gxm_texture_hint_key(uint32_t format);
 
+/* True when the GXM fragment program reads the destination colour buffer. */
+bool vita3k_gxm_program_uses_frag_color(const SceGxmProgram *program);
+
 /*
  * Returns the storage-buffer layout Vita3K's SPIR-V recompiler uses for the
  * program's uniform buffers (default uniforms and named buffers share one

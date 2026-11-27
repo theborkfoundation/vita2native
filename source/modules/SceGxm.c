@@ -434,6 +434,7 @@ typedef struct SceGxmFragmentProgram {
     uint32_t shader_hash;
     uint32_t hint_signature;
     bool mask_update;
+    bool uses_texture_barrier;
     int refcount;
 } SceGxmFragmentProgram;
 
@@ -1206,9 +1207,10 @@ static char *gxm_patch_program_color(char *glsl, uint32_t hash)
     return patched;
 }
 
-/* Distinguishes the framebuffer-fetch variant of a shader from the plain one
-   in the on-disk cache. */
-#define GXM_SHADER_FETCH_HASH 0x46544348u /* "FTCH" */
+/* Distinguishes the framebuffer-fetch and texture-barrier variants of a shader
+   from the plain one in the on-disk cache. */
+#define GXM_SHADER_FETCH_HASH   0x46544348u /* "FTCH" */
+#define GXM_SHADER_BARRIER_HASH 0x42415252u /* "BARR" */
 
 /*
  * GXM fragment programs read the destination colour and blend in-shader; the
@@ -1216,14 +1218,16 @@ static char *gxm_patch_program_color(char *glsl, uint32_t hash)
  * GL_EXT_shader_framebuffer_fetch, where the fragment output is declared
  * "inout" and starts with the current pixel. Mali's proprietary driver only
  * ships the ARM variant, which reads gl_LastFragColorARM instead. Drivers with
- * neither extension fall back to writing the shader result directly (which
- * loses the compositing the shader expects).
+ * neither extension (such as VirGL) fall back to sampling the render target
+ * via imageLoad() with GL_NV_texture_barrier between draws; if neither path
+ * is available, the shader starts with zero and loses destination blending.
  */
 #define GXM_FETCH_NONE 0
 #define GXM_FETCH_EXT  1
 #define GXM_FETCH_ARM  2
 
 static int g_framebuffer_fetch_state;
+static int g_texture_barrier_state;
 
 static bool gxm_extension_present(const char *extensions, const char *name)
 {
@@ -1268,6 +1272,42 @@ static bool gxm_framebuffer_fetch_enabled(void)
     return forced && g_framebuffer_fetch_state >= 0 && gxm_framebuffer_fetch_kind() != GXM_FETCH_NONE;
 }
 
+static bool gxm_texture_barrier_supported(void)
+{
+    static int supported = -1;
+
+    if (supported < 0) {
+        const char *extensions = g_gl ? (const char *)g_gl->glGetString(GL_EXTENSIONS) : NULL;
+        const char *version = g_gl ? (const char *)g_gl->glGetString(GL_VERSION) : NULL;
+        const char *number = version ? strstr(version, "OpenGL ES ") : NULL;
+        int major = 0, minor = 0;
+        GLint max_frag_images = 0;
+
+        if (number)
+            sscanf(number + strlen("OpenGL ES "), "%d.%d", &major, &minor);
+
+        supported = 0;
+        if (g_gl && g_gl->glBindImageTexture && g_gl->glMemoryBarrier &&
+            g_gl->glTextureBarrierNV && extensions &&
+            gxm_extension_present(extensions, "GL_NV_texture_barrier") &&
+            (major > 3 || (major == 3 && minor >= 1))) {
+            while (g_gl->glGetError() != GL_NO_ERROR) {
+            }
+            g_gl->glGetIntegerv(GL_MAX_FRAGMENT_IMAGE_UNIFORMS, &max_frag_images);
+            if (g_gl->glGetError() == GL_NO_ERROR && max_frag_images >= 1)
+                supported = 1;
+        }
+    }
+
+    return supported != 0;
+}
+
+static bool gxm_texture_barrier_enabled(void)
+{
+    return g_texture_barrier_state >= 0 && !gxm_framebuffer_fetch_enabled() &&
+           gxm_texture_barrier_supported();
+}
+
 /*
  * Picks a vertex attribute slot for the per-draw uniform slot. Attribute
  * locations assigned by the recompiler are dense, so the slot above the last
@@ -1309,14 +1349,18 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
                                    const SceGxmVertexAttribute *attributes, unsigned int count,
                                    const uint32_t *fragment_formats, const uint32_t *vertex_formats,
                                    uint32_t color_format, uint32_t *hash_out,
-                                   int draw_index_location, bool *draw_uniforms_out)
+                                   int draw_index_location, bool *draw_uniforms_out,
+                                   bool *texture_barrier_out)
 {
     bool debug_colors = gxm_debug_program_colors();
     bool debug_texcolor = gxm_debug_texcolor();
     bool fetch = stage == GL_FRAGMENT_SHADER && gxm_framebuffer_fetch_enabled();
+    bool barrier = stage == GL_FRAGMENT_SHADER && !fetch && gxm_texture_barrier_enabled();
 
     if (draw_uniforms_out)
         *draw_uniforms_out = false;
+    if (texture_barrier_out)
+        *texture_barrier_out = false;
 
     for (;;) {
         uint32_t hint_signature =
@@ -1331,6 +1375,8 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
 
         if (fetch)
             cache_hash ^= GXM_SHADER_FETCH_HASH;
+        else if (barrier)
+            cache_hash ^= GXM_SHADER_BARRIER_HASH;
         if (draw_index_location >= 0)
             cache_hash ^= GXM_DRAW_UNIFORM_HASH;
 
@@ -1341,6 +1387,9 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
             if (g_cached_shaders[i].hash == cache_hash && g_cached_shaders[i].stage == stage) {
                 if (draw_uniforms_out)
                     *draw_uniforms_out = g_cached_shaders[i].draw_uniforms;
+                if (texture_barrier_out)
+                    *texture_barrier_out =
+                        barrier && vita3k_gxm_program_uses_frag_color(program);
                 return g_cached_shaders[i].shader;
             }
         }
@@ -1368,13 +1417,17 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
             uint32_t num_instr = 0;
             bool applied = false;
             const char *dump_dir = vita2native_env_str("VITA2NATIVE_DEBUG_DUMP_SHADERS");
+            /* Host render targets are always GL_RGBA8, so the storage image
+               qualifier must match even if the guest asked for another layout. */
+            uint32_t spirv_color_format =
+                barrier ? (uint32_t)SCE_GXM_COLOR_FORMAT_U8U8U8U8_ABGR : color_format;
 
             g_shader_dump_hash = cache_hash;
             g_shader_dump_dir = dump_dir ? dump_dir : NULL;
 
-            if (!convert_gxp_to_spirv_c_hinted(&spirv, &num_instr, program, name, false, false,
+            if (!convert_gxp_to_spirv_c_hinted(&spirv, &num_instr, program, name, false, barrier,
                                                fetch, false, attributes, count, fragment_formats,
-                                               vertex_formats, color_format, false, false,
+                                               vertex_formats, spirv_color_format, false, false,
                                                g_shader_dump_dir ? gxm_shader_dump : NULL)) {
                 g_shader_dump_dir = NULL;
                 LOG("SceGxm: GXP -> SPIR-V failed for %s", name);
@@ -1411,7 +1464,8 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
         }
 
         LOG("SceGxm: shader cache miss %08x (%s) program %p%s", cache_hash, name,
-            (const void *)program, fetch ? " (framebuffer fetch)" : "");
+            (const void *)program,
+            fetch ? " (framebuffer fetch)" : barrier ? " (texture barrier)" : "");
         shader = gxm_create_compiled_shader(stage, name, glsl, &compiled);
         if (compiled && !debug_colors && !debug_texcolor)
             gxm_shader_cache_write(cache_hash, glsl);
@@ -1431,6 +1485,14 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
             LOG("SceGxm: framebuffer fetch shader rejected (%s), retrying without", name);
             g_framebuffer_fetch_state = -1;
             fetch = false;
+            barrier = gxm_texture_barrier_enabled();
+            continue;
+        }
+
+        if (!compiled && barrier) {
+            LOG("SceGxm: texture barrier shader rejected (%s), retrying without", name);
+            g_texture_barrier_state = -1;
+            barrier = false;
             continue;
         }
 
@@ -1448,6 +1510,9 @@ cache_shader:
 
         if (draw_uniforms_out)
             *draw_uniforms_out = draw_uniforms;
+        if (texture_barrier_out)
+            *texture_barrier_out =
+                compiled && barrier && vita3k_gxm_program_uses_frag_color(program);
 
         return compiled ? shader : 0;
     }
@@ -3107,6 +3172,13 @@ static void gxm_flush_state(SceGxmContext *context, const GxmLinkedProgram *link
 
     g_gl->glUseProgram(program);
 
+    if (fp && fp->uses_texture_barrier && context->render_target &&
+        context->render_target->color && !context->render_target->msaa_fbo &&
+        g_gl->glBindImageTexture) {
+        g_gl->glBindImageTexture(0, context->render_target->color, 0, GL_FALSE, 0, GL_READ_ONLY,
+                                 GL_RGBA8);
+    }
+
     /* Contexts are created on whichever thread runs the guest, which may not be
        the one that created the device; make sure the buffers exist regardless
        of whether GL was current when the context was instantiated. */
@@ -3865,8 +3937,10 @@ static void gxm_render_target_alloc_gl(SceGxmRenderTarget *rt)
 
     g_gl->glGenTextures(1, &rt->color);
     g_gl->glBindTexture(GL_TEXTURE_2D, rt->color);
-    g_gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)rt->render_width,
-                       (GLsizei)rt->render_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    /* Immutable storage is required for glBindImageTexture() in texture-barrier
+       programmable blending. */
+    g_gl->glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, (GLsizei)rt->render_width,
+                         (GLsizei)rt->render_height);
     g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     g_gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
@@ -3911,11 +3985,14 @@ static void gxm_render_target_alloc_gl(SceGxmRenderTarget *rt)
             LOG("SceGxm: render target framebuffer incomplete");
     }
 
-    /* Optional multisampled draw target, resolved into the FBO above. */
+    /* Optional multisampled draw target, resolved into the FBO above. Texture-barrier
+       blending reads rt->color directly via imageLoad(), so disable MSAA when
+       that fallback is in effect. */
     rt->samples = rt->params.multisampleMode == SCE_GXM_MULTISAMPLE_4X   ? 4
                   : rt->params.multisampleMode == SCE_GXM_MULTISAMPLE_2X ? 2
                                                                       : 0;
-    if (rt->samples && !gxm_no_msaa() && g_gl->glRenderbufferStorageMultisample) {
+    if (rt->samples && !gxm_no_msaa() && !gxm_texture_barrier_enabled() &&
+        g_gl->glRenderbufferStorageMultisample) {
         rt->samples = rt->samples > 4 ? 4 : rt->samples;
         g_gl->glGenRenderbuffers(1, &rt->msaa_color);
         g_gl->glBindRenderbuffer(GL_RENDERBUFFER, rt->msaa_color);
@@ -6240,6 +6317,9 @@ EXPORT(SceGxm, 0xFE300E2F, int, sceGxmEndScene, SceGxmContext *context,
 
     gxm_batch_flush(context);
 
+    if (g_gl && g_gl->glBindImageTexture && gxm_texture_barrier_enabled())
+        g_gl->glBindImageTexture(0, 0, 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA8);
+
     if (!g_gl || !context->render_target || discard)
         return 0;
 
@@ -8525,6 +8605,15 @@ static void gxm_batch_flush(SceGxmContext *context)
                                         (const void *)(uintptr_t)batch->draw_index_start);
         }
 
+        if (batch->fragment_program && batch->fragment_program->uses_texture_barrier) {
+            if (g_gl->glTextureBarrierNV)
+                g_gl->glTextureBarrierNV();
+            if (g_gl->glMemoryBarrier)
+                g_gl->glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT |
+                                      GL_TEXTURE_FETCH_BARRIER_BIT |
+                                      GL_FRAMEBUFFER_BARRIER_BIT);
+        }
+
         if (batch->state.instances > 1 && batch->gl_primitive != GL_POINTS)
             g_gl->glDrawElementsInstanced(batch->gl_primitive, (GLsizei)batch->index_count,
                                           batch->gl_index_type,
@@ -9148,7 +9237,7 @@ static void gxm_ensure_shaders(SceGxmContext *context)
             vp->shader = gxm_translate_shader(vp->programId->programHeader, GL_VERTEX_SHADER, "vert",
                                               vp->attributes, vp->attributeCount, fragment_formats,
                                               vertex_formats, color_format, &vp->shader_hash,
-                                              draw_index_location, &draw_uniforms);
+                                              draw_index_location, &draw_uniforms, NULL);
             vp->draw_uniform_location =
                 draw_uniforms && vp->shader ? draw_index_location : -1;
             vp->hint_signature = vs_signature;
@@ -9165,10 +9254,14 @@ static void gxm_ensure_shaders(SceGxmContext *context)
 
         /* The mask-update program is precompiled and has no GXP header. */
         if (fp->programId && (!fp->shader || fp->hint_signature != fs_signature)) {
+            bool uses_barrier = false;
+
             fp->shader = gxm_translate_shader(fp->programId->programHeader, GL_FRAGMENT_SHADER,
                                               "frag", NULL, 0, fragment_formats, vertex_formats,
-                                              color_format, &fp->shader_hash, -1, NULL);
+                                              color_format, &fp->shader_hash, -1, NULL,
+                                              &uses_barrier);
             fp->hint_signature = fs_signature;
+            fp->uses_texture_barrier = uses_barrier;
         }
     }
 }
@@ -9466,7 +9559,10 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
     }
 
     can_merge = gxm_batch_matches(context, &state, vertex_uniform_size, fragment_uniform_size);
-    if (vita2native_env_flag("VITA2NATIVE_DEBUG_NO_BATCH"))
+    /* Programmable blending via texture barrier requires a barrier between
+       consecutive draws so each draw observes the previous draw's output. */
+    if ((context->fragment_program && context->fragment_program->uses_texture_barrier) ||
+        vita2native_env_flag("VITA2NATIVE_DEBUG_NO_BATCH"))
         can_merge = false;
     if (can_merge) {
         long limit = vita2native_env_int("VITA2NATIVE_GFX_BATCH_LIMIT", -1);

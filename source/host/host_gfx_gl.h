@@ -38,6 +38,7 @@
     X(PFNGLDELETETEXTURESPROC, glDeleteTextures)                                                   \
     X(PFNGLBINDTEXTUREPROC, glBindTexture)                                                         \
     X(PFNGLTEXIMAGE2DPROC, glTexImage2D)                                                           \
+    X(PFNGLTEXSTORAGE2DPROC, glTexStorage2D)                                                       \
     X(PFNGLTEXSUBIMAGE2DPROC, glTexSubImage2D)                                                     \
     X(PFNGLTEXPARAMETERIPROC, glTexParameteri)                                                     \
     X(PFNGLTEXPARAMETERFPROC, glTexParameterf)                                                     \
@@ -108,6 +109,29 @@
     X(PFNGLBINDVERTEXARRAYPROC, glBindVertexArray)                                                  \
     X(PFNGLDELETEVERTEXARRAYSPROC, glDeleteVertexArrays)
 
+/* Optional GLES 3.1+ / extension entry points for texture-barrier blending. */
+typedef void (GL_APIENTRYP PFN_v2nBindImageTexture)(GLuint unit, GLuint texture, GLint level,
+                                                    GLboolean layered, GLint layer, GLenum access,
+                                                    GLenum format);
+typedef void (GL_APIENTRYP PFN_v2nMemoryBarrier)(GLbitfield barriers);
+typedef void (GL_APIENTRYP PFN_v2nTextureBarrierNV)(void);
+
+#ifndef GL_READ_ONLY
+#define GL_READ_ONLY 0x88B8
+#endif
+#ifndef GL_TEXTURE_FETCH_BARRIER_BIT
+#define GL_TEXTURE_FETCH_BARRIER_BIT 0x00000008
+#endif
+#ifndef GL_SHADER_IMAGE_ACCESS_BARRIER_BIT
+#define GL_SHADER_IMAGE_ACCESS_BARRIER_BIT 0x00000020
+#endif
+#ifndef GL_FRAMEBUFFER_BARRIER_BIT
+#define GL_FRAMEBUFFER_BARRIER_BIT 0x00000400
+#endif
+#ifndef GL_MAX_FRAGMENT_IMAGE_UNIFORMS
+#define GL_MAX_FRAGMENT_IMAGE_UNIFORMS 0x90CE
+#endif
+
 typedef struct HostGles {
     void *egl_lib;
     void *gles_lib;
@@ -174,6 +198,10 @@ typedef struct HostGles {
 #define HOST_GL_FIELD(type, name) type name;
     HOST_GL_FUNCTIONS(HOST_GL_FIELD)
 #undef HOST_GL_FIELD
+
+    PFN_v2nBindImageTexture glBindImageTexture;
+    PFN_v2nMemoryBarrier glMemoryBarrier;
+    PFN_v2nTextureBarrierNV glTextureBarrierNV;
 
     GLuint color_texture;
     GLuint framebuffer;

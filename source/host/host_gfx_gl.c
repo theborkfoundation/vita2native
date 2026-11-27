@@ -498,6 +498,18 @@ HostGpuDevice host_gfx_gl_create(const HostGpuConfig *config)
     HOST_GL_FUNCTIONS(HOST_GL_LOAD)
 #undef HOST_GL_LOAD
 
+    /* Optional GLES 3.1+ / extension entry points for texture-barrier blending. */
+    *(void **)(&g->glBindImageTexture) = dlsym(g->gles_lib, "glBindImageTexture");
+    if (!g->glBindImageTexture && g->eglGetProcAddress)
+        g->glBindImageTexture =
+            (PFN_v2nBindImageTexture)g->eglGetProcAddress("glBindImageTexture");
+    *(void **)(&g->glMemoryBarrier) = dlsym(g->gles_lib, "glMemoryBarrier");
+    if (!g->glMemoryBarrier && g->eglGetProcAddress)
+        g->glMemoryBarrier = (PFN_v2nMemoryBarrier)g->eglGetProcAddress("glMemoryBarrier");
+    if (g->eglGetProcAddress)
+        g->glTextureBarrierNV =
+            (PFN_v2nTextureBarrierNV)g->eglGetProcAddress("glTextureBarrierNV");
+
     version = (const char *)g->glGetString(GL_VERSION);
     renderer = (const char *)g->glGetString(GL_RENDERER);
 

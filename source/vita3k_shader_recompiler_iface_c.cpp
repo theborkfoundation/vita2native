@@ -167,6 +167,11 @@ uint32_t vita3k_gxm_texture_hint_key(uint32_t format)
            shader::get_texture_component_count(texture_format);
 }
 
+bool vita3k_gxm_program_uses_frag_color(const SceGxmProgram *program)
+{
+    return program && program->is_frag_color_used();
+}
+
 bool convert_gxp_to_spirv_c(uint32_t **spirv, uint32_t *num_instr, const SceGxmProgram *program,
                             const char *shader_name, bool support_shader_interlock,
                             bool support_texture_barrier, bool direct_fragcolor, bool spirv_shader,
