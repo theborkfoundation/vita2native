@@ -654,6 +654,8 @@ typedef struct {
     uint32_t vs_hash;
     uint32_t fs_hash;
     GLuint program;
+    /* Bit i: unit i (fragment) or 16+i (vertex) is sampled by this program. */
+    uint32_t sampled_mask;
     GLint block_vertex_data;
     GLint block_fragment_data;
     GLint block_render_vert;
@@ -1550,6 +1552,37 @@ static bool gxm_probe_frame_end(void);
 static void gxm_probe_frame_finish(void);
 static uint32_t gxm_probe_pixel(GLint x, GLint y, uint32_t width, uint32_t height);
 
+/*
+ * Which texture units this program actually samples. The recompiler gives every
+ * sampler a binding equal to its GXM unit, so the driver reports the units it
+ * linked against and everything else can be skipped per draw.
+ */
+static uint32_t gxm_program_sampled_mask(GLuint program)
+{
+    GLint count = 0;
+    uint32_t mask = 0;
+
+    if (!g_gl->glGetActiveUniform || !g_gl->glGetUniformiv)
+        return 0xffffffffu; /* cannot ask: treat every unit as used */
+
+    g_gl->glGetProgramiv(program, GL_ACTIVE_UNIFORMS, &count);
+    for (GLint i = 0; i < count; i++) {
+        char name[128] = {0};
+        GLint size = 0;
+        GLint unit = -1;
+        GLenum type = 0;
+
+        g_gl->glGetActiveUniform(program, (GLuint)i, sizeof(name), NULL, &size, &type, name);
+        if (type != GL_SAMPLER_2D && type != GL_SAMPLER_CUBE)
+            continue;
+        g_gl->glGetUniformiv(program, g_gl->glGetUniformLocation(program, name), &unit);
+        if (unit >= 0 && unit < 2 * SCE_GXM_MAX_TEXTURE_UNITS)
+            mask |= 1u << (unsigned int)unit;
+    }
+
+    return mask;
+}
+
 static GLuint gxm_get_linked_program(const SceGxmVertexProgram *vs, const SceGxmFragmentProgram *fs,
                                      GxmLinkedProgram **linked_out)
 {
@@ -1612,6 +1645,7 @@ static GLuint gxm_get_linked_program(const SceGxmVertexProgram *vs, const SceGxm
     linked->block_fragment_data = g_gl->glGetUniformBlockIndex(program, "fragmentDataType");
     linked->block_render_vert = g_gl->glGetUniformBlockIndex(program, "renderVertInfo");
     linked->block_render_frag = g_gl->glGetUniformBlockIndex(program, "renderFragInfo");
+    linked->sampled_mask = gxm_program_sampled_mask(program);
 
     /* Block bindings are static for the program's lifetime. */
     if (linked->block_vertex_data != GL_INVALID_INDEX)
@@ -2705,19 +2739,19 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
     return ok;
 }
 
-static void gxm_upload_textures(SceGxmContext *context)
+static void gxm_upload_textures(SceGxmContext *context, uint32_t sampled_mask)
 {
     for (unsigned int i = 0; i < SCE_GXM_MAX_TEXTURE_UNITS; i++) {
         const unsigned int vertex_unit = SCE_GXM_MAX_TEXTURE_UNITS + i;
 
         /*
-         * A descriptor with no data binds nothing. Skipping it avoids the
-         * lookup for the units a 2D title never touches, but a unit that was
-         * bound earlier still has to be released.
+         * Only the units this program samples need anything: a texture the
+         * shader never reads is not worth hashing, decoding or uploading, and
+         * a unit that was bound earlier still has to be released.
          */
-        if (gxm_texture_get_data(&context->fragment_textures[i]) || g_bound_texture[i])
+        if ((sampled_mask & (1u << i)) || g_bound_texture[i])
             gxm_upload_texture(&context->fragment_textures[i], i);
-        if (gxm_texture_get_data(&context->vertex_textures[i]) || g_bound_texture[vertex_unit])
+        if ((sampled_mask & (1u << vertex_unit)) || g_bound_texture[vertex_unit])
             gxm_upload_texture(&context->vertex_textures[i], vertex_unit);
     }
 }
@@ -3444,7 +3478,7 @@ static void gxm_flush_state(SceGxmContext *context, const GxmLinkedProgram *link
         prof = gxm_time_ns();
     }
 
-    gxm_upload_textures(context);
+    gxm_upload_textures(context, linked->sampled_mask);
 
     if (prof)
         g_profile_texture_ns += gxm_time_ns() - prof;
@@ -7954,8 +7988,26 @@ static void gxm_trace_uniform_diff(const char *what, const uint8_t *batch_data,
     }
 }
 
+/*
+ * Compares two descriptor arrays over the units the program samples. A change in
+ * a slot the shader never reads cannot change the draw, so it must not split
+ * the batch either.
+ */
+static bool gxm_textures_match_sampled(const SceGxmTextureInner *a, const SceGxmTextureInner *b,
+                                       uint32_t sampled_mask, unsigned int base_unit)
+{
+    for (unsigned int i = 0; i < SCE_GXM_MAX_TEXTURE_UNITS; i++) {
+        if (!(sampled_mask & (1u << (base_unit + i))))
+            continue;
+        if (memcmp(&a[i], &b[i], sizeof(a[i])) != 0)
+            return false;
+    }
+    return true;
+}
+
 static bool gxm_batch_matches(SceGxmContext *context, const GxmDrawState *state,
-                              uint32_t vertex_uniform_size, uint32_t fragment_uniform_size)
+                              uint32_t vertex_uniform_size, uint32_t fragment_uniform_size,
+                              uint32_t sampled_mask)
 {
     GxmDrawBatch *batch = &context->batch;
 
@@ -8048,12 +8100,16 @@ static bool gxm_batch_matches(SceGxmContext *context, const GxmDrawState *state,
         return false;
     }
     if (memcmp(batch->fragment_textures, context->fragment_textures,
-               sizeof(batch->fragment_textures)) != 0) {
+               sizeof(batch->fragment_textures)) != 0 &&
+        !gxm_textures_match_sampled(batch->fragment_textures, context->fragment_textures,
+                                    sampled_mask, 0)) {
         g_batch_break_texture++;
         return false;
     }
     if (memcmp(batch->vertex_textures, context->vertex_textures, sizeof(batch->vertex_textures)) !=
-        0) {
+            0 &&
+        !gxm_textures_match_sampled(batch->vertex_textures, context->vertex_textures, sampled_mask,
+                                    SCE_GXM_MAX_TEXTURE_UNITS)) {
         g_batch_break_texture++;
         return false;
     }
@@ -9664,7 +9720,8 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
         }
     }
 
-    can_merge = gxm_batch_matches(context, &state, vertex_uniform_size, fragment_uniform_size);
+    can_merge = gxm_batch_matches(context, &state, vertex_uniform_size, fragment_uniform_size,
+                                      linked ? linked->sampled_mask : 0xffffffffu);
     /* Programmable blending via texture barrier requires a barrier between
        consecutive draws so each draw observes the previous draw's output. */
     if ((context->fragment_program && context->fragment_program->uses_texture_barrier) ||
