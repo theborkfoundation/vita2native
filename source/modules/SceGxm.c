@@ -436,6 +436,8 @@ typedef struct SceGxmVertexProgram {
     GLuint shader;
     uint32_t shader_hash;
     uint32_t hint_signature;
+    /* Units this stage samples, once the first link has reported them. */
+    uint32_t sampled_mask;
     /* >= 0: the vertex attribute carrying the per-draw uniform slot. */
     int draw_uniform_location;
     int refcount;
@@ -449,6 +451,7 @@ typedef struct SceGxmFragmentProgram {
     GLuint shader;
     uint32_t shader_hash;
     uint32_t hint_signature;
+    uint32_t sampled_mask;
     bool mask_update;
     bool uses_texture_barrier;
     int refcount;
@@ -748,9 +751,11 @@ typedef struct {
     GLenum stage;
     GLuint shader;
     bool draw_uniforms;
+    uint64_t last_used;
 } GxmCachedShader;
 static GxmCachedShader g_cached_shaders[GXM_MAX_CACHED_SHADERS];
 static unsigned int g_cached_shader_count;
+static uint64_t g_cached_shader_clock;
 static SceGxmContext *g_current_context;
 static GLuint g_bound_texture[2 * SCE_GXM_MAX_TEXTURE_UNITS];
 static SceGxmTextureInner g_unit_texture[2 * SCE_GXM_MAX_TEXTURE_UNITS];
@@ -963,12 +968,18 @@ static void gxm_texture_hint_formats(const SceGxmTextureInner *textures, uint32_
         out[i] = gxm_texture_hint_format(textures ? &textures[i] : NULL);
 }
 
-static uint32_t gxm_hint_signature(const uint32_t *formats, uint32_t color_format)
+static uint32_t gxm_hint_signature(const uint32_t *formats, uint32_t color_format,
+                                   uint32_t sampled_mask)
 {
     uint32_t hash = 2166136261u;
 
     for (unsigned int i = 0; i < SCE_GXM_MAX_TEXTURE_UNITS; i++) {
-        uint32_t key = vita3k_gxm_texture_hint_key(formats[i]);
+        /*
+         * A binding the stage never samples cannot change the generated code,
+         * so it must not change the key either: it used to, and every change
+         * to an unused slot retranslated an identical shader.
+         */
+        uint32_t key = (sampled_mask & (1u << i)) ? vita3k_gxm_texture_hint_key(formats[i]) : 0;
 
         hash = gxm_hash_bytes(hash, &key, sizeof(key));
     }
@@ -1366,9 +1377,9 @@ static int gxm_program_draw_index_location(const SceGxmProgram *program)
 static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, const char *name,
                                    const SceGxmVertexAttribute *attributes, unsigned int count,
                                    const uint32_t *fragment_formats, const uint32_t *vertex_formats,
-                                   uint32_t color_format, uint32_t *hash_out,
-                                   int draw_index_location, bool *draw_uniforms_out,
-                                   bool *texture_barrier_out)
+                                   uint32_t color_format, uint32_t sampled_mask,
+                                   uint32_t *hash_out, int draw_index_location,
+                                   bool *draw_uniforms_out, bool *texture_barrier_out)
 {
     bool debug_colors = gxm_debug_program_colors();
     bool debug_texcolor = gxm_debug_texcolor();
@@ -1383,7 +1394,7 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
     for (;;) {
         uint32_t hint_signature =
             gxm_hint_signature(stage == GL_VERTEX_SHADER ? vertex_formats : fragment_formats,
-                               color_format);
+                               color_format, sampled_mask);
         uint32_t cache_hash =
             gxm_shader_cache_hash(program, stage, attributes, count, hint_signature);
         char *glsl = NULL;
@@ -1403,6 +1414,7 @@ static GLuint gxm_translate_shader(const SceGxmProgram *program, GLenum stage, c
 
         for (unsigned int i = 0; i < g_cached_shader_count; i++) {
             if (g_cached_shaders[i].hash == cache_hash && g_cached_shaders[i].stage == stage) {
+                g_cached_shaders[i].last_used = ++g_cached_shader_clock;
                 if (draw_uniforms_out)
                     *draw_uniforms_out = g_cached_shaders[i].draw_uniforms;
                 if (texture_barrier_out)
@@ -1518,12 +1530,33 @@ cache_shader:
         /* Titles such as Unity patch the same GXP blobs into fresh program objects
            every frame; recompiling each time dominated the frame and the GL shader
            object is independent of the guest-side program anyway. */
-        if (compiled && g_cached_shader_count < GXM_MAX_CACHED_SHADERS) {
-            g_cached_shaders[g_cached_shader_count].hash = cache_hash;
-            g_cached_shaders[g_cached_shader_count].stage = stage;
-            g_cached_shaders[g_cached_shader_count].shader = shader;
-            g_cached_shaders[g_cached_shader_count].draw_uniforms = draw_uniforms;
-            g_cached_shader_count++;
+        if (compiled) {
+            GxmCachedShader *entry;
+
+            if (g_cached_shader_count < GXM_MAX_CACHED_SHADERS) {
+                entry = &g_cached_shaders[g_cached_shader_count++];
+            } else {
+                /*
+                 * A full cache used to drop the shader on the floor, so it was
+                 * recompiled on every later use and never released. Evict the
+                 * least recently used entry instead: attached shaders stay
+                 * alive inside their linked programs, so deleting the object
+                 * here only frees the cache's own reference.
+                 */
+                entry = &g_cached_shaders[0];
+                for (unsigned int i = 1; i < g_cached_shader_count; i++) {
+                    if (g_cached_shaders[i].last_used < entry->last_used)
+                        entry = &g_cached_shaders[i];
+                }
+                if (entry->shader)
+                    g_gl->glDeleteShader(entry->shader);
+            }
+
+            entry->hash = cache_hash;
+            entry->stage = stage;
+            entry->shader = shader;
+            entry->draw_uniforms = draw_uniforms;
+            entry->last_used = ++g_cached_shader_clock;
         }
 
         if (draw_uniforms_out)
@@ -7902,6 +7935,29 @@ static void gxm_apply_draw_command(SceGxmContext *context, const GxmDrawCommand 
     context->back_stencil_ref = draw->back_stencil_ref;
 }
 
+/* Rewrites the stored signatures once a link has reported each stage's samplers,
+   so the next draw sees no change and does not translate the shader again. */
+static void gxm_resync_hint_signatures(SceGxmContext *context)
+{
+    uint32_t fragment_formats[SCE_GXM_MAX_TEXTURE_UNITS];
+    uint32_t vertex_formats[SCE_GXM_MAX_TEXTURE_UNITS];
+    uint32_t color_format = context->color_surface
+                                ? (uint32_t)context->color_surface->colorFormat
+                                : (uint32_t)SCE_GXM_COLOR_FORMAT_U8U8U8U8_ABGR;
+    SceGxmVertexProgram *vp = (SceGxmVertexProgram *)context->vertex_program;
+    SceGxmFragmentProgram *fp = (SceGxmFragmentProgram *)context->fragment_program;
+
+    gxm_texture_hint_formats(context->fragment_textures, fragment_formats);
+    gxm_texture_hint_formats(context->vertex_textures, vertex_formats);
+
+    if (vp && vp->shader)
+        vp->hint_signature = gxm_hint_signature(vertex_formats, color_format,
+                                                vp->sampled_mask ? vp->sampled_mask : 0xffffffffu);
+    if (fp && fp->shader)
+        fp->hint_signature = gxm_hint_signature(fragment_formats, color_format,
+                                                fp->sampled_mask ? fp->sampled_mask : 0xffffffffu);
+}
+
 static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
                            SceGxmIndexFormat indexType, const void *indexData,
                            unsigned int indexCount, unsigned int instances);
@@ -9365,6 +9421,8 @@ static void gxm_ensure_shaders(SceGxmContext *context)
                                 : (uint32_t)SCE_GXM_COLOR_FORMAT_U8U8U8U8_ABGR;
     uint32_t vs_signature;
     uint32_t fs_signature;
+    uint32_t vs_mask;
+    uint32_t fs_mask;
 
     if (context->shader_ready && context->shader_generation == context->texture_generation &&
         context->shader_color_format == color_format &&
@@ -9372,10 +9430,20 @@ static void gxm_ensure_shaders(SceGxmContext *context)
         context->shader_fragment_program == (const void *)context->fragment_program)
         return;
 
+    {
+        const SceGxmVertexProgram *known_vp = (const SceGxmVertexProgram *)context->vertex_program;
+        const SceGxmFragmentProgram *known_fp =
+            (const SceGxmFragmentProgram *)context->fragment_program;
+
+        /* Zero means "not known yet": key on every unit until a link reports. */
+        vs_mask = known_vp && known_vp->sampled_mask ? known_vp->sampled_mask : 0xffffffffu;
+        fs_mask = known_fp && known_fp->sampled_mask ? known_fp->sampled_mask : 0xffffffffu;
+    }
+
     gxm_texture_hint_formats(context->fragment_textures, fragment_formats);
     gxm_texture_hint_formats(context->vertex_textures, vertex_formats);
-    vs_signature = gxm_hint_signature(vertex_formats, color_format);
-    fs_signature = gxm_hint_signature(fragment_formats, color_format);
+    vs_signature = gxm_hint_signature(vertex_formats, color_format, vs_mask);
+    fs_signature = gxm_hint_signature(fragment_formats, color_format, fs_mask);
 
     if (context->vertex_program) {
         SceGxmVertexProgram *vp = (SceGxmVertexProgram *)context->vertex_program;
@@ -9386,8 +9454,9 @@ static void gxm_ensure_shaders(SceGxmContext *context)
 
             vp->shader = gxm_translate_shader(vp->programId->programHeader, GL_VERTEX_SHADER, "vert",
                                               vp->attributes, vp->attributeCount, fragment_formats,
-                                              vertex_formats, color_format, &vp->shader_hash,
-                                              draw_index_location, &draw_uniforms, NULL);
+                                              vertex_formats, color_format, vs_mask,
+                                              &vp->shader_hash, draw_index_location,
+                                              &draw_uniforms, NULL);
             vp->draw_uniform_location =
                 draw_uniforms && vp->shader ? draw_index_location : -1;
             vp->hint_signature = vs_signature;
@@ -9408,7 +9477,7 @@ static void gxm_ensure_shaders(SceGxmContext *context)
 
             fp->shader = gxm_translate_shader(fp->programId->programHeader, GL_FRAGMENT_SHADER,
                                               "frag", NULL, 0, fragment_formats, vertex_formats,
-                                              color_format, &fp->shader_hash, -1, NULL,
+                                              color_format, fs_mask, &fp->shader_hash, -1, NULL,
                                               &uses_barrier);
             fp->hint_signature = fs_signature;
             fp->uses_texture_barrier = uses_barrier;
@@ -9498,6 +9567,30 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
     gxm_ensure_shaders(context);
 
     program = gxm_get_linked_program(context->vertex_program, context->fragment_program, &linked);
+    if (program && linked) {
+        SceGxmVertexProgram *vp = (SceGxmVertexProgram *)context->vertex_program;
+        SceGxmFragmentProgram *fp = (SceGxmFragmentProgram *)context->fragment_program;
+        bool changed = false;
+
+        if (vp) {
+            uint32_t mask = linked->sampled_mask >> SCE_GXM_MAX_TEXTURE_UNITS;
+
+            if (mask && vp->sampled_mask != mask) {
+                vp->sampled_mask = mask;
+                changed = true;
+            }
+        }
+        if (fp) {
+            uint32_t mask = linked->sampled_mask & 0xffffu;
+
+            if (mask && fp->sampled_mask != mask) {
+                fp->sampled_mask = mask;
+                changed = true;
+            }
+        }
+        if (changed)
+            gxm_resync_hint_signatures(context);
+    }
     if (!program) {
         if (vita2native_env_flag("VITA2NATIVE_DEBUG_DRAW_ERRORS")) {
             static unsigned int logged;
