@@ -301,6 +301,18 @@ typedef struct SceGxmContext {
     bool in_scene;
     bool discard; /* frame skip: drop this frame's draws */
 
+    /*
+     * What the last gxm_ensure_shaders() call covered. Building the hint
+     * signature hashes sixteen units for both stages, which is pure overhead
+     * for the hundreds of draws a frame issues with the same state.
+     */
+    uint32_t texture_generation;
+    uint32_t shader_generation;
+    uint32_t shader_color_format;
+    const void *shader_vertex_program;
+    const void *shader_fragment_program;
+    bool shader_ready;
+
     const SceGxmRenderTarget *render_target;
     const SceGxmColorSurfaceInner *color_surface;
     const SceGxmDepthStencilSurface *ds_surface;
@@ -1766,6 +1778,17 @@ static uint64_t gxm_time_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+/* The clock calls only feed the profile report; skip them when nobody reads it. */
+static int gxm_profile_active(void)
+{
+    static int active = -1;
+
+    if (active < 0)
+        active = frame_profile_enabled() || vita2native_env_flag("VITA2NATIVE_DEBUG_PROFILE");
+    return active;
+}
+
+
 static int gxm_color_alias_enabled(void)
 {
     static int enabled = -1;
@@ -2685,8 +2708,17 @@ static bool gxm_upload_texture(const SceGxmTextureInner *texture, unsigned int u
 static void gxm_upload_textures(SceGxmContext *context)
 {
     for (unsigned int i = 0; i < SCE_GXM_MAX_TEXTURE_UNITS; i++) {
-        gxm_upload_texture(&context->fragment_textures[i], i);
-        gxm_upload_texture(&context->vertex_textures[i], SCE_GXM_MAX_TEXTURE_UNITS + i);
+        const unsigned int vertex_unit = SCE_GXM_MAX_TEXTURE_UNITS + i;
+
+        /*
+         * A descriptor with no data binds nothing. Skipping it avoids the
+         * lookup for the units a 2D title never touches, but a unit that was
+         * bound earlier still has to be released.
+         */
+        if (gxm_texture_get_data(&context->fragment_textures[i]) || g_bound_texture[i])
+            gxm_upload_texture(&context->fragment_textures[i], i);
+        if (gxm_texture_get_data(&context->vertex_textures[i]) || g_bound_texture[vertex_unit])
+            gxm_upload_texture(&context->vertex_textures[i], vertex_unit);
     }
 }
 
@@ -3204,7 +3236,7 @@ static void gxm_flush_state(SceGxmContext *context, const GxmLinkedProgram *link
                                   ? context->color_surface->height
                                   : 544;
     bool both_side_disabled;
-    uint64_t prof = gxm_time_ns();
+    uint64_t prof = gxm_profile_active() ? gxm_time_ns() : 0;
 
     g_gl->glUseProgram(program);
 
@@ -3407,12 +3439,15 @@ static void gxm_flush_state(SceGxmContext *context, const GxmLinkedProgram *link
                               (b->colorMask & SCE_GXM_COLOR_MASK_A) ? GL_TRUE : GL_FALSE);
     }
 
-    g_profile_state_ns += gxm_time_ns() - prof;
-    prof = gxm_time_ns();
+    if (prof) {
+        g_profile_state_ns += gxm_time_ns() - prof;
+        prof = gxm_time_ns();
+    }
 
     gxm_upload_textures(context);
 
-    g_profile_texture_ns += gxm_time_ns() - prof;
+    if (prof)
+        g_profile_texture_ns += gxm_time_ns() - prof;
     prof = gxm_time_ns();
 
     /* Vertex attributes read from the per-stream arenas; stream_starts are the
@@ -4740,7 +4775,18 @@ EXPORT(SceGxm, 0x9EB4380F, int, sceGxmSetVertexTexture, SceGxmContext *context,
 {
     if (textureIndex >= SCE_GXM_MAX_TEXTURE_UNITS)
         return SCE_GXM_ERROR_INVALID_VALUE;
-    context->vertex_textures[textureIndex] = *(const SceGxmTextureInner *)texture;
+    {
+        /*
+         * The shader signature depends only on the per-unit hint format, so a
+         * title that rebinds the same texture every draw does not invalidate
+         * the translated shaders.
+         */
+        uint32_t before = gxm_texture_hint_format(&context->vertex_textures[textureIndex]);
+
+        context->vertex_textures[textureIndex] = *(const SceGxmTextureInner *)texture;
+        if (gxm_texture_hint_format(&context->vertex_textures[textureIndex]) != before)
+            context->texture_generation++;
+    }
     return 0;
 }
 
@@ -6771,7 +6817,13 @@ EXPORT(SceGxm, 0x29C34DF5, int, sceGxmSetFragmentTexture, SceGxmContext *context
 {
     if (textureIndex >= SCE_GXM_MAX_TEXTURE_UNITS)
         return SCE_GXM_ERROR_INVALID_VALUE;
-    context->fragment_textures[textureIndex] = *(const SceGxmTextureInner *)texture;
+    {
+        uint32_t before = gxm_texture_hint_format(&context->fragment_textures[textureIndex]);
+
+        context->fragment_textures[textureIndex] = *(const SceGxmTextureInner *)texture;
+        if (gxm_texture_hint_format(&context->fragment_textures[textureIndex]) != before)
+            context->texture_generation++;
+    }
     return 0;
 }
 
@@ -9258,6 +9310,12 @@ static void gxm_ensure_shaders(SceGxmContext *context)
     uint32_t vs_signature;
     uint32_t fs_signature;
 
+    if (context->shader_ready && context->shader_generation == context->texture_generation &&
+        context->shader_color_format == color_format &&
+        context->shader_vertex_program == (const void *)context->vertex_program &&
+        context->shader_fragment_program == (const void *)context->fragment_program)
+        return;
+
     gxm_texture_hint_formats(context->fragment_textures, fragment_formats);
     gxm_texture_hint_formats(context->vertex_textures, vertex_formats);
     vs_signature = gxm_hint_signature(vertex_formats, color_format);
@@ -9300,6 +9358,17 @@ static void gxm_ensure_shaders(SceGxmContext *context)
             fp->uses_texture_barrier = uses_barrier;
         }
     }
+
+    context->shader_generation = context->texture_generation;
+    context->shader_color_format = color_format;
+    context->shader_vertex_program = (const void *)context->vertex_program;
+    context->shader_fragment_program = (const void *)context->fragment_program;
+    /* A program whose translation failed keeps being retried, as before. */
+    context->shader_ready =
+        (!context->vertex_program ||
+         ((const SceGxmVertexProgram *)context->vertex_program)->shader != 0) &&
+        (!context->fragment_program ||
+         ((const SceGxmFragmentProgram *)context->fragment_program)->shader != 0);
 }
 
 static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
@@ -9316,7 +9385,7 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
     SceGxmPolygonMode polygon_mode;
     GxmDrawState state;
     bool can_merge;
-    uint64_t draw_started = gxm_time_ns();
+    uint64_t draw_started = gxm_profile_active() ? gxm_time_ns() : 0;
 
     gxm_trace_draw("draw", context, (unsigned int)primType, indexCount, instances, indexData);
 
@@ -9514,7 +9583,8 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
                                  (const void *)(uintptr_t)wire_offset);
             g_profile_draws++;
             g_profile_vertices += indexCount;
-            g_profile_draw_ns += gxm_time_ns() - draw_started;
+            if (draw_started)
+                g_profile_draw_ns += gxm_time_ns() - draw_started;
         }
         return 0;
     }
@@ -9685,7 +9755,7 @@ static int gxm_draw_common(SceGxmContext *context, SceGxmPrimitiveType primType,
         }
     }
 
-    {
+    if (draw_started) {
         uint64_t draw_ns = gxm_time_ns() - draw_started;
 
         g_profile_draw_ns += draw_ns;
