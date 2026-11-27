@@ -182,6 +182,10 @@ typedef struct {
     uint32_t format;
     uint32_t mip_count;
     uint32_t gamma_mode;
+    /* Geometry the decode depends on: the same bytes under two descriptors
+       with different dimensions, layout or stride decode differently. */
+    uint32_t type;
+    uint32_t stride;
     uint32_t hash;
     uint64_t hash_frame;
     uint64_t hash_checked_frame;
@@ -1937,16 +1941,44 @@ static GxmTextureCache *gxm_texture_cache_find(const SceGxmTextureInner *texture
     uint32_t format = (uint32_t)gxm_texture_get_format(texture);
     uint32_t mip_count = gxm_texture_true_mip_count(texture);
     const void *palette = (const void *)(uintptr_t)(texture->palette_addr << 6);
+    uint32_t type = (uint32_t)gxm_texture_get_type(texture);
+    uint32_t width = (uint32_t)gxm_texture_get_width(texture);
+    uint32_t height = (uint32_t)gxm_texture_get_height(texture);
+    uint32_t stride = type == SCE_GXM_TEXTURE_LINEAR_STRIDED
+                          ? (uint32_t)gxm_texture_get_stride_in_bytes(texture)
+                          : 0;
 
     for (unsigned int i = 0; i < GXM_TEXTURE_CACHE_SLOTS; i++) {
         GxmTextureCache *cache = &g_texture_cache[i];
 
         if (!cache->valid)
             continue;
+        /*
+         * Everything the decoder reads is part of the key. A descriptor is not
+         * identified by its address: a title can view one allocation as a
+         * larger atlas and as a smaller sub-view, or through a strided window,
+         * and those decode to different pixels.
+         */
         if (cache->data == data && cache->target == target && cache->format == format &&
             cache->mip_count == mip_count && cache->gamma_mode == texture->gamma_mode &&
-            cache->palette == palette)
-            return cache;
+            cache->palette == palette) {
+            if (cache->width == width && cache->height == height && cache->type == type &&
+                cache->stride == stride)
+                return cache;
+
+            /* The old key matched here and would have reused the wrong pixels. */
+            {
+                static unsigned int logged;
+
+                if (logged < 8) {
+                    LOG("SceGxm: texture cache geometry clash at %p: %ux%u type %u stride %u "
+                        "against %ux%u type %u stride %u",
+                        data, cache->width, cache->height, cache->type, cache->stride, width,
+                        height, type, stride);
+                    logged++;
+                }
+            }
+        }
     }
 
     return NULL;
@@ -2615,6 +2647,10 @@ static bool gxm_upload_texture_inner(const SceGxmTextureInner *texture, unsigned
     cache->format = (uint32_t)gxm_texture_get_format(texture);
     cache->mip_count = mip_count;
     cache->gamma_mode = texture->gamma_mode;
+    cache->type = (uint32_t)gxm_texture_get_type(texture);
+    cache->stride = cache->type == SCE_GXM_TEXTURE_LINEAR_STRIDED
+                        ? (uint32_t)gxm_texture_get_stride_in_bytes(texture)
+                        : 0;
     cache->hash = hash;
     cache->hash_frame = g_gxm_frame;
     cache->hash_checked_frame = g_gxm_frame;
